@@ -12,7 +12,8 @@ services:
   postgres:
     image: pgvector/pgvector:pg18
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    stop_grace_period: 30s
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-goclaw}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goclaw}
@@ -24,6 +25,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
     restart: unless-stopped
 
   goclaw:
@@ -34,8 +40,9 @@ services:
       - GOCLAW_POSTGRES_DSN=postgres://${POSTGRES_USER:-goclaw}:${POSTGRES_PASSWORD:-goclaw}@postgres:5432/${POSTGRES_DB:-goclaw}?sslmode=disable
     volumes:
       - goclaw-skills:/app/skills
-      - goclaw-workspace:/app/.goclaw
+      - goclaw-dotdir:/app/.goclaw
 
 volumes:
   postgres-data:
   goclaw-skills:
+  goclaw-dotdir:

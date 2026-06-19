@@ -1,0 +1,51 @@
+# Local override for the daily-report agent (GoClaw × Claude CLI × Zalo).
+# Use this INSTEAD of docker-compose.claude-cli.yml. It:
+#   - builds a THIN derived image (Dockerfile.claude-cli: prebuilt v3.14.0 + claude CLI),
+#     so no slow from-source rebuild and the exact v3.14.0 binary is preserved
+#   - mounts the WINDOWS host ~/.claude (Docker Desktop path) so the in-container `claude`
+#     authenticates (entrypoint copies .credentials.json) AND can read projects/**/*.jsonl
+#   - shares the goclaw-workspace volume into the Chrome sidecar so HTML render via
+#     file:// works across containers (P4 in the plan)
+#
+# Requires the browser sidecar (defines the `chrome` service).
+#
+# Usage (build once, then up):
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.postgres.yml \
+#     -f docker-compose.browser.yml \
+#     -f docker-compose.claude-cli.local.yml \
+#     up -d --build
+#
+# Verify after up:
+#   docker compose ... exec goclaw ls /app/.claude-host/projects   # P2 mount
+#   docker compose ... exec goclaw claude -p "ping"                # P1 auth
+#
+# ⚠️ MOUNT SOURCE: this host runs Docker Desktop (WSL2 backend) and compose is invoked
+#    from Windows, so the bind source is the Windows path. Verified the user's Claude Code
+#    sessions + .credentials.json live at C:\Users\truon\.claude. If your home differs,
+#    edit `source` below. (Long-form bind avoids the C:\ colon being parsed as a separator.)
+
+services:
+  goclaw:
+    image: goclaw-claude-cli:local
+    build:
+      context: .
+      dockerfile: Dockerfile.claude-cli
+    volumes:
+      - type: bind
+        source: "C:/Users/truon/.claude"
+        target: /app/.claude-host
+        read_only: true
+      # Windows-host ~/.codex (ChatGPT OAuth tokens) — for GPT Image generation via the
+      # codex subscription image_generation tool (no OpenAI API key needed).
+      - type: bind
+        source: "C:/Users/truon/.codex"
+        target: /app/.codex-host
+        read_only: true
+
+  chrome:
+    # Shared read-only view of the agent workspace so the sidecar can open
+    # file:///app/workspace/<agent>/daily-report/render/report.html written by GoClaw.
+    volumes:
+      - goclaw-workspace:/app/workspace:ro

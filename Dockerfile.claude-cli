@@ -1,0 +1,15 @@
+# Thin derived image: adds the Claude CLI on top of the prebuilt GoClaw image.
+# Avoids a full from-source rebuild (keeps the exact v3.14.0 binary + embedded web UI).
+# The base image already ships the entrypoint logic that copies
+# /app/.claude-host/.credentials.json -> /app/data/.claude (see docker-entrypoint.sh).
+# Built via docker-compose.claude-cli.local.yml (image: goclaw-claude-cli:local).
+FROM ghcr.io/nextlevelbuilder/goclaw:v3.14.0
+
+# Entrypoint runs as root; install node + claude CLI globally so `claude` is on PATH.
+# jq + bash + coreutils are required by GoClaw's Claude CLI PreToolUse security hooks
+# (internal/providers/claude_cli_hooks.go: #!/bin/bash script that parses tool input via jq
+#  and resolves paths via realpath). Without them every claude tool call's hook breaks.
+RUN apk add --no-cache nodejs npm jq bash coreutils \
+    && npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@^2.1.91 \
+    && rm -rf /tmp/npm-cache /root/.cache /var/cache/apk/* \
+    && claude --version && jq --version && bash --version | head -1

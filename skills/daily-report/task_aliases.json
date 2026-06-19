@@ -1,0 +1,20 @@
+{
+  "_comment": "Map session (Claude Code) -> task chuẩn. 'match' = các chuỗi (lowercase) nhận diện trong TÊN session hoặc intent. 'task' = tên hiển thị trong báo cáo. 'sheet' (tùy chọn) = tên task ĐÚNG như trong sheet (để khớp dòng update %); bỏ trống nếu giống 'task' hoặc là task mới (sẽ append). 'ignore': true = session việc vặt, KHÔNG lên báo cáo. User maintain file này khi có session/task mới.",
+  "aliases": [
+    {"match": ["product-manager", "product manager", "ai pm", "oscar"], "task": "AI Product Manager Oscar", "sheet": ""},
+    {"match": ["daily-launch-reminder", "ra mắt sản phẩm", "lịch ra mắt", "launch-reminder"], "task": "Nhắc Lịch ra mắt sản phẩm", "sheet": "Nhắc Lịch ra mắc sản phẩm"},
+    {"match": ["dynamic-pricing", "dynamic pricing"], "task": "AI Dynamic Pricing", "sheet": "AI Dynamic Pricing"},
+    {"match": ["pcs", "lms", "hr confirmation", "course classification", "training"], "task": "AI Training", "sheet": "AI Training"},
+    {"match": ["perf-coordinator", "performance coordinator", "perf coordinator"], "task": "Performance Coordinator", "sheet": "Performance Coordinator"},
+    {"match": ["purchasing-osc", "purchasing osc"], "task": "AI Purchasing", "sheet": "AI Purchasing"},
+    {"match": ["material-controller", "material control"], "task": "AI Material Controller", "sheet": "AI Material Controller"},
+    {"match": ["world-cup", "worldcup", "world cup"], "task": "Đăng bài tự động fb World Cup", "sheet": "Đăng bài tự động fb World Cup"},
+    {"match": ["geo-repost", "geo repost", "store-fb-repost", "store fb repost", "fanpage repost", "pierre-cardin-geo"], "task": "AI Store Fanpage Repost", "sheet": "AI Store Fanpage Repost"},
+    {"match": ["digital content", "marketing workflow", "6page", "digital-content"], "task": "Đăng bài tự động 6page Digital Content", "sheet": "Đăng bài tự động 6page Digital Content"},
+    {"match": ["ai-ads-9-stage-automation", "ads-9-stage", "9-stage", "ads manager", "ads-manager"], "task": "Ads Manager 9 stage", "sheet": "Ads Manager 9 stage"},
+    {"match": ["n8n-facebook-video-metrics-collector", "video-metrics", "metrics-collector", "kéo metrics", "kéo mectrics"], "task": "Tool kéo metrics post video & campaign", "sheet": "Tool kéo mectrics post video và campaing về sheet"},
+    {"match": ["seo-manager", "seo manager", "nâng cấp seo", "fix seo"], "task": "Nâng cấp SEO", "sheet": "Nâng cấp SEO"},
+    {"match": ["ai-news-digest-zalo-ceo", "news-digest", "news digest", "ai research tin", "research tin tức", "tin tức gửi"], "task": "AI research tin tức gửi hằng ngày", "sheet": "AI research tin tức gửi hằng ngày"},
+    {"match": ["cleanup-n8n-ec2-disk", "ec2-disk", "disk-full", "cleanup-n8n"], "task": "", "ignore": true}
+  ]
+}
