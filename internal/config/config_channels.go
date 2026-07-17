@@ -210,6 +210,20 @@ type ZaloPersonalConfig struct {
 	CredentialsPath string              `json:"credentials_path,omitempty"` // path to saved cookies JSON
 	BlockReply      *bool               `json:"block_reply,omitempty"`      // override gateway block_reply (nil = inherit)
 	ChatBehavior    *ChatBehaviorConfig `json:"chat_behavior,omitempty"`    // override gateway chat behavior (nil = inherit)
+
+	// Per-group overrides. Key is the Zalo group ID, or "*" for wildcard defaults.
+	// Mirrors the Telegram Groups pattern: global → "*" → specific group.
+	Groups map[string]*ZaloGroupConfig `json:"groups,omitempty"`
+}
+
+// ZaloGroupConfig defines per-group overrides for a Zalo Personal channel.
+// Enables per-group access control (e.g. group X open to all members, group Y
+// restricted to specific sender IDs) which the flat allow_from cannot express.
+type ZaloGroupConfig struct {
+	GroupPolicy    string              `json:"group_policy,omitempty"`    // override group policy for this group
+	RequireMention *bool               `json:"require_mention,omitempty"` // override require_mention for this group
+	AllowFrom      FlexibleStringSlice `json:"allow_from,omitempty"`      // sender IDs allowed in this group (policy "allowlist")
+	Enabled        *bool               `json:"enabled,omitempty"`         // disable bot for this group (default: true)
 }
 
 type FeishuConfig struct {

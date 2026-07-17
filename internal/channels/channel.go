@@ -377,7 +377,9 @@ func (c *BaseChannel) CheckGroupPolicy(ctx context.Context, senderID, chatID, gr
 	case "disabled":
 		return PolicyDeny
 	case "allowlist":
-		if c.IsAllowed(senderID) {
+		// allow_from may list group chat IDs (allow the whole group) or
+		// individual sender IDs — accept either.
+		if c.IsAllowed(chatID) || c.IsAllowed(senderID) {
 			return PolicyAllow
 		}
 		return PolicyDeny
