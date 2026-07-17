@@ -86,8 +86,11 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 		return
 	}
 
+	// Resolve per-group overrides (global → "*" → specific group).
+	groupCfg := resolveGroupConfig(c.config, threadID)
+
 	// Step 1: enforce access policy (allowlist/pairing). Hard reject — don't record history.
-	if !c.checkGroupPolicy(ctx, senderID, threadID) {
+	if !c.checkGroupPolicy(ctx, senderID, threadID, groupCfg) {
 		return
 	}
 
@@ -97,7 +100,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 	}
 
 	// Step 2: @mention gating — record non-mentioned messages in history and return.
-	if c.RequireMention() {
+	if groupCfg.requireMentionOrDefault() {
 		wasMentioned := c.checkBotMentioned(msg.Data.Mentions)
 		if !wasMentioned {
 			c.GroupHistory().Record(threadID, channels.HistoryEntry{

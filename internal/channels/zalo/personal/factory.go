@@ -28,6 +28,7 @@ type zaloInstanceConfig struct {
 	AllowFrom      []string                   `json:"allow_from,omitempty"`
 	BlockReply     *bool                      `json:"block_reply,omitempty"`
 	ChatBehavior   *config.ChatBehaviorConfig `json:"chat_behavior,omitempty"`
+	Groups         map[string]*config.ZaloGroupConfig `json:"groups,omitempty"`
 }
 
 // Factory creates a Zalo Personal channel from DB instance data.
@@ -64,6 +65,7 @@ func Factory(name string, creds json.RawMessage, cfg json.RawMessage,
 		HistoryLimit:   ic.HistoryLimit,
 		BlockReply:     ic.BlockReply,
 		ChatBehavior:   ic.ChatBehavior,
+		Groups:         ic.Groups,
 	}
 
 	ch, err := New(zaloCfg, msgBus, pairingSvc, nil)
@@ -115,6 +117,7 @@ func FactoryWithPendingStore(pendingStore store.PendingMessageStore) channels.Ch
 			HistoryLimit:   ic.HistoryLimit,
 			BlockReply:     ic.BlockReply,
 			ChatBehavior:   ic.ChatBehavior,
+			Groups:         ic.Groups,
 		}
 
 		ch, err := New(zaloCfg, msgBus, pairingSvc, pendingStore)
