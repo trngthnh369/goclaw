@@ -1,7 +1,8 @@
 {
   "_comment": "Map session (Claude Code) -> task chuẩn. 'match' = các chuỗi (lowercase) nhận diện trong TÊN session hoặc intent. 'task' = tên hiển thị trong báo cáo. 'sheet' (tùy chọn) = tên task ĐÚNG như trong sheet (để khớp dòng update %); bỏ trống nếu giống 'task' hoặc là task mới (sẽ append). 'ignore': true = session việc vặt, KHÔNG lên báo cáo. User maintain file này khi có session/task mới.",
   "aliases": [
-    {"match": ["product-manager", "product manager", "ai pm", "oscar"], "task": "AI Product Manager Oscar", "sheet": ""},
+    {"match": ["product-manager", "product manager", "ai pm", "oscar"], "task": "AI Oscar Product Manager", "sheet": "AI Oscar Product Manager"},
+    {"match": ["ai-recruitment-publisher", "recruitment-publisher", "job posting", "tuyển dụng", "tuyen dung", "recruitment", "company culture"], "task": "AI Đăng bài tuyển dụng", "sheet": "AI Đăng bài tuyển dụng"},
     {"match": ["daily-launch-reminder", "ra mắt sản phẩm", "lịch ra mắt", "launch-reminder"], "task": "Nhắc Lịch ra mắt sản phẩm", "sheet": "Nhắc Lịch ra mắc sản phẩm"},
     {"match": ["dynamic-pricing", "dynamic pricing"], "task": "AI Dynamic Pricing", "sheet": "AI Dynamic Pricing"},
     {"match": ["pcs", "lms", "hr confirmation", "course classification", "training"], "task": "AI Training", "sheet": "AI Training"},

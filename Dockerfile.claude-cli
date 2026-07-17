@@ -3,7 +3,9 @@
 # The base image already ships the entrypoint logic that copies
 # /app/.claude-host/.credentials.json -> /app/data/.claude (see docker-entrypoint.sh).
 # Built via docker-compose.claude-cli.local.yml (image: goclaw-claude-cli:local).
-FROM ghcr.io/nextlevelbuilder/goclaw:v3.14.0
+# Base switched to locally-patched build (v3.14.0 + group allowlist fix in
+# CheckGroupPolicy — allow_from now matches group chat IDs, not only sender IDs).
+FROM goclaw:v3.14.0-allowlist-fix
 
 # Entrypoint runs as root; install node + claude CLI globally so `claude` is on PATH.
 # jq + bash + coreutils are required by GoClaw's Claude CLI PreToolUse security hooks

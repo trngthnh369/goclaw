@@ -134,10 +134,32 @@ def write_progress(tab: dict, pct_col: str, updates: list, new_tasks: list) -> d
         result["updated"] += 1
 
     if to_append:
-        next_stt = len(existing) + 1
-        rows = [[str(next_stt + i), nt["name"], "", nt.get("status", "WIP"),
+        # continue numbering from the MAX existing STT (not row count) so appended rows never
+        # collide with non-contiguous STT values already in the sheet.
+        max_stt = max((int(t["stt"]) for t in existing
+                       if str(t.get("stt", "")).strip().isdigit()), default=len(existing))
+        rows = [[str(max_stt + 1 + i), nt["name"], "", nt.get("status", "WIP"),
                  f"{nt.get('percent', 0)}%", nt.get("note", "")]
                 for i, nt in enumerate(to_append)]
         sc.append_rows(SPREADSHEET_ID, f"{title}!A1", rows)
         result["appended"] = len(rows)
+
+    # Force the % column to render as percent. USER_ENTERED parses "50%" -> the number 0.5; freshly
+    # appended rows lack the percent cell-format, so they'd show "0.5" instead of "50%". Re-applying
+    # percent format to the whole column keeps every row (updated + appended) consistent.
+    col_idx = 0
+    for ch in pct_col:
+        col_idx = col_idx * 26 + (ord(ch) - 64)
+    col_idx -= 1
+    try:
+        sc.batch_update(SPREADSHEET_ID, [{
+            "repeatCell": {
+                "range": {"sheetId": tab["sheetId"], "startRowIndex": 1, "endRowIndex": 200,
+                          "startColumnIndex": col_idx, "endColumnIndex": col_idx + 1},
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0%"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            },
+        }])
+    except Exception:  # noqa: BLE001  (formatting is cosmetic — never fail the write over it)
+        pass
     return result

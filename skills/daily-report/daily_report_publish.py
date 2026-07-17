@@ -18,7 +18,22 @@ WORK = "/app/workspace/_daily-report"
 ACTIVE = f"{WORK}/active.json"
 REPORT = f"{WORK}/report.json"
 BASE = os.environ.get("GOCLAW_SELF_URL", "http://127.0.0.1:18790")
-TOKEN = os.environ.get("GOCLAW_GATEWAY_TOKEN", "")
+
+
+def _resolve_token() -> str:
+    """Gateway token. Agent (Zip) exec env in GoClaw v3.14+ does NOT expose GOCLAW_GATEWAY_TOKEN
+    (security) → gateway 401s. Fall back to the chmod-600 token file in the workspace volume."""
+    t = os.environ.get("GOCLAW_GATEWAY_TOKEN", "")
+    if t:
+        return t
+    try:
+        with open("/app/workspace/_daily-report/.gwtoken", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+TOKEN = _resolve_token()
 
 ZALO_CHANNEL = "zalo-personal-bot"
 ZALO_GROUP = "8709947833571143663"  # TEAM AI

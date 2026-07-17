@@ -216,3 +216,14 @@ agents/agents/
 __pycache__/
 *.pyc
 skills/*/_preview/
+
+# CLIProxyAPI sidecar (Antigravity) — config contains proxy API key
+cliproxy/
+
+# Per-developer handoff state (never commit)
+.handoff/
+
+# daily-report runtime artifacts
+skills/daily-report/_daily-report.log
+skills/daily-report/_preview/
+skills/daily-report/__pycache__/

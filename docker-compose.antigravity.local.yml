@@ -1,0 +1,62 @@
+# Antigravity (Google Ultra) → GoClaw via CLIProxyAPI sidecar.
+# APPEND this file to the FULL current flag set — NEVER a reduced set (a partial `up`
+# recreates goclaw from the base image and silently breaks daily-report):
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.postgres.yml \
+#     -f docker-compose.browser.yml \
+#     -f docker-compose.claude-cli.local.yml \
+#     -f docker-compose.antigravity.local.yml \
+#     up -d
+#
+# One-time OAuth login (safe — `run --rm` does not touch running services):
+#   docker compose <same -f set> run --rm -p 51121:51121 cliproxy \
+#     /CLIProxyAPI/CLIProxyAPI -antigravity-login -no-browser -oauth-callback-port 51121
+#
+# Image pinned by DIGEST (v7.2.50, built 2026-07-03) — provenance confirmed:
+# help.router-for.me/docker/docker.html documents eceasy/cli-proxy-api as the official image.
+# No healthcheck: the image has no wget/curl and /v1/models is api-key-gated; health is
+# covered by authenticated smoke tests (see plan Verification).
+
+services:
+  # Deployed v3.14.0 hardened validateProviderURL (resolves DNS → rejects private IPs),
+  # so the provider row is stored with EMPTY api_base and inherits this config-level
+  # base via resolveAPIBase → APIBaseForType("openai_compat") → Providers.OpenAI.APIBase
+  # (env overlay GOCLAW_OPENAI_BASE_URL, internal/config/config_load.go:98).
+  # Verified: no other openai_compat/openai-type provider row has an empty api_base.
+  goclaw:
+    environment:
+      - GOCLAW_OPENAI_BASE_URL=http://cliproxy:8317/v1
+
+  cliproxy:
+    image: eceasy/cli-proxy-api@sha256:b20735fc7cc602e2487568757fbead6bc7a4a788902924fa24ed4dd62f1183a5
+    command: ["/CLIProxyAPI/CLIProxyAPI", "-config", "/CLIProxyAPI/config.yaml"]
+    volumes:
+      - type: bind
+        source: ./cliproxy/config.yaml
+        target: /CLIProxyAPI/config.yaml
+        read_only: true
+      - cliproxy-auth:/root/.cli-proxy-api
+    # NO ports: — reachable only from goclaw-net (GoClaw calls http://cliproxy:8317/v1)
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+volumes:
+  cliproxy-auth:

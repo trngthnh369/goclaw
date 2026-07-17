@@ -31,7 +31,23 @@ BUILD = f"{WORK}/build_and_render.py"
 PNG_PATH = f"{WORK}/render/report.png"
 
 BASE = os.environ.get("GOCLAW_SELF_URL", "http://127.0.0.1:18790")
-TOKEN = os.environ.get("GOCLAW_GATEWAY_TOKEN", "")
+
+
+def _resolve_token() -> str:
+    """Gateway token. When the agent (Zip) runs these scripts via its exec tool, GoClaw v3.14+
+    does NOT expose GOCLAW_GATEWAY_TOKEN to the exec env (security), so the gateway call 401s.
+    Fall back to a chmod-600 token file written into the (container-only) workspace volume."""
+    t = os.environ.get("GOCLAW_GATEWAY_TOKEN", "")
+    if t:
+        return t
+    try:
+        with open("/app/workspace/_daily-report/.gwtoken", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+TOKEN = _resolve_token()
 USER_ID = "trngthnh369"
 ANALYST_AGENT = os.environ.get("DAILY_REPORT_AGENT", "zip-crazy")
 # If set (e.g. the host gemini-bridge http://host.docker.internal:8765/v1/chat/completions), the
