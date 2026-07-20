@@ -419,6 +419,14 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			if p.ProviderType == store.ProviderOpenRouter {
 				prov.WithSiteInfo("https://goclaw.sh", "GoClaw")
 			}
+			if len(p.Settings) > 0 {
+				var s struct {
+					GeminiCompat bool `json:"gemini_compat"`
+				}
+				if json.Unmarshal(p.Settings, &s) == nil && s.GeminiCompat {
+					prov.WithGeminiCompat()
+				}
+			}
 			registry.RegisterForTenant(p.TenantID, prov)
 		}
 		slog.Info("registered provider from DB", "name", p.Name)

@@ -16,7 +16,8 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 
 	// Compute provider capability once: does this endpoint support Google's thought_signature?
 	// We check providerType, name, apiBase, and the model string (robust detection for proxies/OpenRouter).
-	supportsThoughtSignature := strings.Contains(strings.ToLower(p.providerType), "gemini") ||
+	supportsThoughtSignature := p.geminiCompat ||
+		strings.Contains(strings.ToLower(p.providerType), "gemini") ||
 		strings.Contains(strings.ToLower(p.name), "gemini") ||
 		strings.Contains(strings.ToLower(p.apiBase), "generativelanguage") ||
 		strings.Contains(strings.ToLower(model), "gemini") ||
@@ -283,6 +284,9 @@ func buildToolNameIndex(msgs []Message) map[string]string {
 // routes by model string. Narrower than the supportsThoughtSignature gate —
 // we require explicit intent before forwarding reasoning_effort on proxies.
 func (p *OpenAIProvider) isGeminiRoute(model string) bool {
+	if p.geminiCompat {
+		return true
+	}
 	if strings.Contains(strings.ToLower(p.apiBase), "generativelanguage") {
 		return true
 	}

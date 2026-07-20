@@ -23,6 +23,7 @@ type OpenAIProvider struct {
 	middlewares  RequestMiddleware // composed middleware chain (nil = no-op)
 	registry     ModelRegistry    // model resolution registry (nil = skip)
 	noAuthHeader bool             // when true, doRequest() skips setting Authorization (e.g. Vertex OAuth transport injects its own)
+	geminiCompat bool             // when true, apply Gemini-specific behaviors (collapse, thought_signature, reasoning_effort) regardless of name/apiBase/model detection
 }
 
 func NewOpenAIProvider(name, apiKey, apiBase, defaultModel string) *OpenAIProvider {
@@ -117,6 +118,13 @@ func (p *OpenAIProvider) WithHTTPClient(c *http.Client) *OpenAIProvider {
 	if c != nil {
 		p.client = c
 	}
+	return p
+}
+
+// WithGeminiCompat marks this provider as Gemini-compatible, enabling tool-call collapse,
+// thought_signature forwarding, and reasoning_effort regardless of name/apiBase/model detection.
+func (p *OpenAIProvider) WithGeminiCompat() *OpenAIProvider {
+	p.geminiCompat = true
 	return p
 }
 
