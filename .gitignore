@@ -207,6 +207,8 @@ client_secret_*.json
 scripts/_*.sql
 scripts/_*.py
 scripts/_*.txt
+scripts/_*.json
+scripts/_*.log
 # Accidental nested duplicate dirs (identical copies of skills/, scripts/, agents/)
 skills/skills/
 scripts/scripts/
