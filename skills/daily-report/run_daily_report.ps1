@@ -1,26 +1,32 @@
 # run_daily_report.ps1 — daily report GENERATE wrapper (Windows Task Scheduler, 17:10 Mon-Fri).
 #
-# Replaces the dead GoClaw cron. Self-heals BOTH common failure modes:
+# Replaces the dead GoClaw cron. Self-heals the common failure mode:
 #   - Docker engine down at fire time (the docker-desktop WSL distro can stop) -> start Docker
 #     Desktop + wait for the engine before doing anything.
-#   - Codex token death (~5-day cycle) -> generate with --require-llm; on exit 3 sync the Codex CLI
-#     token into GoClaw (+restart) and retry; last resort post a fallback report to REVIEW only.
+#   - LLM (Gemini ag-pro via GoClaw gateway) down -> retry once; last resort post a deterministic
+#     fallback report to REVIEW only (Invoke-Generate $false — always produces a report).
+#
+# Pipeline additions (2026-07-18):
+#   - HOST collector (git + Antigravity) runs BEFORE the container generate, writing
+#     %USERPROFILE%\.claude\host-digest\*.json (readable in-container via /app/.claude-host ro mount).
+#   - Friday: weekly report merged into this run (batch TEXT review, one DUYỆT publishes both).
+#     Gate: set GOCLAW_WEEKLY=off (user env var) to disable the Friday weekly branch without
+#     reverting this file.
 #
 # Robustness: native commands (docker/bash) returning non-zero must NOT abort the script silently
 # (the old `$ErrorActionPreference=Stop` + PS7 native-error behavior killed it right after the
 # "start" log line, producing empty failures). We log every outcome instead.
-#
-# LLM = Codex via GoClaw (no DAILY_REPORT_LLM_URL; gemini-cli/agy bridge is dead).
 $ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false  # non-zero exit codes don't throw; we check $LASTEXITCODE
 $PYTHON  = "C:\Program Files\Python313\python.exe"
-$BASH    = "C:\Program Files\Git\bin\bash.exe"
 $DOCKER  = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 $DDEXE   = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 $REPO    = "D:\Projects\personal\goclaw"
 $GOCLAW  = "goclaw-goclaw-1"
 $RUN     = "/app/workspace/_daily-report/daily_report_run.py"
+$WEEKLY  = "/app/workspace/_daily-report/weekly_report.py"
 $LOG     = Join-Path $REPO "skills\daily-report\_daily-report.log"
+$DIGEST_DIR = Join-Path $env:USERPROFILE ".claude\host-digest"
 
 function Log($m) {
   $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m
@@ -58,7 +64,8 @@ function Wait-Healthy {
 function Sync-Scripts {
   $files = @("daily_report_run.py","daily_report_publish.py","daily_report_sheet.py",
              "daily_report_edit.py","build_and_render.py","digest_sessions.py","sheets_client.py",
-             "weekly_report.py","build_summary_tab.py","render_report.mjs","template.html","task_aliases.json")
+             "weekly_report.py","build_summary_tab.py","render_report.mjs","template.html",
+             "template_weekly.html","week_init.py","edit_repost.py","task_aliases.json")
   foreach ($f in $files) {
     & $DOCKER exec -u goclaw $GOCLAW cp -f "/app/data/skills/daily-report/$f" "/app/workspace/_daily-report/$f" 2>$null
   }
@@ -67,9 +74,20 @@ function Sync-Scripts {
   & $DOCKER exec -u goclaw $GOCLAW sh -c 'printf "%s" "$GOCLAW_GATEWAY_TOKEN" > /app/workspace/_daily-report/.gwtoken && chmod 600 /app/workspace/_daily-report/.gwtoken' 2>$null
 }
 
-function Invoke-Generate([bool]$RequireLlm) {
+function Invoke-Collector([string[]]$WindowArgs, [string]$OutFile) {
+  # HOST collector: git commits (D:\Projects\work) + Antigravity sessions -> sanitized JSON in
+  # ~\.claude\host-digest\ (container reads it via the existing ro mount). Failure = WARN only;
+  # the container pipeline degrades to Claude-sessions-only (freshness gate discards stale files).
+  $env:PYTHONUTF8 = "1"
+  & $PYTHON (Join-Path $REPO "skills\daily-report\collect_host_digest.py") @WindowArgs --out $OutFile 2>&1 |
+    ForEach-Object { Log "collect> $_" }
+  if ($LASTEXITCODE -ne 0) { Log "WARN: host collector rc=$LASTEXITCODE (report se chi dung Claude sessions)" }
+}
+
+function Invoke-Generate([bool]$RequireLlm, [bool]$NoPost = $false) {
   $dargs = @("exec","-u","goclaw",$GOCLAW,"python3",$RUN,"--hours","24")
   if ($RequireLlm) { $dargs += "--require-llm" }
+  if ($NoPost)     { $dargs += "--no-post" }
   & $DOCKER @dargs 2>&1 | ForEach-Object { Log "gen> $_" }
   return $LASTEXITCODE
 }
@@ -80,16 +98,43 @@ try {
   if (-not (Ensure-Docker)) { Log "=== generate ABORTED: docker unavailable ==="; exit 1 }
   if (-not (Wait-Healthy))  { Log "WARN: goclaw container not healthy yet, trying anyway" }
 
+  $isFriday   = ((Get-Date).DayOfWeek -eq 'Friday')
+  $weeklyOn   = ($isFriday -and ($env:GOCLAW_WEEKLY -ne 'off'))
+
+  # --- HOST collector (before Sync so the container reads fresh data) ---
+  if ($weeklyOn) {
+    # One scan for the full week window; the container derives the 24h daily slice from it.
+    $monday = (Get-Date).Date.AddDays(1 - [int](Get-Date).DayOfWeek)
+    Invoke-Collector @("--from", $monday.ToString("yyyy-MM-ddT00:00:00+07:00"),
+                       "--to", (Get-Date -Format "yyyy-MM-ddTHH:mm:ss+07:00")) (Join-Path $DIGEST_DIR "week.json")
+    Copy-Item (Join-Path $DIGEST_DIR "week.json") (Join-Path $DIGEST_DIR "latest.json") -Force -ErrorAction SilentlyContinue
+  } else {
+    Invoke-Collector @("--hours", "24") (Join-Path $DIGEST_DIR "latest.json")
+  }
+
   Sync-Scripts
-  $rc = Invoke-Generate $true
+
+  # --- daily generate ---
+  # LLM down (exit 3): retry once (Gemini via gateway — transient), then post the deterministic
+  # fallback report to REVIEW only (always produces a report; NEVER dropped — agent-r1-f02).
+  $rc = Invoke-Generate $true $weeklyOn
   if ($rc -eq 3) {
-    Log "LLM down (exit 3) -> syncing Codex token + restart"
-    & $BASH (Join-Path $REPO "skills/daily-report/sync_codex_token.sh") 2>&1 | ForEach-Object { Log "sync> $_" }
-    $rc = Invoke-Generate $true
+    Log "LLM down (exit 3) -> retry once"
+    $rc = Invoke-Generate $true $weeklyOn
     if ($rc -eq 3) {
-      Log "WARNING: LLM still down after token sync -> posting fallback report to REVIEW only"
-      $rc = Invoke-Generate $false
+      Log "WARNING: LLM still down after retry -> posting fallback report to REVIEW only"
+      $rc = Invoke-Generate $false $weeklyOn
     }
+  }
+
+  # --- Friday: weekly report (independent of daily rc; failure never blocks daily) ---
+  if ($weeklyOn) {
+    Log "--- friday weekly report ---"
+    & $DOCKER exec -u goclaw $GOCLAW python3 $WEEKLY --report 2>&1 | ForEach-Object { Log "weekly> $_" }
+    if ($LASTEXITCODE -ne 0) { Log "WARN: weekly report FAILED rc=$LASTEXITCODE (daily khong anh huong)" }
+    # Batch post: publish both TEXT reviews together (one visible batch, one DUYET).
+    & $DOCKER exec -u goclaw $GOCLAW python3 $RUN --post-pending 2>&1 | ForEach-Object { Log "post> $_" }
+    if ($LASTEXITCODE -ne 0) { Log "WARN: batch post rc=$LASTEXITCODE" }
   }
 } catch {
   Log "EXCEPTION: $($_.Exception.Message)"

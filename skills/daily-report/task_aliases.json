@@ -16,6 +16,14 @@
     {"match": ["n8n-facebook-video-metrics-collector", "video-metrics", "metrics-collector", "kéo metrics", "kéo mectrics"], "task": "Tool kéo metrics post video & campaign", "sheet": "Tool kéo mectrics post video và campaing về sheet"},
     {"match": ["seo-manager", "seo manager", "nâng cấp seo", "fix seo"], "task": "Nâng cấp SEO", "sheet": "Nâng cấp SEO"},
     {"match": ["ai-news-digest-zalo-ceo", "news-digest", "news digest", "ai research tin", "research tin tức", "tin tức gửi"], "task": "AI research tin tức gửi hằng ngày", "sheet": "AI research tin tức gửi hằng ngày"},
-    {"match": ["cleanup-n8n-ec2-disk", "ec2-disk", "disk-full", "cleanup-n8n"], "task": "", "ignore": true}
+    {"match": ["cleanup-n8n-ec2-disk", "ec2-disk", "disk-full", "cleanup-n8n"], "task": "", "ignore": true},
+    {"match": ["openclaw"], "task": "Vận hành OpenClaw server"},
+    {"match": ["goclaw-server", "goclaw server"], "task": "Vận hành GoClaw server"},
+    {"match": ["data-synchronization", "data sync"], "task": "Đồng bộ dữ liệu hệ thống"},
+    {"match": ["n8n-server", "n8n server"], "task": "Vận hành n8n server"},
+    {"match": ["ai-competitor-tracker", "competitor tracker"], "task": "AI Competitor Tracker"},
+    {"match": ["ai-size-reorder", "size-reorder", "reorder size"], "task": "AI Size Reorder Calculator"},
+    {"match": ["ai-honeys-fb-poster", "honeys fb"], "task": "AI Honeys FB Poster"},
+    {"match": ["ai-recruitment", "recruitment workflow"], "task": "AI Đăng bài tuyển dụng", "sheet": "AI Đăng bài tuyển dụng"}
   ]
 }

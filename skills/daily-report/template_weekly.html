@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=760, initial-scale=1">
+<title>Báo cáo tuần</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#ffffff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0;
+    --brand1:#0f766e; --brand2:#0e7490;
+    --done:#16a34a; --doing:#d97706; --blocked:#dc2626; --new:#2563eb; --carry:#7c3aed;
+    --done-bg:#dcfce7; --doing-bg:#fef3c7; --blocked-bg:#fee2e2; --new-bg:#dbeafe; --carry-bg:#ede9fe;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans',sans-serif;
+       padding:28px;color:var(--ink);-webkit-font-smoothing:antialiased}
+  .card{width:760px;margin:0 auto;background:var(--card);border-radius:20px;overflow:hidden;
+        box-shadow:0 20px 50px rgba(0,0,0,.35)}
+  .header{background:linear-gradient(135deg,var(--brand1),var(--brand2));color:#fff;padding:28px 32px}
+  .header h1{font-size:24px;font-weight:700;letter-spacing:.2px}
+  .summary{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  .chip{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.25);
+        border-radius:999px;padding:6px 14px;font-size:13px;font-weight:600}
+  .body{padding:8px 32px 28px}
+  .section{margin-top:18px}
+  .section-title{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.8px;
+                 padding:7px 12px;border-radius:8px;display:inline-block}
+  .section-title.done{color:var(--done);background:var(--done-bg)}
+  .section-title.doing{color:var(--doing);background:var(--doing-bg)}
+  .section-title.blocked{color:var(--blocked);background:var(--blocked-bg)}
+  .section-title.carry{color:var(--carry);background:var(--carry-bg)}
+  .item{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+  .item:last-child{border-bottom:none}
+  .item .main{flex:1;min-width:0}
+  .item .title{font-size:15px;font-weight:700;line-height:1.4;color:var(--ink)}
+  .item .note{margin-top:3px;font-size:12.5px;color:var(--muted);line-height:1.5}
+  .bar{margin-top:8px;height:6px;background:var(--line);border-radius:99px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:99px}
+  .bar-fill.done{background:var(--done)}
+  .bar-fill.doing{background:var(--doing)}
+  .bar-fill.blocked{background:var(--blocked)}
+  .bar-fill.carry{background:var(--carry)}
+  .meta{display:flex;flex-direction:column;align-items:flex-end;gap:7px;white-space:nowrap;min-width:60px}
+  .pct{font-size:15px;font-weight:800;color:var(--ink)}
+  .warn{margin-top:12px;font-size:12.5px;color:var(--blocked);font-weight:600}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <!--DATA-START: header — h1 "Báo cáo tuần (DD-DD/MM)" + summary chips. NO emoji (font không render trong chrome sidecar). -->
+      <h1>Báo cáo tuần (13-19/07)</h1>
+      <div class="summary">
+        <span class="chip">4 hoàn thành</span>
+        <span class="chip">3 đang làm</span>
+      </div>
+      <!--DATA-END: header -->
+    </div>
+
+    <div class="body">
+      <!--DATA-START: sections — 4 khối section (done/doing/blocked/carry), mỗi khối .section-title + list .item -->
+      <div class="section">
+        <span class="section-title done">Hoàn thành</span>
+        <div class="item">
+          <div class="main">
+            <div class="title">Tên công việc</div>
+            <div class="bar"><div class="bar-fill done" style="width:100%"></div></div>
+          </div>
+          <div class="meta"><span class="pct">100%</span></div>
+        </div>
+      </div>
+      <!--DATA-END: sections -->
+    </div>
+
+  </div>
+</body>
+</html>

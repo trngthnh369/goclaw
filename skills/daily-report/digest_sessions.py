@@ -150,9 +150,14 @@ def summarize(args):
             "note": f"projects dir not found: {projects_dir}",
         }
 
-    files = [f for f in glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True)
-             if not is_secret_path(f)]
-    health["source_files_seen"] = len(files)
+    all_files = [f for f in glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True)
+                 if not is_secret_path(f)]
+    health["source_files_seen"] = len(all_files)
+
+    # mtime pre-filter: skip files not modified since window start (±1h margin)
+    mtime_cutoff = (w_from - dt.timedelta(hours=1)).timestamp()
+    files = [f for f in all_files if os.path.getmtime(f) >= mtime_cutoff]
+    health["files_after_mtime_filter"] = len(files)
 
     # session_key -> aggregate
     sessions = {}

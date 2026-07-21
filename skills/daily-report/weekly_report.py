@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-# weekly_report.py — build/refresh the WEEKLY task tab in the "AI Agent" sheet from this week's
-# Claude Code work sessions.
+# weekly_report.py — weekly task-sheet refresh + Friday weekly REPORT builder.
 #
-# Reuses the daily-report pipeline (digest -> work-filter -> alias group -> Codex describe ->
-# sheet match) but over the FULL week window (Mon 00:00 -> now, Asia/HCM) and writes straight to
-# the weekly sheet tab instead of Discord/Zalo.
+# Mode 1 (default, legacy): refresh the WEEKLY tab from this week's work sessions
+#   (digest -> work-filter -> alias group -> LLM describe -> sheet match -> write_progress).
+#   ABORTS without writing when the LLM is down (never lands raw prompt snippets in the sheet).
 #
-# Safety / idempotency:
-#   - exact week boundary via digest --from/--to (no rolling-hours Sunday leak)
-#   - creates the week tab only if missing (duplicate latest weekly tab, clear % column); re-runs
-#     reuse the tab
-#   - write_progress updates % by task name (re-runnable, no duplicate rows)
-#   - if Codex/LLM is down it ABORTS without writing (never lands raw prompt snippets in the sheet)
+# Mode 2 (--report, Friday 17:10 via run_daily_report.ps1): sheet-refresh (best-effort,
+#   try/except) -> read the tab back (% = source of truth) -> build done/doing/blocked/carry
+#   sections -> write report_weekly.json + active_weekly.json (stage=review, posted=false).
+#   TEXT review is posted by daily_report_run.py --post-pending (Friday batch: one DUYỆT
+#   publishes daily + weekly). NO render here — PNG happens at publish (D6).
 #
-# Run (in container): python3 /app/workspace/_daily-report/weekly_report.py [--dry-run]
+# Data sources: Claude Code sessions (digest) + host collector week.json (git + Antigravity)
+# via dr.load_host_digest — same alias pipeline as daily.
+#
+# Run (in container): python3 /app/workspace/_daily-report/weekly_report.py [--dry-run|--report]
 import json
 import os
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import daily_report_run as dr   # noqa: E402  reuse pipeline fns (flatten/group/describe/match)
@@ -27,18 +28,9 @@ import sheets_client as sc  # noqa: E402
 
 TZ = timezone(timedelta(hours=7))
 DIGEST = f"{dr.WORK}/digest_sessions.py"
+HOST_WEEK = "/app/.claude-host/host-digest/week.json"
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
 STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP"}
-
-
-def week_bounds(today: date) -> tuple[date, date]:
-    monday = today - timedelta(days=today.weekday())
-    return monday, monday + timedelta(days=6)
-
-
-def tab_name(monday: date, sunday: date) -> str:
-    # convention matches existing tabs: (SD-ED/EM), end month wins when week crosses a month.
-    return f"({monday.day:02d}-{sunday.day:02d}/{sunday.month:02d})"
 
 
 def run_digest(from_iso: str, to_iso: str) -> dict:
@@ -52,22 +44,23 @@ def run_digest(from_iso: str, to_iso: str) -> dict:
 
 def ensure_week_tab(name: str) -> tuple[dict, bool]:
     """Return ({'title','sheetId'}, created?). Create by duplicating the latest weekly tab and
-    clearing its % column when the tab does not exist yet."""
+    clearing its % column when the tab does not exist yet. (week_init.py is the richer Monday
+    path with carry-over; this is the Friday safety net.)"""
+    today = datetime.now(TZ).date()
     tabs = sc.get_meta(drs.SPREADSHEET_ID)
     for t in tabs:
         if t["title"] == name:
             return t, False
-    weekly = [t for t in tabs if drs._week_bounds(t["title"], date.today().year)]
+    weekly = [t for t in tabs if drs._week_bounds(t["title"], today.year, ref=today)]
     if not weekly:
         raise SystemExit("NO_WEEKLY_TAB_TO_DUPLICATE")
-    src = max(weekly, key=lambda t: drs._week_bounds(t["title"], date.today().year)[1])
+    src = max(weekly, key=lambda t: drs._week_bounds(t["title"], today.year, ref=today)[1])
     resp = sc.batch_update(drs.SPREADSHEET_ID, [{
         "duplicateSheet": {"sourceSheetId": src["sheetId"],
                            "insertSheetIndex": len(tabs), "newSheetName": name},
     }])
     new_id = resp["replies"][0]["duplicateSheet"]["properties"]["sheetId"]
     dr.log(f"duplicated '{src['title']}' -> '{name}' (sheetId={new_id})")
-    # clear the % column (keep header in row 1) so the new week starts fresh
     data = drs.read_tasks(name)
     if data["pct_col"] and data["tasks"]:
         last = max(t["row"] for t in data["tasks"])
@@ -85,12 +78,12 @@ def pct(item: dict) -> int:
         return DEFAULT_PCT.get(item.get("progress", "doing"), 50)
 
 
-def build_items() -> list:
+def build_items(sheet_tasks: list | None = None) -> list:
     today = datetime.now(TZ).date()
-    monday, sunday = week_bounds(today)
+    monday, sunday = drs.week_bounds(today)
     from_iso = datetime(monday.year, monday.month, monday.day, tzinfo=TZ).isoformat()
     to_iso = datetime.now(TZ).isoformat()
-    dr.log(f"week={tab_name(monday, sunday)} from={from_iso} to={to_iso}")
+    dr.log(f"week={drs.tab_name(monday, sunday)} from={from_iso} to={to_iso}")
 
     digest = run_digest(from_iso, to_iso)
     if digest.get("health", {}).get("mount_status") != "ok":
@@ -105,38 +98,39 @@ def build_items() -> list:
             continue
         merged.setdefault(label, {"project": label, "sessions": []})["sessions"].extend(
             p.get("sessions", []))
-    if not merged:
-        raise SystemExit("NO_WORK_PROJECTS this week")
     dr.log(f"work projects: {list(merged)}")
 
     sessions, _ = dr.flatten_sessions(list(merged.values()))
+    # host collector week window (git + antigravity) — freshness-gated shared loader
+    host = dr.load_host_digest(HOST_WEEK, max_age_h=3.0)
+    sessions += dr.synth_host_sessions(host, len(sessions))
+    if not sessions:
+        raise SystemExit("NO_WORK_ACTIVITY this week")
+
     groups = dr.group_tasks(sessions, dr.load_aliases())
     dr.log(f"task groups ({len(groups)}): {[g['name'] for g in groups]}")
 
-    items = dr.llm_describe(groups)
+    sheet_pct = {dr._norm(t["name"]): t.get("pct") for t in (sheet_tasks or [])}
+    items = dr.llm_describe(groups, sheet_pct)
     if items is None:
-        raise SystemExit("LLM_UNAVAILABLE: Codex describe lỗi — KHÔNG ghi sheet (tránh fallback rác). "
-                         "Chạy sync_codex_token.sh rồi thử lại.")
+        raise SystemExit("LLM_UNAVAILABLE: Gemini ag-pro (agent zip-crazy) lỗi — KHÔNG ghi sheet "
+                         "(tránh fallback rác). Kiểm tra provider antigravity/cliproxy rồi thử lại.")
     return items
 
 
-def main() -> None:
-    items = build_items()
-
-    if "--dry-run" in sys.argv:
-        for it in items:
-            print(f"  - {it.get('title')} | {it.get('progress')} {pct(it)}% "
-                  f"| sheet={it.get('sheet_name')} | note={it.get('note')}")
-        return
-
+def refresh_sheet() -> dict:
+    """Digest full-week -> LLM -> write_progress vào tab tuần. Trả {'tab':..., 'updated', 'appended'}."""
     today = datetime.now(TZ).date()
-    name = tab_name(*week_bounds(today))
+    name = drs.tab_name(*drs.week_bounds(today))
     tab, created = ensure_week_tab(name)
     dr.log(f"tab {'created' if created else 'reused'}: {name}")
 
     pct_col = drs.ensure_pct_column(tab)
     sheet_tasks = drs.read_tasks(tab["title"])["tasks"]
-    dr.match_sheet(items, sheet_tasks)  # adds sheet_match + is_new
+
+    items = build_items(sheet_tasks)
+    dr.match_sheet(items, sheet_tasks)
+    dr.enforce_monotonic(items, sheet_tasks)
 
     row_by_name = {drs._norm_name(t["name"]): t["row"] for t in sheet_tasks}
     updates, new_tasks = [], []
@@ -151,11 +145,90 @@ def main() -> None:
             new_tasks.append({"name": it.get("title", ""), "percent": p,
                               "status": st, "note": it.get("note", "")})
     res = drs.write_progress(tab, pct_col, updates, new_tasks)
-    print(f"OK tab='{name}' created={created} updated={res['updated']} "
-          f"appended={res['appended']} items={len(items)}")
-    for it in items:
-        print(f"  - {it.get('title')} | {it.get('progress')} {pct(it)}% "
-              f"| match={it.get('sheet_match')} new={it.get('is_new')}")
+    dr.log(f"refresh: tab='{name}' updated={res['updated']} appended={res['appended']} items={len(items)}")
+    return {"tab": tab, "name": name, **res, "items": items}
+
+
+def build_sections(tab_title: str) -> dict:
+    """Classify the tab rows (post-refresh; % = source of truth) into report sections."""
+    tasks = drs.read_tasks(tab_title)["tasks"]
+    sections: dict = {"done": [], "doing": [], "blocked": [], "carry": []}
+    for t in tasks:
+        row = {"title": t["name"], "percent": t["pct"], "note": t["note"]}
+        p = t["pct"]
+        status = (t["status"] or "").strip().lower()
+        if p is not None and p >= 100:
+            sections["done"].append(row)
+        elif "block" in status:
+            sections["blocked"].append(row)
+        else:
+            sections["doing"].append(row)
+        if p is None or p < 100:
+            sections["carry"].append({"title": t["name"], "percent": p})  # gọn — sẽ chuyển tuần sau
+    return sections
+
+
+def report_mode() -> None:
+    """--report: refresh best-effort -> sections từ sheet -> state review (TEXT post ở wrapper)."""
+    today = datetime.now(TZ).date()
+    name = drs.tab_name(*drs.week_bounds(today))
+    refreshed = True
+    try:
+        refresh_sheet()
+    except SystemExit as exc:
+        refreshed = False
+        dr.log(f"refresh SKIPPED ({exc}) — render từ % sheet hiện có")
+    except Exception as exc:  # noqa: BLE001
+        refreshed = False
+        dr.log(f"refresh FAILED ({exc}) — render từ % sheet hiện có")
+
+    # sheet unreadable = hard abort (không có gì để báo cáo)
+    tab, _created = ensure_week_tab(name)
+    sections = build_sections(tab["title"])
+
+    now = datetime.now(TZ)
+    report = {
+        "kind": "weekly",
+        "week_tab": name,
+        "refreshed": refreshed,
+        "sections": sections,
+        "report_date": today.strftime("%Y-%m-%d"),
+    }
+    dr._write_json_atomic(dr.REPORT_WEEKLY, report)
+    dr._write_json_atomic(dr.ACTIVE_WEEKLY, {
+        "run_id": now.strftime("%Y%m%d-%H%M"),
+        "kind": "weekly",
+        "stage": "review",
+        "report_date": report["report_date"],
+        "png_path": "",
+        "posted": False,
+        "created_at": now.isoformat(),
+        "published_at": "",
+    })
+    n = {k: len(v) for k, v in sections.items()}
+    print(f"OK weekly tab='{name}' refreshed={refreshed} sections={json.dumps(n)}")
+
+
+def main() -> None:
+    if "--report" in sys.argv:
+        report_mode()
+        return
+
+    if "--dry-run" in sys.argv:
+        sheet_tasks = []
+        try:
+            today = datetime.now(TZ).date()
+            sheet_tasks = drs.read_tasks(drs.find_week_tab(today)["title"])["tasks"]
+        except Exception:  # noqa: BLE001
+            pass
+        items = build_items(sheet_tasks)
+        for it in items:
+            print(f"  - {it.get('title')} | {it.get('progress')} {pct(it)}% "
+                  f"| sheet={it.get('sheet_name')} | note={it.get('note')}")
+        return
+
+    res = refresh_sheet()
+    print(f"OK tab='{res['name']}' updated={res['updated']} appended={res['appended']}")
 
 
 if __name__ == "__main__":

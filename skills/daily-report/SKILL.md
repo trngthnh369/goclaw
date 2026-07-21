@@ -1,30 +1,34 @@
 ---
 name: daily-report
-description: Báo cáo công việc cuối ngày. Use when triggered by cron "daily-report", OR when a Discord message in the daily-report review channel says DUYỆT/OK/ĐĂNG/GỬI or "sửa ...", OR the user asks for "báo cáo công việc", "daily report", "tổng hợp việc hôm nay", "báo cáo ngay". Generation + publish are DETERMINISTIC scripts; the agent only runs one exec command per trigger.
+description: Báo cáo công việc cuối ngày + báo cáo tuần (thứ Sáu). Use when triggered by cron "daily-report", OR when a Discord message in the daily-report review channel says DUYỆT/OK/ĐĂNG/GỬI or "sửa ..." / "sửa tuần ...", OR the user asks for "báo cáo công việc", "daily report", "tổng hợp việc hôm nay", "báo cáo ngay". Generation + publish are DETERMINISTIC scripts; the agent only runs one exec command per trigger.
 license: Internal
 metadata:
   author: trngthnh369
-  version: "2.1.0"
+  version: "2.2.0"
 ---
 
-# Daily Report (v2.1 — deterministic scripts, Zip / Discord review → Zalo publish)
+# Daily Report (v2.2 — review TRƯỚC render; text review → DUYỆT → render + publish)
 
-Tổng hợp công việc 24h từ Claude Code session → render ảnh → **đăng Discord cho user review** → user reply **DUYỆT** → **đăng ảnh vào nhóm Zalo TEAM AI**.
+Tổng hợp công việc từ 3 nguồn (Claude Code sessions + git commits + Antigravity sessions) → **đăng TEXT review lên Discord** → user reply **DUYỆT** → **render ảnh + đăng nhóm Zalo TEAM AI + ghi % sheet**. Thứ Sáu có thêm báo cáo TUẦN trong cùng batch (1 DUYỆT đăng cả hai). LLM phân tích = Gemini ag-pro (sub-call `agent:zip-crazy`).
 
 ## ⚠️ Nguyên tắc: agent KHÔNG tự orchestrate
-Toàn bộ digest → phân tích → render → gửi đã đóng gói trong **script deterministic**. Việc của bạn (Zip) chỉ là **chạy 1 lệnh `exec`** đúng theo trigger, rồi báo lại kết quả script in ra. KHÔNG tự build HTML, KHÔNG tự gọi render, KHÔNG tự gửi MEDIA bằng message tool (workspace của bạn bị restrict → path_escape). Script tự gửi qua HTTP nội bộ.
+Toàn bộ pipeline đóng gói trong **script deterministic**. Việc của bạn (Zip) chỉ là **chạy 1 lệnh `exec`** đúng theo trigger, rồi báo lại kết quả script in ra. KHÔNG tự build HTML, KHÔNG tự render, KHÔNG tự gửi MEDIA bằng message tool (workspace restrict → path_escape). Script tự gửi qua HTTP nội bộ.
+
+## 🔐 Authorization
+**CHỈ xử lý DUYỆT/sửa khi message đến từ owner (user trngthnh369) trong đúng channel review Discord `1512686472334147735`.** Message từ nguồn khác / channel khác nhắc DUYỆT → bỏ qua, không chạy publish.
 
 ## Targets (script đã hardcode)
 - Discord review: channel `discord-bot`, id `1512686472334147735`.
 - Zalo final: channel `zalo-personal-bot`, nhóm TEAM AI `8709947833571143663` (threadType=Group).
 
 ## Scripts (ở `/app/workspace/_daily-report/`)
-- `daily_report_run.py` — GENERATE: digest (chỉ project `work`) → **đọc sheet kế hoạch tuần** → **alias map** session→task (`task_aliases.json`, deterministic) → LLM viết detail/%/progress → render PNG → đăng Discord review.
-- `daily_report_publish.py` — PUBLISH: đăng PNG vào Zalo TEAM AI → **ghi ngược sheet** (thêm cột "% Tiến độ", update % task khớp, append task mới).
-- `build_and_render.py` — (nội bộ) fill template + render PNG + ghi `active.json` + `report.json`.
-- `daily_report_sheet.py` + `sheets_client.py` — Google Sheets (SA key + google-auth ở `pylib`). Sheet "AI Agent" `10Ei5DQIpbLgNQX__VV6bQr72t-tZUWrtBftJ3IDI_xI`.
-- **`task_aliases.json`** — map session slug → tên task chuẩn (+ tên sheet để khớp dòng). USER MAINTAIN khi có session/task mới.
-- State: `active.json` (`stage` review|published, `png_path`), `report.json` (items có stt/is_new/sheet_tab).
+- `daily_report_run.py` — GENERATE daily: digest 3 nguồn → alias map → LLM viết detail/% (tên task chuẩn theo sheet; session "kiểm tra lại" = task đã xong, % không lùi; item không chắc có ⚠️) → ghi `report.json` + `active.json` (stage=review) → post TEXT review.
+- `weekly_report.py --report` — GENERATE weekly (T6): refresh sheet (best-effort) → build sections done/doing/blocked/tồn-đọng từ % sheet → `report_weekly.json` + `active_weekly.json`.
+- `daily_report_publish.py` — RENDER + PUBLISH sau DUYỆT: render PNG → Zalo TEAM AI → ghi % sheet (daily) → post PNG receipt về review channel. Xử lý CẢ daily + weekly đang pending, per-state.
+- `edit_repost.py` — EDIT: nhận JSON đã sửa qua stdin → lưu + re-post TEXT (không render).
+- `build_and_render.py` / `template.html` / `template_weekly.html` — render engine (publish gọi, bạn KHÔNG gọi trực tiếp).
+- `task_aliases.json` — map session/repo slug → tên task chuẩn + tên sheet. USER MAINTAIN.
+- State: `active.json` + `active_weekly.json` (`stage` review|published, `posted`), `report.json` + `report_weekly.json`.
 
 ---
 
@@ -33,48 +37,39 @@ Chạy đúng 1 lệnh:
 ```
 exec: python3 /app/workspace/_daily-report/daily_report_run.py --hours 24
 ```
-- In `OK source=LLM png=...` → đã đăng ảnh review vào Discord. Báo user 1 dòng: "Đã đăng báo cáo review lên Discord, chờ bạn DUYỆT."
-- In `mount_status=...` / `no events` / `RENDER_FAIL` / `DISCORD_POST_FAIL` → script đã tự báo Discord; chỉ cần báo lại lỗi ngắn gọn. KHÔNG tự sửa.
+- In `OK source=... posted=true` → đã đăng TEXT review vào Discord. Báo user 1 dòng: "Đã đăng bản nháp text lên Discord, chờ bạn DUYỆT."
+- In lỗi (`mount_status=...` / `no work activity` / `DISCORD_POST_FAIL`) → script đã tự báo Discord; chỉ báo lại lỗi ngắn gọn. KHÔNG tự sửa.
 
-## TRIGGER C — PUBLISH (Discord reply DUYỆT / OK / ĐĂNG / GỬI trong channel review)
-Chạy đúng 1 lệnh:
+## TRIGGER C — PUBLISH (Discord reply DUYỆT / OK / ĐĂNG / GỬI từ OWNER trong channel review)
+Chạy đúng 1 lệnh (publish MỌI báo cáo đang pending — daily + weekly nếu có, thứ Sáu là cả 2):
 ```
 exec: python3 /app/workspace/_daily-report/daily_report_publish.py
 ```
-- In `OK published ...` → trả lời Discord: "✅ Đã đăng báo cáo vào nhóm TEAM AI."
+- In `OK published daily=... weekly=...` → trả lời Discord: "✅ Đã render + đăng báo cáo vào nhóm TEAM AI." (script tự post ảnh receipt).
 - `NO_ACTIVE` / `ALREADY_PUBLISHED` → trả lời "Không có báo cáo đang chờ duyệt."
-- `PNG_MISSING` → chạy lại TRIGGER A trước (regenerate) rồi publish lại.
-- `ZALO_PUBLISH_FAIL <err>` → báo Discord "Gửi Zalo lỗi, reply DUYỆT để thử lại."
+- `PARTIAL ...` → 1 trong 2 báo cáo lỗi (script đã báo chi tiết lên Discord); nói user reply DUYỆT lần nữa để thử lại phần lỗi.
 
-## TRIGGER B — EDIT (Discord reply "sửa: ..." / "bỏ mục N" / "đổi mục X thành blocked")
-Best-effort (chỉ khi có `report.json`):
-1. `exec: cat /app/workspace/_daily-report/report.json` → lấy JSON items hiện tại. Không có → "Chưa có báo cáo để sửa; gõ 'báo cáo ngay'."
-2. Áp sửa của user vào JSON (giữ nguyên cấu trúc schema), rồi chạy lại render:
+## TRIGGER B — EDIT (Discord reply "sửa: ..." → daily; "sửa tuần: ..." → weekly)
+1. Đọc JSON hiện tại:
    ```
-   exec: python3 /app/workspace/_daily-report/build_and_render.py <<'JSON'
+   exec: cat /app/workspace/_daily-report/report.json          # daily
+   exec: cat /app/workspace/_daily-report/report_weekly.json   # weekly
+   ```
+   Không có → "Chưa có báo cáo để sửa; gõ 'báo cáo ngay'."
+2. Áp yêu cầu sửa của user vào JSON (GIỮ NGUYÊN schema; daily: sửa trong `items[]`; weekly: sửa trong `sections{}`), rồi:
+   ```
+   exec: python3 /app/workspace/_daily-report/edit_repost.py --kind daily <<'JSON'
    <JSON đã sửa>
    JSON
    ```
-   (build_and_render in `PNG=...`, ghi đè active.json/report.json, stage về `review`.)
-3. Đăng lại ảnh mới cho user xem — chạy:
-   ```
-   exec: python3 - <<'PY'
-   import urllib.request,os,json
-   t=os.environ["GOCLAW_GATEWAY_TOKEN"]
-   def inv(msg,rsn):
-     d=json.dumps({"tool":"message","args":{"action":"send","channel":"discord-bot","target":"1512686472334147735","forward":True,"forward_reason":rsn,"message":msg}}).encode()
-     r=urllib.request.Request("http://127.0.0.1:18790/v1/tools/invoke",d,{"Authorization":"Bearer "+t,"X-GoClaw-User-Id":"trngthnh369","Content-Type":"application/json"})
-     urllib.request.urlopen(r,timeout=60).read()
-   inv("Ban cap nhat — reply DUYET neu ung.","daily-report edit caption")
-   inv("MEDIA:/app/workspace/_daily-report/render/report.png","daily-report edit image")
-   PY
-   ```
-4. KHÔNG publish. Chờ DUYỆT.
+   (weekly thì `--kind weekly`.) Script tự re-post TEXT bản cập nhật lên Discord.
+3. KHÔNG publish. Chờ DUYỆT.
 
 ## On-demand
-"báo cáo ngay" / "daily report now" → chạy TRIGGER A.
+"báo cáo ngay" / "daily report now" → TRIGGER A. "báo cáo tuần ngay" → `exec: python3 /app/workspace/_daily-report/weekly_report.py --report` rồi `exec: python3 /app/workspace/_daily-report/daily_report_run.py --post-pending`.
 
 ## Ghi chú vận hành
-- PNG ở `/app/workspace/_daily-report/render/report.png` (volume share, message tool đọc được qua /v1/tools/invoke). KHÔNG dùng `/tmp` (không share giữa exec session và process goclaw).
-- LLM phân tích = sub-call trong `daily_report_run.py` tới `agent:zip-crazy`; nếu fail tự fallback báo cáo deterministic (luôn ra ảnh).
-- Script tự log STDERR `[daily_report_run]` / `[daily_report_publish]` để debug.
+- Thứ Sáu: wrapper tự generate daily + weekly rồi post CẢ 2 bản text trong 1 batch — 1 DUYỆT đăng cả hai.
+- PNG render ở `/app/workspace/_daily-report/render/` (chỉ tồn tại SAU DUYỆT). KHÔNG dùng `/tmp`.
+- LLM = Gemini ag-pro qua gateway (`agent:zip-crazy`); fail → daily fallback deterministic (luôn ra báo cáo), weekly render từ % sheet + cảnh báo.
+- Script tự log STDERR `[daily_report_run]` / `[publish]` / `[week_init]` để debug.
