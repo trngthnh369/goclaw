@@ -269,10 +269,11 @@ def duplicate_candidates(groups: list) -> list:
 DESCRIBE_PROMPT = """Bạn viết chi tiết cho báo cáo công việc cuối ngày. Mỗi phần tử dưới đây là 1 TASK đã có tên; một số task kèm "sheet_pct" = % hiện tại trên sheet kế hoạch tuần.
 
 CHỈ trả về MỘT JSON array (không markdown, không giải thích, không gọi tool), mỗi phần tử:
-{"idx":<idx>,"name":"<xem quy tắc>","detail":"<chi tiết ≤14 từ>","progress":"done|doing|blocked|new","percent":<0-100>,"uncertain":<true nếu bạn không chắc tên/%>}
+{"idx":<idx>,"name":"<xem quy tắc>","sheet_idx":<số hoặc null>,"detail":"<chi tiết ≤14 từ>","progress":"done|doing|blocked|new","percent":<0-100>,"uncertain":<true nếu bạn không chắc tên/%>}
 
 QUY TẮC BẮT BUỘC:
 - GIỮ NGUYÊN idx. Nếu "known"=true → name GIỮ NGUYÊN y hệt (tên chuẩn theo sheet — KHÔNG bịa tên mới). Nếu "known"=false → đổi name (slug kỹ thuật) thành tên công việc tiếng Việt đọc được, viết hoa đầu, KHÔNG gạch ngang.
+- "sheet_idx": nếu SHEET_TASKS được cung cấp bên dưới, CHỌN task sheet phù hợp nhất với task này (dùng sidx). PHẢI KHỚP CHỦ ĐỀ — "AI Training" ≠ "AI competitor monitor", "OpenClaw" ≠ "AI News". Nếu không có task nào CÙNG CHỦ ĐỀ → null. KHÔNG ép khớp chỉ vì cùng có chữ "AI".
 - detail dựa trên "intents". TUYỆT ĐỐI KHÔNG nhắc tên file/đường dẫn/script (.py/.js/.sh/.mjs)/branch/hàm.
 - PHÂN LOẠI intent: intents chỉ là KIỂM TRA/check lại/verify/xem lại → task đã hoàn thành trước đó, giờ chỉ re-check → progress="done", percent giữ cao (≥ sheet_pct, thường 90-100). KHÔNG coi việc kiểm tra là việc mới.
 - % KHÔNG LÙI: nếu có sheet_pct thì percent PHẢI ≥ sheet_pct (tiến độ không đi lùi vì 1 phiên re-check).
@@ -280,7 +281,9 @@ QUY TẮC BẮT BUỘC:
 - percent: done≈90-100, doing 30-70, blocked 20-50, new 5-20 (và luôn ≥ sheet_pct nếu có).
 - Không chắc tên task hay % → "uncertain":true (sẽ hiển thị ⚠️ cho user sửa khi review).
 
-TASKS:
+"""
+
+SHEET_TASKS_PROMPT = """SHEET_TASKS (danh sách task trong sheet kế hoạch tuần — dùng sidx để map):
 """
 
 
@@ -297,7 +300,8 @@ def _describe_items(groups: list, by_idx: dict) -> list:
             "progress": progress,
             "percent": it.get("percent"),
             "uncertain": bool(it.get("uncertain")),
-            "sheet_name": g["sheet"],  # gỡ ở bước match_sheet
+            "sheet_name": g["sheet"],
+            "sheet_idx": it.get("sheet_idx"),
         })
     return items
 
@@ -313,9 +317,12 @@ def llm_chat(messages: list) -> str:
     return http_post("/v1/chat/completions", payload, timeout=300)["choices"][0]["message"]["content"]
 
 
-def _describe_chunk(feed: list) -> dict | None:
+def _describe_chunk(feed: list, sheet_feed: list | None = None) -> dict | None:
     """One describe call -> {idx: item}. None on any failure (caller falls back)."""
-    messages = [{"role": "user", "content": DESCRIBE_PROMPT + json.dumps(feed, ensure_ascii=False)}]
+    prompt = DESCRIBE_PROMPT + "TASKS:\n" + json.dumps(feed, ensure_ascii=False)
+    if sheet_feed:
+        prompt += "\n\n" + SHEET_TASKS_PROMPT + json.dumps(sheet_feed, ensure_ascii=False)
+    messages = [{"role": "user", "content": prompt}]
     try:
         content = llm_chat(messages)
     except Exception as exc:  # noqa: BLE001
@@ -340,11 +347,17 @@ def _describe_chunk(feed: list) -> dict | None:
     return by_idx
 
 
-def llm_describe(groups: list, sheet_pct_by_name: dict | None = None) -> list | None:
-    """Chunked describe with per-chunk count validation. sheet_pct feeds the monotonic rule."""
+def llm_describe(groups: list, sheet_pct_by_name: dict | None = None,
+                 sheet_tasks: list | None = None) -> list | None:
+    """Chunked describe with per-chunk count validation. sheet_pct feeds the monotonic rule.
+    sheet_tasks feeds the LLM so it can map work → sheet rows via sheet_idx."""
     if not groups:
         return None
     sheet_pct_by_name = sheet_pct_by_name or {}
+    sheet_feed = None
+    if sheet_tasks:
+        sheet_feed = [{"sidx": i, "name": t["name"], "pct": t.get("pct"), "status": t.get("status", "")}
+                      for i, t in enumerate(sheet_tasks)]
     feed_all = []
     for i, g in enumerate(groups):
         entry = {"idx": i, "name": g["name"], "known": g["known"], "intents": g["intents"][:4]}
@@ -355,7 +368,7 @@ def llm_describe(groups: list, sheet_pct_by_name: dict | None = None) -> list | 
     by_idx: dict = {}
     for start in range(0, len(feed_all), LLM_CHUNK):
         chunk = feed_all[start:start + LLM_CHUNK]
-        res = _describe_chunk(chunk)
+        res = _describe_chunk(chunk, sheet_feed)
         if res is None:
             return None
         by_idx.update(res)
@@ -371,15 +384,62 @@ def _norm(s: object) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
 
 
+def _fuzzy_score(a: str, b: str) -> float:
+    """Token-overlap ratio between two normalized strings. Returns 0.0-1.0.
+    Uses 3+ char tokens to avoid common short-word false positives (e.g. 'ai')."""
+    ta = set(re.findall(r"\w{3,}", _norm(a)))
+    tb = set(re.findall(r"\w{3,}", _norm(b)))
+    if not ta or not tb:
+        return 0.0
+    overlap = len(ta & tb)
+    return overlap / min(len(ta), len(tb))
+
+
+FUZZY_THRESHOLD = 0.5
+
+
 def match_sheet(items: list, sheet_tasks: list) -> None:
-    """Gắn sheet_match (TÊN task sheet khớp) + is_new cho mỗi item."""
+    """Gắn sheet_match (TÊN task sheet khớp) + is_new cho mỗi item.
+    Priority: (1) LLM sheet_idx, (2) alias sheet_name exact, (3) fuzzy token overlap."""
     by_name = {_norm(t["name"]): t for t in sheet_tasks}
+    used_sheet_names: set = set()
     for it in items:
         sname = it.pop("sheet_name", None)
-        target = sname if sname else it["title"]
-        t = by_name.get(_norm(target))
-        it["sheet_match"] = t["name"] if t else None
-        it["is_new"] = t is None
+        sidx = it.pop("sheet_idx", None)
+        matched = None
+
+        # (1) LLM sheet_idx — direct mapping from LLM, validated by fuzzy sanity check
+        if sidx is not None and isinstance(sidx, int) and 0 <= sidx < len(sheet_tasks):
+            candidate = sheet_tasks[sidx]
+            if _norm(candidate["name"]) not in used_sheet_names:
+                score = _fuzzy_score(it["title"], candidate["name"])
+                if score >= 0.3:
+                    matched = candidate
+
+        # (2) alias-based exact match
+        if matched is None:
+            target = sname if sname else it["title"]
+            matched = by_name.get(_norm(target))
+
+        # (3) fuzzy token-overlap fallback
+        if matched is None:
+            title = it["title"]
+            best_score, best_task = 0.0, None
+            for t in sheet_tasks:
+                if _norm(t["name"]) in used_sheet_names:
+                    continue
+                score = _fuzzy_score(title, t["name"])
+                if score > best_score:
+                    best_score, best_task = score, t
+            if best_score >= FUZZY_THRESHOLD and best_task is not None:
+                matched = best_task
+
+        if matched is not None:
+            it["sheet_match"] = matched["name"]
+            used_sheet_names.add(_norm(matched["name"]))
+        else:
+            it["sheet_match"] = None
+        it["is_new"] = matched is None
 
 
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
@@ -607,7 +667,7 @@ def main():
     log(f"aliases: {len(aliases)} | task groups: {len(groups)} ({', '.join(g['name'] for g in groups)})")
 
     sheet_pct = {_norm(t["name"]): t.get("pct") for t in sheet_tasks}
-    items = llm_describe(groups, sheet_pct)
+    items = llm_describe(groups, sheet_pct, sheet_tasks)
     source = "LLM"
     if items is None:
         if require_llm:
