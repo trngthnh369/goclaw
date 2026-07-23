@@ -115,6 +115,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 			// Collect contact even when bot is not mentioned (cache prevents DB spam).
 			if cc := c.ContactCollector(); cc != nil {
 				cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, senderID, senderName, "", "group", "user", "", "")
+				cc.EnsureContact(ctx, c.Type(), c.Name(), threadID, "", "", "", "group", "group", "", "")
 			}
 
 			slog.Debug("zalo_personal group message recorded (no mention)",
@@ -148,6 +149,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 	// Collect contact for group-mentioned messages.
 	if cc := c.ContactCollector(); cc != nil {
 		cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, senderID, senderName, "", "group", "user", "", "")
+		cc.EnsureContact(ctx, c.Type(), c.Name(), threadID, "", "", "", "group", "group", "", "")
 	}
 
 	metadata := map[string]string{

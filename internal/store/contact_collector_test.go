@@ -49,7 +49,7 @@ func (m *mockContactStore) UpsertContact(ctx context.Context, channelType, chann
 	return nil
 }
 
-func (m *mockContactStore) ResolveTenantUserID(_ context.Context, _, _ string) (string, error) {
+func (m *mockContactStore) ResolveTenantUserID(_ context.Context, _, _, _ string) (string, error) {
 	return "", nil
 }
 
@@ -60,7 +60,7 @@ func (m *mockContactStore) ListContacts(_ context.Context, _ ContactListOpts) ([
 func (m *mockContactStore) CountContacts(_ context.Context, _ ContactListOpts) (int, error) {
 	return 0, nil
 }
-func (m *mockContactStore) GetContactsBySenderIDs(_ context.Context, _ []string) (map[string]ChannelContact, error) {
+func (m *mockContactStore) GetContactsBySenderIDs(_ context.Context, _ []string, _ string) (map[string]ChannelContact, error) {
 	return nil, nil
 }
 func (m *mockContactStore) GetContactByID(_ context.Context, _ uuid.UUID) (*ChannelContact, error) {
@@ -165,5 +165,27 @@ func TestContactCollector_DifferentThreads(t *testing.T) {
 
 	if got := mock.upsertCount(); got != 2 {
 		t.Errorf("different-thread isolation broken: got %d upserts, want 2", got)
+	}
+}
+
+func TestContactCollector_RefreshContactBypassesSeenCache(t *testing.T) {
+	mock := &mockContactStore{}
+	c := NewContactCollector(mock, cache.NewInMemoryCache[bool]())
+
+	ctx := WithTenantID(context.Background(), uuid.New())
+	const groupID = "8709947833571143663"
+
+	c.EnsureContact(ctx, "zalo_personal", "zalo-main", groupID, "", "", "", "group", "group", "", "")
+	if err := c.RefreshContact(ctx, "zalo_personal", "zalo-main", groupID, "", "TEAM AI", "", "group", "group", "", ""); err != nil {
+		t.Fatalf("RefreshContact: %v", err)
+	}
+
+	if got := mock.upsertCount(); got != 2 {
+		t.Fatalf("refresh upserts = %d, want 2", got)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if got := mock.upserts[1].displayName; got != "TEAM AI" {
+		t.Errorf("refreshed display name = %q, want TEAM AI", got)
 	}
 }

@@ -67,7 +67,11 @@ func (h *ChannelInstancesHandler) handleSearchUsers(w http.ResponseWriter, r *ht
 				PeerKind:    c.PeerKind,
 			}
 			if c.MergedID != nil {
-				if resolved, err := h.contactStore.ResolveTenantUserID(ctx, c.ChannelType, c.SenderID); err == nil && resolved != "" {
+				channelInstance := ""
+				if c.ChannelInstance != nil {
+					channelInstance = *c.ChannelInstance
+				}
+				if resolved, err := h.contactStore.ResolveTenantUserID(ctx, c.ChannelType, channelInstance, c.SenderID); err == nil && resolved != "" {
 					r.MergedTenantUserID = &resolved
 					mergedUserIDs[resolved] = true
 				}

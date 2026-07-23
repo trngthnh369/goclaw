@@ -40,7 +40,7 @@ type ContactListOpts struct {
 
 // ContactStore manages channel contacts (auto-collected user info).
 type ContactStore interface {
-	// UpsertContact creates or updates a contact. On conflict (tenant_id, channel_type, sender_id, thread_id),
+	// UpsertContact creates or updates a contact. On conflict (tenant_id, channel_type, channel_instance, sender_id, thread_id),
 	// updates display_name, username, user_id, channel_instance, and last_seen_at.
 	// Pass empty threadID/threadType for base contacts (DM, group root).
 	UpsertContact(ctx context.Context, channelType, channelInstance, senderID, userID, displayName, username, peerKind, contactType, threadID, threadType string) error
@@ -53,7 +53,7 @@ type ContactStore interface {
 
 	// GetContactsBySenderIDs returns contacts matching the given sender IDs.
 	// Returns a map of sender_id → ChannelContact (first match per sender_id).
-	GetContactsBySenderIDs(ctx context.Context, senderIDs []string) (map[string]ChannelContact, error)
+	GetContactsBySenderIDs(ctx context.Context, senderIDs []string, channelInstance string) (map[string]ChannelContact, error)
 
 	// GetContactByID returns a single contact by primary key. Tenant-scoped via context.
 	GetContactByID(ctx context.Context, id uuid.UUID) (*ChannelContact, error)
@@ -73,8 +73,8 @@ type ContactStore interface {
 	// Tenant-scoped via context.
 	GetContactsByMergedID(ctx context.Context, mergedID uuid.UUID) ([]ChannelContact, error)
 
-	// ResolveTenantUserID looks up a contact by (channelType, senderID) and, if
-	// the contact has been merged, returns the linked tenant_user's user_id.
+	// ResolveTenantUserID looks up a contact by (channelType, channelInstance, senderID)
+	// and, if the contact has been merged, returns the linked tenant_user's user_id.
 	// Returns ("", nil) when the contact is not found or not merged.
-	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+	ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error)
 }

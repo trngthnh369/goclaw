@@ -440,7 +440,7 @@ func (f *fakeContactStore) UpsertContact(_ context.Context, channelType, channel
 	return nil
 }
 
-func (f *fakeContactStore) ResolveTenantUserID(_ context.Context, _, _ string) (string, error) {
+func (f *fakeContactStore) ResolveTenantUserID(_ context.Context, _, _, _ string) (string, error) {
 	return "", nil
 }
 func (f *fakeContactStore) ListContacts(_ context.Context, _ store.ContactListOpts) ([]store.ChannelContact, error) {
@@ -449,7 +449,7 @@ func (f *fakeContactStore) ListContacts(_ context.Context, _ store.ContactListOp
 func (f *fakeContactStore) CountContacts(_ context.Context, _ store.ContactListOpts) (int, error) {
 	return 0, nil
 }
-func (f *fakeContactStore) GetContactsBySenderIDs(_ context.Context, _ []string) (map[string]store.ChannelContact, error) {
+func (f *fakeContactStore) GetContactsBySenderIDs(_ context.Context, _ []string, _ string) (map[string]store.ChannelContact, error) {
 	return nil, nil
 }
 func (f *fakeContactStore) GetContactByID(_ context.Context, _ uuid.UUID) (*store.ChannelContact, error) {
@@ -561,17 +561,17 @@ func TestHandleMessage_ChatEntityForwardedAsMetadata(t *testing.T) {
 		wantIDMeta   string
 	}{
 		{
-			name: "crm_deal_chat",
+			name:       "crm_deal_chat",
 			entityType: "CRM", entityID: "DEAL|2064", messageType: "C",
 			wantTypeMeta: "CRM", wantIDMeta: "DEAL|2064",
 		},
 		{
-			name: "tasks_chat_X_type",
+			name:       "tasks_chat_X_type",
 			entityType: "TASKS_TASK", entityID: "2704", messageType: "X",
 			wantTypeMeta: "TASKS_TASK", wantIDMeta: "2704",
 		},
 		{
-			name: "plain_group_omits_keys",
+			name:       "plain_group_omits_keys",
 			entityType: "", entityID: "", messageType: "C",
 			wantTypeMeta: "", wantIDMeta: "",
 		},
@@ -584,15 +584,15 @@ func TestHandleMessage_ChatEntityForwardedAsMetadata(t *testing.T) {
 			ch.DispatchEvent(context.Background(), &Event{
 				Type: EventMessageAdd,
 				Params: EventParams{
-					FromUserID:     "42",
-					DialogID:       "chat999",
-					MessageID:      "m-entity",
-					MessageType:    tc.messageType,
-					Message:        "anything",
+					FromUserID:      "42",
+					DialogID:        "chat999",
+					MessageID:       "m-entity",
+					MessageType:     tc.messageType,
+					Message:         "anything",
 					MessageOriginal: "[USER=101]Bot[/USER] anything", // pass mention check for groups
-					MentionedList:  map[string]string{"101": "101"},
-					ChatEntityType: tc.entityType,
-					ChatEntityID:   tc.entityID,
+					MentionedList:   map[string]string{"101": "101"},
+					ChatEntityType:  tc.entityType,
+					ChatEntityID:    tc.entityID,
 				},
 			})
 			msg, ok := drainOne(mb, 500*time.Millisecond)

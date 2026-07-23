@@ -1272,8 +1272,8 @@ CREATE TABLE IF NOT EXISTS channel_contacts (
     last_seen_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- tenant-scoped unique including thread_id for topic contacts (migration 35)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_contacts_tenant_type_sender ON channel_contacts(tenant_id, channel_type, sender_id, COALESCE(thread_id, ''));
+-- tenant + channel-instance scoped unique including thread_id for topic contacts.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_contacts_tenant_type_sender ON channel_contacts(tenant_id, channel_type, COALESCE(channel_instance, ''), sender_id, COALESCE(thread_id, ''));
 CREATE INDEX IF NOT EXISTS idx_channel_contacts_instance ON channel_contacts(channel_instance) WHERE channel_instance IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_channel_contacts_merged ON channel_contacts(merged_id) WHERE merged_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_channel_contacts_search ON channel_contacts(display_name, username);

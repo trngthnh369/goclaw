@@ -125,5 +125,7 @@ func (c *Channel) restart(ctx context.Context) error {
 	c.sess = sess
 	c.listener = ln
 	c.mu.Unlock()
+
+	go c.syncGroupContacts(ctx, sess)
 	return nil
 }

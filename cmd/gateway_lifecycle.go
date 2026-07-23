@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
-	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
@@ -33,6 +32,7 @@ type lifecycleDeps struct {
 	postTurn          tools.PostTurnProcessor
 	subagentMgr       *tools.SubagentManager
 	consumerTeamStore store.TeamStore
+	contactCollector  *store.ContactCollector
 	auditCh           chan bus.AuditEventPayload
 	sigCh             chan os.Signal
 }
@@ -140,14 +140,7 @@ func (d *gatewayDeps) runLifecycle(
 			"agent", payload.AgentKey, "provider", payload.Provider)
 	})
 
-	// Contact collector: auto-collect user info from channels with in-memory dedup cache.
-	var contactCollector *store.ContactCollector
-	if d.pgStores.Contacts != nil {
-		contactCollector = store.NewContactCollector(d.pgStores.Contacts, cache.NewInMemoryCache[bool]())
-		d.channelMgr.SetContactCollector(contactCollector)
-	}
-
-	go consumeInboundMessages(ctx, d.msgBus, d.agentRouter, d.cfg, deps.sched, d.channelMgr, deps.consumerTeamStore, deps.quotaChecker, d.pgStores.Sessions, d.pgStores.Agents, contactCollector, deps.postTurn, deps.subagentMgr, d.usageCapSvc, d.providerRegistry)
+	go consumeInboundMessages(ctx, d.msgBus, d.agentRouter, d.cfg, deps.sched, d.channelMgr, deps.consumerTeamStore, deps.quotaChecker, d.pgStores.Sessions, d.pgStores.Agents, deps.contactCollector, deps.postTurn, deps.subagentMgr, d.usageCapSvc, d.providerRegistry)
 
 	// Webhook callback worker — delivers async webhook_calls rows to receiver callback_url.
 	// Runs in both editions: Standard (PG, concurrency=4) and Lite (SQLite, concurrency=1).

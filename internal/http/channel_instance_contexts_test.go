@@ -48,7 +48,7 @@ func (s *fakeChannelContextContactStore) CountContacts(context.Context, store.Co
 	return len(s.contacts), nil
 }
 
-func (s *fakeChannelContextContactStore) GetContactsBySenderIDs(context.Context, []string) (map[string]store.ChannelContact, error) {
+func (s *fakeChannelContextContactStore) GetContactsBySenderIDs(context.Context, []string, string) (map[string]store.ChannelContact, error) {
 	return map[string]store.ChannelContact{}, nil
 }
 
@@ -72,7 +72,7 @@ func (s *fakeChannelContextContactStore) GetContactsByMergedID(context.Context, 
 	return nil, nil
 }
 
-func (s *fakeChannelContextContactStore) ResolveTenantUserID(context.Context, string, string) (string, error) {
+func (s *fakeChannelContextContactStore) ResolveTenantUserID(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
 

@@ -9,27 +9,27 @@ import (
 // UserIdentityResolver resolves raw user IDs to merged tenant user identities.
 // Used by the agent loop to set CredentialUserID in context before tool execution.
 type UserIdentityResolver interface {
-	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+	ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error)
 }
 
 // contactStoreResolver wraps a ContactStore for nil-safe resolution.
 type contactStoreResolver struct {
 	store interface {
-		ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+		ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error)
 	}
 }
 
-func (r *contactStoreResolver) ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error) {
+func (r *contactStoreResolver) ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error) {
 	if r.store == nil {
 		return "", nil
 	}
-	return r.store.ResolveTenantUserID(ctx, channelType, senderID)
+	return r.store.ResolveTenantUserID(ctx, channelType, channelInstance, senderID)
 }
 
 // newContactResolver creates a UserIdentityResolver from a ContactStore.
 // Returns nil if the store is nil (resolver is optional).
 func newContactResolver(cs interface {
-	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+	ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error)
 }) UserIdentityResolver {
 	if cs == nil {
 		return nil
@@ -50,7 +50,7 @@ func (l *Loop) resolveCredentialUserID(ctx context.Context, req RunRequest) stri
 	// Non-group: try resolving UserID directly (covers unresolved DMs, HTTP API, cron)
 	if req.PeerKind != "group" {
 		if channelType != "" && req.UserID != "" {
-			resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, req.UserID)
+			resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, req.Channel, req.UserID)
 			if err != nil {
 				slog.Debug("credential_resolve.dm_failed", "user", req.UserID, "channel", channelType, "error", err)
 			} else if resolved != "" {
@@ -66,7 +66,7 @@ func (l *Loop) resolveCredentialUserID(ctx context.Context, req RunRequest) stri
 		if idx := strings.IndexByte(senderNumeric, '|'); idx > 0 {
 			senderNumeric = senderNumeric[:idx]
 		}
-		resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, senderNumeric)
+		resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, req.Channel, senderNumeric)
 		if err != nil {
 			slog.Debug("credential_resolve.group_sender_failed", "sender", senderNumeric, "channel", channelType, "error", err)
 		} else if resolved != "" {
@@ -76,7 +76,7 @@ func (l *Loop) resolveCredentialUserID(ctx context.Context, req RunRequest) stri
 
 	// Group: try group contact resolution (group chatID merged to tenant user)
 	if chatID := extractGroupChatID(req.UserID); chatID != "" && channelType != "" {
-		resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, chatID)
+		resolved, err := l.userResolver.ResolveTenantUserID(ctx, channelType, req.Channel, chatID)
 		if err != nil {
 			slog.Debug("credential_resolve.group_contact_failed", "chatID", chatID, "channel", channelType, "error", err)
 		} else if resolved != "" {

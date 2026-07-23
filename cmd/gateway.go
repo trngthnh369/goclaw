@@ -642,6 +642,13 @@ func runGateway() {
 		}
 	}
 
+	// Set contact collector before starting channels so startup sync can populate group names.
+	var contactCollector *store.ContactCollector
+	if pgStores.Contacts != nil {
+		contactCollector = store.NewContactCollector(pgStores.Contacts, cache.NewInMemoryCache[bool]())
+		channelMgr.SetContactCollector(contactCollector)
+	}
+
 	// Start channels
 	if err := channelMgr.StartAll(ctx); err != nil {
 		slog.Error("failed to start channels", "error", err)
@@ -719,6 +726,7 @@ func runGateway() {
 		postTurn:          postTurn,
 		subagentMgr:       subagentMgr,
 		consumerTeamStore: consumerTeamStore,
+		contactCollector:  contactCollector,
 		auditCh:           auditCh,
 		sigCh:             sigCh,
 	})

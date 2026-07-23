@@ -29,9 +29,9 @@ func (s *SQLiteContactStore) UpsertContact(ctx context.Context, channelType, cha
 		tenantID = store.MasterTenantID
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO channel_contacts (channel_type, channel_instance, sender_id, user_id, display_name, username, peer_kind, contact_type, thread_id, thread_type, tenant_id)
-		VALUES (?, NULLIF(?,?), ?, NULLIF(?,?), NULLIF(?,?), NULLIF(?,?), NULLIF(?,?), ?, NULLIF(?,?), NULLIF(?,?), ?)
-		ON CONFLICT (tenant_id, channel_type, sender_id, COALESCE(thread_id, '')) DO UPDATE SET
+		INSERT INTO channel_contacts (id, channel_type, channel_instance, sender_id, user_id, display_name, username, peer_kind, contact_type, thread_id, thread_type, tenant_id)
+		VALUES (lower(hex(randomblob(16))), ?, NULLIF(?,?), ?, NULLIF(?,?), NULLIF(?,?), NULLIF(?,?), NULLIF(?,?), ?, NULLIF(?,?), NULLIF(?,?), ?)
+		ON CONFLICT (tenant_id, channel_type, COALESCE(channel_instance, ''), sender_id, COALESCE(thread_id, '')) DO UPDATE SET
 			display_name     = COALESCE(NULLIF(excluded.display_name,''), channel_contacts.display_name),
 			username         = COALESCE(NULLIF(excluded.username,''), channel_contacts.username),
 			user_id          = COALESCE(NULLIF(excluded.user_id,''), channel_contacts.user_id),
@@ -148,7 +148,7 @@ func (s *SQLiteContactStore) CountContacts(ctx context.Context, opts store.Conta
 	return count, err
 }
 
-func (s *SQLiteContactStore) GetContactsBySenderIDs(ctx context.Context, senderIDs []string) (map[string]store.ChannelContact, error) {
+func (s *SQLiteContactStore) GetContactsBySenderIDs(ctx context.Context, senderIDs []string, channelInstance string) (map[string]store.ChannelContact, error) {
 	if len(senderIDs) == 0 {
 		return map[string]store.ChannelContact{}, nil
 	}
@@ -164,10 +164,16 @@ func (s *SQLiteContactStore) GetContactsBySenderIDs(ctx context.Context, senderI
 	tid := store.TenantIDFromContext(ctx)
 	args = append(args, tid)
 
+	instanceClause := ""
+	if channelInstance != "" {
+		args = append(args, channelInstance)
+		instanceClause = " AND COALESCE(channel_instance, '') = ?"
+	}
+
 	// SQLite has no DISTINCT ON; emulate with GROUP BY + MAX rowid trick via subquery
 	query := `SELECT ` + contactSelectCols + `
 		FROM channel_contacts
-		WHERE sender_id IN (` + strings.Join(placeholders, ",") + `) AND tenant_id = ?
+		WHERE sender_id IN (` + strings.Join(placeholders, ",") + `) AND tenant_id = ?` + instanceClause + `
 		GROUP BY sender_id
 		ORDER BY sender_id, last_seen_at DESC`
 
@@ -299,15 +305,16 @@ func (s *SQLiteContactStore) GetContactsByMergedID(ctx context.Context, mergedID
 	return contacts, rows.Err()
 }
 
-func (s *SQLiteContactStore) ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error) {
+func (s *SQLiteContactStore) ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error) {
 	tid := store.TenantIDFromContext(ctx)
 	var tenantUserID string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tu.user_id FROM channel_contacts cc
 		 JOIN tenant_users tu ON cc.merged_id = tu.id
-		 WHERE cc.tenant_id = ? AND cc.channel_type = ? AND cc.sender_id = ?
+		 WHERE cc.tenant_id = ? AND cc.channel_type = ?
+		 AND COALESCE(cc.channel_instance, '') = ? AND cc.sender_id = ?
 		 AND cc.merged_id IS NOT NULL`,
-		tid, channelType, senderID,
+		tid, channelType, channelInstance, senderID,
 	).Scan(&tenantUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil

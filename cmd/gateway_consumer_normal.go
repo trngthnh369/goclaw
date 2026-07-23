@@ -152,7 +152,7 @@ func processNormalMessage(
 		if chType == "" {
 			chType = msg.Channel
 		}
-		if resolved, err := deps.ContactCollector.ResolveTenantUserID(ctx, chType, senderNumeric); err == nil && resolved != "" {
+		if resolved, err := deps.ContactCollector.ResolveTenantUserID(ctx, chType, msg.Channel, senderNumeric); err == nil && resolved != "" {
 			slog.Debug("contact.resolved_tenant_user", "sender", senderNumeric, "tenant_user", resolved)
 			userID = resolved
 		}
