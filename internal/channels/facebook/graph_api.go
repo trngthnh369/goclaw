@@ -3,27 +3,37 @@ package facebook
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	graphAPIVersion = "v25.0"
-	maxRetries      = 3
+	graphAPIVersion     = "v25.0"
+	maxRetries          = 3
+	maxPhotoUploadBytes = 25 << 20 // 25 MiB protects the shared gateway from oversized uploads.
 	// maxRetryAfterSec caps the Retry-After sleep to prevent goroutine stalls on abnormal values.
 	maxRetryAfterSec = 60
 )
 
 // graphAPIBase is the Graph API root. Declared as a variable so tests can
 // override it with an httptest.NewServer URL.
-var graphAPIBase = "https://graph.facebook.com"
+var (
+	graphAPIBase     = "https://graph.facebook.com"
+	photoUploadSlots = make(chan struct{}, 2)
+)
 
 // fbIDPattern validates Facebook object IDs: numeric or "{num}_{num}" form (post IDs).
 var fbIDPattern = regexp.MustCompile(`^\d+(_\d+)?$`)
@@ -178,18 +188,209 @@ func (g *GraphClient) SendTypingOn(ctx context.Context, recipientID string) erro
 	return err
 }
 
+// CreateFeedPost publishes a text post to the page feed. Returns the post ID.
+func (g *GraphClient) CreateFeedPost(ctx context.Context, message string) (string, error) {
+	if err := validateFBID(g.pageID); err != nil {
+		return "", fmt.Errorf("facebook: create feed post: %w", err)
+	}
+	path := fmt.Sprintf("/%s/feed", g.pageID)
+	body := map[string]string{"message": message}
+	data, err := g.doRequestOnce(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return "", fmt.Errorf("facebook: create feed post: %w", err)
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("facebook: parse feed post result: %w", err)
+	}
+	if result.ID == "" {
+		return "", fmt.Errorf("facebook: feed post response missing post ID")
+	}
+	return result.ID, nil
+}
+
+// CreatePhotoPost uploads a local image with caption to the page feed.
+func (g *GraphClient) CreatePhotoPost(ctx context.Context, caption, filePath string) (string, error) {
+	return g.CreatePhotoPostVerified(ctx, caption, filePath, "")
+}
+
+// CreatePhotoPostVerified uploads the exact approved image. The file is opened
+// once, identity-checked against its lstat result, optionally digest-verified,
+// then streamed from that same handle to avoid TOCTOU and large in-memory buffers.
+func (g *GraphClient) CreatePhotoPostVerified(
+	ctx context.Context,
+	caption string,
+	filePath string,
+	expectedSHA256 string,
+) (string, error) {
+	if err := validateFBID(g.pageID); err != nil {
+		return "", fmt.Errorf("facebook: create photo post: %w", err)
+	}
+
+	preInfo, err := os.Lstat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("facebook: stat image file: %w", err)
+	}
+	if preInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("facebook: image file must not be a symlink")
+	}
+	if !preInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("facebook: image file must be a regular file")
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("facebook: open image file: %w", err)
+	}
+	defer f.Close()
+
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("facebook: inspect opened image file: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(preInfo, openedInfo) {
+		return "", fmt.Errorf("facebook: image file identity changed before upload")
+	}
+	if openedInfo.Size() > maxPhotoUploadBytes {
+		return "", fmt.Errorf("facebook: image file too large: %d bytes exceeds %d", openedInfo.Size(), maxPhotoUploadBytes)
+	}
+
+	if expectedSHA256 != "" {
+		expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
+		decoded, decodeErr := hex.DecodeString(expectedSHA256)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("facebook: invalid approved image digest")
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, io.LimitReader(f, maxPhotoUploadBytes+1)); err != nil {
+			return "", fmt.Errorf("facebook: hash image file: %w", err)
+		}
+		if actual := hex.EncodeToString(h.Sum(nil)); actual != expectedSHA256 {
+			return "", fmt.Errorf("facebook: approved image digest mismatch")
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return "", fmt.Errorf("facebook: rewind image file: %w", err)
+		}
+	}
+
+	select {
+	case photoUploadSlots <- struct{}{}:
+		defer func() { <-photoUploadSlots }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(pipeWriter)
+	contentType := multipartWriter.FormDataContentType()
+	apiURL := fmt.Sprintf("%s/%s/%s/photos", graphAPIBase, graphAPIVersion, g.pageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, pipeReader)
+	if err != nil {
+		pipeReader.Close()
+		pipeWriter.Close()
+		return "", fmt.Errorf("facebook: build photo upload request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+g.pageAccessToken)
+	req.Header.Set("Content-Type", contentType)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeErr := func() error {
+			if err := multipartWriter.WriteField("caption", caption); err != nil {
+				return fmt.Errorf("write caption field: %w", err)
+			}
+			part, err := multipartWriter.CreateFormFile("source", filepath.Base(filePath))
+			if err != nil {
+				return fmt.Errorf("create form file: %w", err)
+			}
+			written, err := io.Copy(part, io.LimitReader(f, maxPhotoUploadBytes+1))
+			if err != nil {
+				return fmt.Errorf("copy image data: %w", err)
+			}
+			if written > maxPhotoUploadBytes {
+				return fmt.Errorf("image file exceeds %d bytes", maxPhotoUploadBytes)
+			}
+			return multipartWriter.Close()
+		}()
+		if writeErr != nil {
+			_ = pipeWriter.CloseWithError(writeErr)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		writeDone <- writeErr
+	}()
+
+	uploadClient := &http.Client{Timeout: 60 * time.Second}
+	resp, requestErr := uploadClient.Do(req)
+	if requestErr != nil {
+		_ = pipeReader.CloseWithError(requestErr)
+	}
+	writeErr := <-writeDone
+	_ = pipeReader.Close()
+	if requestErr != nil {
+		return "", fmt.Errorf("facebook: photo upload: %w", requestErr)
+	}
+	if writeErr != nil {
+		resp.Body.Close()
+		return "", fmt.Errorf("facebook: stream photo upload: %w", writeErr)
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("facebook: read photo upload response: %w", readErr)
+	}
+
+	g.logRateLimit(resp)
+
+	if resp.StatusCode >= 400 {
+		var apiErr graphErrorBody
+		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error.Code != 0 {
+			return "", &graphAPIError{code: apiErr.Error.Code, msg: apiErr.Error.Message}
+		}
+		return "", fmt.Errorf("facebook: photo upload http %d", resp.StatusCode)
+	}
+
+	var result struct {
+		PostID string `json:"post_id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("facebook: parse photo upload result: %w", err)
+	}
+	if result.PostID == "" {
+		return "", fmt.Errorf("facebook: photo upload response missing post ID")
+	}
+	return result.PostID, nil
+}
+
 // graphBackoffBase is the base unit for exponential retry backoff in doRequest.
 // Production default = 1s, giving 1s, 2s, 4s... per attempt.
 // Tests override to 1ms via newFakeGraph so retry tests don't burn 6s of real
 // wall-clock time. Production behavior is unchanged.
 var graphBackoffBase = 1 * time.Second
 
+// doRequestOnce executes a single Graph API call without retries.
+// Use for non-idempotent publishing endpoints where retrying an ambiguous
+// timeout/5xx can create duplicate public posts.
+func (g *GraphClient) doRequestOnce(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return g.doRequestWithAttempts(ctx, method, path, body, 1)
+}
+
 // doRequest executes a Graph API call with retries on transient errors.
 // The page access token is passed via Authorization header (never in the URL).
 func (g *GraphClient) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return g.doRequestWithAttempts(ctx, method, path, body, maxRetries)
+}
+
+func (g *GraphClient) doRequestWithAttempts(ctx context.Context, method, path string, body any, attempts int) ([]byte, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
 	apiURL := fmt.Sprintf("%s/%s%s", graphAPIBase, graphAPIVersion, path)
 
-	for attempt := range maxRetries {
+	for attempt := range attempts {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * graphBackoffBase
 			select {
@@ -220,7 +421,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
-			if attempt < maxRetries-1 {
+			if attempt < attempts-1 {
 				slog.Warn("facebook: api request error, retrying", "attempt", attempt+1, "err", err)
 				continue
 			}
@@ -237,7 +438,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 		g.logRateLimit(resp)
 
 		// Retry on 5xx.
-		if resp.StatusCode >= 500 && attempt < maxRetries-1 {
+		if resp.StatusCode >= 500 && attempt < attempts-1 {
 			slog.Warn("facebook: server error, retrying", "status", resp.StatusCode, "attempt", attempt+1)
 			continue
 		}
@@ -252,7 +453,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 					return nil, &graphAPIError{code: apiErr.Error.Code, msg: apiErr.Error.Message}
 				}
 				// Rate limited: sleep and retry (capped).
-				if resp.StatusCode == 429 && attempt < maxRetries-1 {
+				if resp.StatusCode == 429 && attempt < attempts-1 {
 					retryAfter := parseRetryAfter(resp)
 					slog.Warn("facebook: rate limited", "retry_after", retryAfter)
 					select {
@@ -271,7 +472,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 	}
 
 	// All attempts exhausted (only reachable when every iteration took the continue path).
-	return nil, fmt.Errorf("facebook: max retries exceeded")
+	return nil, fmt.Errorf("facebook: max attempts exceeded")
 }
 
 // logRateLimit parses the X-Business-Use-Case-Usage header and warns when approaching limits.

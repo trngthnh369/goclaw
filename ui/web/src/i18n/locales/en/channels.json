@@ -346,6 +346,10 @@
     "media_max_mb": { "label": "Max Media Size (MB)" },
     "link_preview": { "label": "Link Preview" },
     "allow_from": { "label": "Allowed Users" },
+    "approval_allow_from": {
+      "label": "Approval Allowed Users",
+      "help": "User IDs allowed to approve irreversible public actions (e.g. publishing to a Facebook page). Separate from Allowed Users — empty means nobody can approve."
+    },
     "domain": { "label": "Domain" },
     "connection_mode": {
       "label": "Connection Mode",

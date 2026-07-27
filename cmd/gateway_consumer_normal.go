@@ -438,14 +438,26 @@ func processNormalMessage(
 	// upstream dispatch set MetaOriginRole.
 	effectiveRole := msg.Metadata[tools.MetaOriginRole]
 
+	replyToMediaCount := 0
+	_, _ = fmt.Sscanf(msg.Metadata["reply_to_media_count"], "%d", &replyToMediaCount)
+
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
-		SessionKey:   sessionKey,
-		Message:      msg.Content,
-		Media:        reqMedia,
-		ForwardMedia: fwdMedia,
-		Channel:      msg.Channel,
-		ChannelType:  resolveChannelType(deps.ChannelMgr, msg.Channel),
+		SessionKey:            sessionKey,
+		Message:               msg.Content,
+		CurrentMessage:        msg.Metadata["current_message"],
+		ReplyToMessageID:      msg.Metadata["reply_to_message_id"],
+		ReplyToContent:        msg.Metadata["reply_to_content"],
+		ReplyToMedia:          msg.Metadata["reply_to_media"],
+		ReplyToMediaCount:     replyToMediaCount,
+		ReplyToMediaComplete:  msg.Metadata["reply_to_media_complete"] == "true",
+		ReplyToAuthorID:       msg.Metadata["reply_to_author_id"],
+		ChannelBotUserID:      msg.Metadata["channel_bot_user_id"],
+		ApprovalSenderAllowed: msg.Metadata["approval_sender_allowed"] == "true",
+		Media:                 reqMedia,
+		ForwardMedia:          fwdMedia,
+		Channel:               msg.Channel,
+		ChannelType:           resolveChannelType(deps.ChannelMgr, msg.Channel),
 		// Forward Bitrix24 portal domain from channel metadata so the
 		// system prompt can teach the LLM the correct entity URL host.
 		// Empty for non-bitrix24 channels — section is skipped downstream.

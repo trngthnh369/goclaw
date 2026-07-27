@@ -138,9 +138,14 @@ type TelegramTopicConfig struct {
 }
 
 type DiscordConfig struct {
-	Enabled           bool                `json:"enabled"`
-	Token             string              `json:"token"`
-	AllowFrom         FlexibleStringSlice `json:"allow_from"`
+	Enabled   bool                `json:"enabled"`
+	Token     string              `json:"token"`
+	AllowFrom FlexibleStringSlice `json:"allow_from"`
+	// ApprovalAllowFrom gates irreversible outward-facing actions (publishing to
+	// a public Facebook page feed). Deliberately separate from AllowFrom, which
+	// only decides who may talk to the bot — chat access must not imply publish
+	// authority. Empty (default) = nobody may approve.
+	ApprovalAllowFrom FlexibleStringSlice `json:"approval_allow_from,omitempty"`
 	DMPolicy          string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
 	GroupPolicy       string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
 	RequireMention    *bool               `json:"require_mention,omitempty"` // require @bot mention in groups (default true)

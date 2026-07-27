@@ -2,6 +2,8 @@ package discord
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,6 +159,200 @@ func TestDiscordThreadBackfillDoesNotDuplicatePendingThreadHistory(t *testing.T)
 	}
 }
 
+func TestDiscordReplyMetadataBindsReviewedContentAndMedia(t *testing.T) {
+	const mediaBody = "png!"
+	server := newDiscordThreadBackfillServer(t, discordThreadBackfillFixture{
+		channelJSON: `{"id":"thread-1","guild_id":"guild-1","type":0}`,
+		media: map[string]string{
+			"/cdn/review.png": mediaBody,
+		},
+	})
+	defer server.Close()
+	ch, mb := newThreadBackfillTestChannel(t, server)
+
+	msg := mentionedThreadMessage("approval-1", "duyệt")
+	msg.ReferencedMessage = &discordgo.Message{
+		ID:        "review-msg-1",
+		ChannelID: "thread-1",
+		GuildID:   "guild-1",
+		Content:   "Reviewed article",
+		Author:    &discordgo.User{ID: "bot-1", Username: "GoClaw", Bot: true},
+		Attachments: []*discordgo.MessageAttachment{{
+			ID:          "att-1",
+			Filename:    "review.png",
+			ContentType: "image/png",
+			Size:        len(mediaBody),
+			URL:         server.URL + "/cdn/review.png",
+		}},
+	}
+	ch.handleMessage(ch.session, msg)
+
+	inbound := consumeThreadBackfillInbound(t, mb)
+	if got := inbound.Metadata["current_message"]; got != "duyệt" {
+		t.Fatalf("current_message = %q, want duyệt", got)
+	}
+	if got := inbound.Metadata["reply_to_message_id"]; got != "review-msg-1" {
+		t.Fatalf("reply_to_message_id = %q, want review-msg-1", got)
+	}
+	if got := inbound.Metadata["reply_to_content"]; got != "Reviewed article" {
+		t.Fatalf("reply_to_content = %q, want reviewed article", got)
+	}
+	if got := inbound.Metadata["reply_to_author_id"]; got != "bot-1" {
+		t.Fatalf("reply_to_author_id = %q, want bot-1", got)
+	}
+	if got := inbound.Metadata["channel_bot_user_id"]; got != "bot-1" {
+		t.Fatalf("channel_bot_user_id = %q, want bot-1", got)
+	}
+	if got := inbound.Metadata["approval_sender_allowed"]; got != "true" {
+		t.Fatalf("approval_sender_allowed = %q, want true", got)
+	}
+	if got := inbound.Metadata["reply_to_media_complete"]; got != "true" {
+		t.Fatalf("reply_to_media_complete = %q, want true", got)
+	}
+	if got := inbound.Metadata["reply_to_media_count"]; got != "1" {
+		t.Fatalf("reply_to_media_count = %q, want 1", got)
+	}
+	digest := sha256.Sum256([]byte(mediaBody))
+	wantMedia := "review.png=" + hex.EncodeToString(digest[:])
+	if got := inbound.Metadata["reply_to_media"]; got != wantMedia {
+		t.Fatalf("reply_to_media = %q, want %q", got, wantMedia)
+	}
+}
+
+func TestDiscordReplyMetadataFailsClosedWhenAttachmentDownloadFails(t *testing.T) {
+	server := newDiscordThreadBackfillServer(t, discordThreadBackfillFixture{
+		channelJSON: `{"id":"thread-1","guild_id":"guild-1","type":0}`,
+		media:       map[string]string{},
+	})
+	defer server.Close()
+	ch, mb := newThreadBackfillTestChannel(t, server)
+
+	msg := mentionedThreadMessage("approval-1", "duyệt")
+	msg.ReferencedMessage = &discordgo.Message{
+		ID:        "review-msg-1",
+		ChannelID: "thread-1",
+		GuildID:   "guild-1",
+		Content:   "Reviewed article",
+		Author:    &discordgo.User{ID: "bot-1", Username: "GoClaw", Bot: true},
+		Attachments: []*discordgo.MessageAttachment{{
+			ID:          "att-1",
+			Filename:    "missing.png",
+			ContentType: "image/png",
+			Size:        4,
+			URL:         server.URL + "/cdn/missing.png",
+		}},
+	}
+	ch.handleMessage(ch.session, msg)
+
+	inbound := consumeThreadBackfillInbound(t, mb)
+	if got := inbound.Metadata["reply_to_media_count"]; got != "1" {
+		t.Fatalf("reply_to_media_count = %q, want 1", got)
+	}
+	if got := inbound.Metadata["reply_to_media_complete"]; got != "false" {
+		t.Fatalf("reply_to_media_complete = %q, want false", got)
+	}
+	if got := inbound.Metadata["reply_to_media"]; got != "" {
+		t.Fatalf("reply_to_media = %q, want empty", got)
+	}
+}
+
+// A message_reference pointing at a bot message in a different channel must not
+// produce approval evidence — otherwise an allowlisted approver could "duyệt"
+// bot-authored content that was never posted in the review channel.
+func TestDiscordCrossChannelReplyWithholdsApprovalEvidence(t *testing.T) {
+	const mediaBody = "png!"
+	server := newDiscordThreadBackfillServer(t, discordThreadBackfillFixture{
+		channelJSON: `{"id":"thread-1","guild_id":"guild-1","type":0}`,
+		media: map[string]string{
+			"/cdn/review.png": mediaBody,
+		},
+	})
+	defer server.Close()
+	ch, mb := newThreadBackfillTestChannel(t, server)
+
+	msg := mentionedThreadMessage("approval-1", "duyệt")
+	msg.ReferencedMessage = &discordgo.Message{
+		ID:        "review-msg-1",
+		ChannelID: "other-channel-9", // elsewhere, not the channel the reply landed in
+		GuildID:   "guild-1",
+		Content:   "Reviewed article",
+		Author:    &discordgo.User{ID: "bot-1", Username: "GoClaw", Bot: true},
+		Attachments: []*discordgo.MessageAttachment{{
+			ID:          "att-1",
+			Filename:    "review.png",
+			ContentType: "image/png",
+			Size:        len(mediaBody),
+			URL:         server.URL + "/cdn/review.png",
+		}},
+	}
+	ch.handleMessage(ch.session, msg)
+
+	inbound := consumeThreadBackfillInbound(t, mb)
+	for _, key := range []string{
+		"reply_to_message_id",
+		"reply_to_content",
+		"reply_to_author_id",
+		"reply_to_media",
+	} {
+		if got := inbound.Metadata[key]; got != "" {
+			t.Fatalf("metadata[%q] = %q, want empty for cross-channel reply", key, got)
+		}
+	}
+	if got := inbound.Metadata["reply_to_media_complete"]; got != "false" {
+		t.Fatalf("reply_to_media_complete = %q, want false", got)
+	}
+	if got := inbound.Metadata["reply_to_media_count"]; got != "0" {
+		t.Fatalf("reply_to_media_count = %q, want 0", got)
+	}
+}
+
+// Chat access must not confer publish authority: a sender present in AllowFrom
+// but absent from ApprovalAllowFrom may talk to the bot yet never approve a
+// public fanpage post.
+func TestDiscordChatAllowlistDoesNotGrantApprovalAuthority(t *testing.T) {
+	server := newDiscordThreadBackfillServer(t, discordThreadBackfillFixture{
+		channelJSON: `{"id":"thread-1","guild_id":"guild-1","type":0}`,
+	})
+	defer server.Close()
+	ch, mb := newThreadBackfillTestChannel(t, server)
+	ch.config.ApprovalAllowFrom = nil // chat-allowlisted only
+
+	msg := mentionedThreadMessage("approval-1", "duyệt")
+	msg.ReferencedMessage = &discordgo.Message{
+		ID:        "review-msg-1",
+		ChannelID: "thread-1",
+		GuildID:   "guild-1",
+		Content:   "Reviewed article",
+		Author:    &discordgo.User{ID: "bot-1", Username: "GoClaw", Bot: true},
+	}
+	ch.handleMessage(ch.session, msg)
+
+	inbound := consumeThreadBackfillInbound(t, mb)
+	if got := inbound.Metadata["approval_sender_allowed"]; got != "false" {
+		t.Fatalf("approval_sender_allowed = %q, want false for chat-only allowlist", got)
+	}
+	// The reply itself is still delivered normally — only publish authority is withheld.
+	if got := inbound.Metadata["reply_to_message_id"]; got != "review-msg-1" {
+		t.Fatalf("reply_to_message_id = %q, want review-msg-1", got)
+	}
+}
+
+func TestDiscordNonReplyMetadataLeavesApprovalFieldsEmpty(t *testing.T) {
+	server := newDiscordThreadBackfillServer(t, discordThreadBackfillFixture{
+		channelJSON: `{"id":"thread-1","guild_id":"guild-1","type":0}`,
+	})
+	defer server.Close()
+	ch, mb := newThreadBackfillTestChannel(t, server)
+
+	ch.handleMessage(ch.session, mentionedThreadMessage("current-1", "regular request"))
+	inbound := consumeThreadBackfillInbound(t, mb)
+	for _, key := range []string{"reply_to_message_id", "reply_to_content", "reply_to_media"} {
+		if got := inbound.Metadata[key]; got != "" {
+			t.Fatalf("metadata[%q] = %q, want empty", key, got)
+		}
+	}
+}
+
 type discordThreadBackfillFixture struct {
 	channelJSON   string
 	historyStatus int
@@ -231,7 +427,12 @@ func newThreadBackfillTestChannel(t *testing.T, server *httptest.Server) (*Chann
 		BaseChannel: channels.NewBaseChannel(channels.TypeDiscord, mb, nil),
 		session:     session,
 		botUserID:   "bot-1",
-		config:      config.DiscordConfig{GroupPolicy: "open", MediaMaxBytes: 8 * 1024 * 1024},
+		config: config.DiscordConfig{
+			GroupPolicy:       "open",
+			AllowFrom:         config.FlexibleStringSlice{"current-user"},
+			ApprovalAllowFrom: config.FlexibleStringSlice{"current-user"},
+			MediaMaxBytes:     8 * 1024 * 1024,
+		},
 	}
 	ch.SetRequireMention(true)
 	ch.SetGroupHistory(channels.MakeHistory(channels.TypeDiscord, nil, ch.TenantID()))

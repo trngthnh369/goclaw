@@ -190,6 +190,46 @@ func (m *Manager) SendMediaToChannel(ctx context.Context, channelName, chatID, c
 	return channel.Send(ctx, msg)
 }
 
+// DispatchOutbound delivers a full OutboundMessage (with metadata) synchronously.
+// Used by message tool action="post" for synchronous error feedback.
+func (m *Manager) DispatchOutbound(ctx context.Context, msg bus.OutboundMessage) error {
+	m.mu.RLock()
+	channel, exists := m.channels[msg.Channel]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("channel %s not found", msg.Channel)
+	}
+	if msg.Metadata != nil && msg.Metadata["fb_mode"] == "feed_post" {
+		if channel.Type() != TypeFacebook {
+			return fmt.Errorf("channel %s is %s, not a facebook feed publisher", msg.Channel, channel.Type())
+		}
+		if msg.ChatID != "feed" {
+			return fmt.Errorf("facebook feed publisher destination must be feed")
+		}
+		publisherAgentID := strings.TrimSpace(msg.Metadata["publisher_agent_id"])
+		owner, ok := channel.(interface{ AgentID() string })
+		if !ok || publisherAgentID == "" || strings.TrimSpace(owner.AgentID()) == "" {
+			return fmt.Errorf("facebook feed publisher ownership metadata missing")
+		}
+		if publisherAgentID != strings.TrimSpace(owner.AgentID()) {
+			return fmt.Errorf("facebook feed publisher is not owned by calling agent")
+		}
+		tenantOwner, ok := channel.(interface{ TenantID() uuid.UUID })
+		if !ok || msg.TenantID == uuid.Nil || tenantOwner.TenantID() == uuid.Nil {
+			return fmt.Errorf("facebook feed publisher tenant metadata missing")
+		}
+		if msg.TenantID != tenantOwner.TenantID() {
+			return fmt.Errorf("facebook feed publisher tenant mismatch")
+		}
+		if expectedMediaSHA := msg.Metadata["approved_media_sha256"]; len(msg.Media) == 1 && expectedMediaSHA == "" {
+			return fmt.Errorf("facebook feed publisher media approval digest missing")
+		}
+	}
+
+	return channel.Send(ctx, msg)
+}
+
 // --- Send error notification helpers ---
 
 // telegramAPIDescRe extracts the human-readable description from Telegram Bot API errors.

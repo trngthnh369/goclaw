@@ -58,7 +58,9 @@ func wireExtraTools(
 	toolsReg.Register(tools.NewSessionsSendTool())
 
 	// Message tool (send to channels)
-	toolsReg.Register(tools.NewMessageTool(workspace, agentCfg.RestrictToWorkspace))
+	messageTool := tools.NewMessageTool(workspace, agentCfg.RestrictToWorkspace)
+	messageTool.SetDataDir(dataDir)
+	toolsReg.Register(messageTool)
 	// Send file tool (deliver existing workspace file as attachment)
 	toolsReg.Register(tools.NewSendFileTool(workspace, agentCfg.RestrictToWorkspace))
 	// Group members tool (list members in group chats)

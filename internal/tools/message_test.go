@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,8 +319,8 @@ func TestValidateChannelTenant(t *testing.T) {
 
 	// Wire a mock checker.
 	channels := map[string]uuid.UUID{
-		"telegram":       tenantA,
-		"tenant-b-tg":   tenantB,
+		"telegram":    tenantA,
+		"tenant-b-tg": tenantB,
 	}
 	tool.SetChannelTenantChecker(func(name string) (uuid.UUID, bool) {
 		tid, ok := channels[name]
@@ -860,5 +862,693 @@ func TestMessageTargetEnforced(t *testing.T) {
 		if got := MessageTargetEnforced(tc.key); got != tc.want {
 			t.Errorf("MessageTargetEnforced(%q) = %v, want %v", tc.key, got, tc.want)
 		}
+	}
+}
+
+// --- action="post" tests ---
+
+const approvedFeedPostContent = "Approved article content"
+
+func approvedFeedPostCtx() context.Context {
+	return approvedFeedPostCtxFor(approvedFeedPostContent, "review-msg-1", "")
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func approvedFeedPostCtxFor(content, replyID, replyMedia string) context.Context {
+	ctx := context.Background()
+	ctx = WithToolSessionKey(ctx, "agent:a:discord:group:"+contentFactoryApprovalChannelID)
+	ctx = WithToolChannel(ctx, "discord-bot")
+	ctx = WithToolChatID(ctx, contentFactoryApprovalChannelID)
+	ctx = WithToolPeerKind(ctx, "group")
+	return store.WithRunContext(ctx, &store.RunContext{
+		AgentID:               uuid.MustParse("019d1b58-ae00-7b64-8594-89b6158f327b"),
+		AgentKey:              "zip-crazy",
+		TenantID:              uuid.MustParse("0193a5b0-7000-7000-8000-000000000001"),
+		SenderID:              "approver-1",
+		ChannelType:           "discord",
+		InboundMessage:        "[Replying to GoClaw]\n" + content + "\n[/Replying]\n\nduyệt",
+		ReplyToContent:        content,
+		ReplyToMedia:          replyMedia,
+		ReplyToMediaCount:     boolToInt(replyMedia != ""),
+		ReplyToMediaComplete:  true,
+		ReplyToAuthorID:       "discord-bot-user",
+		ChannelBotUserID:      "discord-bot-user",
+		ApprovalSenderAllowed: true,
+		CurrentMessage:        "duyệt",
+		ReplyToMessageID:      replyID,
+	})
+}
+
+func TestMessagePost_SyncDispatch(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bus.OutboundMessage
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = msg
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+	if !strings.Contains(res.ForLLM, `"status":"posted"`) {
+		t.Errorf("result = %q, want posted status", res.ForLLM)
+	}
+	if dispatched.Channel != "fb-page" {
+		t.Errorf("channel = %q, want fb-page", dispatched.Channel)
+	}
+	if dispatched.Content != approvedFeedPostContent {
+		t.Errorf("content = %q, want %q", dispatched.Content, approvedFeedPostContent)
+	}
+	if dispatched.Metadata["publisher_agent_id"] != "zip-crazy" {
+		t.Errorf("publisher_agent_id = %q, want zip-crazy", dispatched.Metadata["publisher_agent_id"])
+	}
+	if dispatched.Metadata["fb_mode"] != "feed_post" {
+		t.Errorf("fb_mode = %q, want feed_post", dispatched.Metadata["fb_mode"])
+	}
+}
+
+func TestMessagePost_SyncDispatch_Error(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var calls atomic.Int32
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		calls.Add(1)
+		return fmt.Errorf("Graph API: token expired at /private/path")
+	})
+	args := map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	}
+
+	res := tool.Execute(approvedFeedPostCtx(), args)
+	if res == nil || !res.IsError {
+		t.Fatal("expected ErrorResult on dispatch failure")
+	}
+	if !strings.Contains(res.ForLLM, "status is unknown") {
+		t.Errorf("error = %q, want unknown status", res.ForLLM)
+	}
+	if strings.Contains(res.ForLLM, "token expired") || strings.Contains(res.ForLLM, "/private/path") {
+		t.Fatalf("error leaked internal dispatch details: %q", res.ForLLM)
+	}
+
+	retry := tool.Execute(approvedFeedPostCtx(), args)
+	if retry == nil || !retry.IsError || !strings.Contains(retry.ForLLM, "already reserved") {
+		t.Fatalf("expected retry to be blocked by reservation, got: %+v", retry)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("dispatcher called %d times, want 1", got)
+	}
+}
+
+func TestMessagePost_RequiresSyncDispatcher(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	tool.SetMessageBus(bus.New())
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Async post",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected ErrorResult without synchronous dispatcher, got: %+v", res)
+	}
+	if !strings.Contains(res.ForLLM, "requires synchronous outbound dispatcher") {
+		t.Errorf("error = %q, want sync dispatcher requirement", res.ForLLM)
+	}
+}
+
+func TestMessagePost_NoDispatcherNoBus(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	// Neither dispatcher nor bus set.
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "No backend",
+	})
+	if res == nil || !res.IsError {
+		t.Fatal("expected ErrorResult when no dispatcher or bus")
+	}
+	if !strings.Contains(res.ForLLM, "requires synchronous outbound dispatcher") {
+		t.Errorf("error = %q, want sync dispatcher requirement", res.ForLLM)
+	}
+}
+
+func TestMessagePost_CrossTargetRequiresApprovalEvidence(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	ctx := context.Background()
+	ctx = WithToolSessionKey(ctx, "agent:a:discord:direct:user123")
+	ctx = WithToolChannel(ctx, "discord")
+	ctx = WithToolChatID(ctx, "user123")
+	ctx = WithToolPeerKind(ctx, "direct")
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":  "post",
+		"channel": "fb-page",
+		"message": "Approved article content",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected cross-target approval error, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called without explicit approval evidence")
+	}
+}
+
+func TestMessagePost_RejectsNegatedCurrentApproval(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	ctx := approvedFeedPostCtx()
+	ctx = store.WithRunContext(ctx, &store.RunContext{
+		SenderID:         "approver-1",
+		ChannelType:      "discord",
+		InboundMessage:   "[Replying to GoClaw]\nApproved article content\n[/Replying]\n\nkhông duyệt",
+		ReplyToContent:   "Approved article content",
+		CurrentMessage:   "không duyệt",
+		ReplyToMessageID: "review-msg-1",
+	})
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Approved article content",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected negated approval rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for negated approval")
+	}
+}
+
+func TestMessagePost_RejectsApprovalOutsideContentFactoryChannel(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	ctx := approvedFeedPostCtx()
+	ctx = WithToolChatID(ctx, "wrong-channel")
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Approved article content",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected origin channel rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for approval from wrong channel")
+	}
+}
+
+func TestMessagePost_RejectsHumanAuthoredReviewMessage(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+	ctx := approvedFeedPostCtx()
+	store.RunContextFromCtx(ctx).ReplyToAuthorID = "human-user"
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected human-authored review rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for human-authored review content")
+	}
+}
+
+func TestMessagePost_RejectsNonAllowlistedApprover(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+	ctx := approvedFeedPostCtx()
+	store.RunContextFromCtx(ctx).ApprovalSenderAllowed = false
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected approver allowlist rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for a non-allowlisted approver")
+	}
+}
+
+func TestMessagePost_RejectsIncompleteReplyMediaEvidence(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+	ctx := approvedFeedPostCtx()
+	rc := store.RunContextFromCtx(ctx)
+	rc.ReplyToMediaCount = 1
+	rc.ReplyToMediaComplete = false
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected incomplete media evidence rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called with incomplete media evidence")
+	}
+}
+
+func TestMessagePost_CrossTargetExplicitApprovalPasses(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bus.OutboundMessage
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = msg
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Approved article content",
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success with explicit approval, got: %+v", res)
+	}
+	if dispatched.Channel != "fb-page" {
+		t.Errorf("channel = %q, want fb-page", dispatched.Channel)
+	}
+}
+
+func TestMessagePost_RejectsContentNotInApprovedReply(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent + " with an unapproved suffix",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected full-content mismatch error, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for unapproved content")
+	}
+}
+
+func TestMessagePost_RejectsCaseSensitiveContentMutation(t *testing.T) {
+	const reviewed = "Read https://example.com/Product/ABC"
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+	ctx := approvedFeedPostCtxFor(reviewed, "review-msg-case", "")
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Read https://example.com/product/abc",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected case-sensitive content mismatch, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for case-mutated content")
+	}
+}
+
+func TestMessagePost_RejectsDifferentDestination(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "other-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected fixed-destination rejection, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for a different destination")
+	}
+}
+
+func TestMessagePost_DefaultTarget(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatched bus.OutboundMessage
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = msg
+		return nil
+	})
+
+	// No target in args, no chatID in context — should default to "feed".
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+	if dispatched.ChatID != "feed" {
+		t.Errorf("chatID = %q, want feed (default)", dispatched.ChatID)
+	}
+}
+
+func TestMessagePost_ConcurrentApprovalDispatchesOnce(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var dispatchCalls atomic.Int32
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatchCalls.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+	ctx := approvedFeedPostCtxFor(approvedFeedPostContent, "review-msg-concurrent", "")
+	args := map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	}
+
+	const attempts = 8
+	var successes atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for range attempts {
+		go func() {
+			defer wg.Done()
+			if res := tool.Execute(ctx, args); res != nil && !res.IsError {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := dispatchCalls.Load(); got != 1 {
+		t.Fatalf("dispatcher called %d times, want 1", got)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful executions = %d, want 1", got)
+	}
+}
+
+func TestMessagePost_ReservationSharedAcrossUserWorkspaces(t *testing.T) {
+	dataDir := t.TempDir()
+	toolA := NewMessageTool(t.TempDir(), false)
+	toolB := NewMessageTool(t.TempDir(), false)
+	toolA.SetDataDir(dataDir)
+	toolB.SetDataDir(dataDir)
+	var dispatchCalls atomic.Int32
+	dispatcher := func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatchCalls.Add(1)
+		return nil
+	}
+	toolA.SetOutboundDispatcher(dispatcher)
+	toolB.SetOutboundDispatcher(dispatcher)
+	ctx := approvedFeedPostCtxFor(approvedFeedPostContent, "review-msg-cross-workspace", "")
+	args := map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedFeedPostContent,
+	}
+
+	if res := toolA.Execute(ctx, args); res == nil || res.IsError {
+		t.Fatalf("first workspace post failed: %+v", res)
+	}
+	if res := toolB.Execute(ctx, args); res == nil || !res.IsError {
+		t.Fatalf("second workspace should be blocked by shared reservation: %+v", res)
+	}
+	if got := dispatchCalls.Load(); got != 1 {
+		t.Fatalf("dispatcher called %d times, want 1", got)
+	}
+}
+
+func TestMessagePost_WithMedia(t *testing.T) {
+	workspace := t.TempDir()
+	imgFile := filepath.Join(workspace, "photo.png")
+	os.WriteFile(imgFile, []byte("png-data"), 0o644)
+	imgCanonical, _ := filepath.EvalSymlinks(imgFile)
+	imgSHA, err := hashFeedPostFile(imgCanonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched bus.OutboundMessage
+	var dispatchedMedia []byte
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = msg
+		var err error
+		dispatchedMedia, err = os.ReadFile(msg.Media[0].URL)
+		return err
+	})
+
+	ctx := approvedFeedPostCtxFor("Article text", "review-msg-media", "photo.png="+imgSHA)
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Article text\nMEDIA:" + imgCanonical,
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+	if len(dispatched.Media) != 1 {
+		t.Fatalf("expected 1 media, got %d", len(dispatched.Media))
+	}
+	if dispatched.Media[0].URL == imgCanonical {
+		t.Errorf("media URL should use a gateway-owned immutable snapshot")
+	}
+	if string(dispatchedMedia) != "png-data" {
+		t.Errorf("dispatched media = %q, want png-data", dispatchedMedia)
+	}
+	if _, err := os.Stat(dispatched.Media[0].URL); !os.IsNotExist(err) {
+		t.Errorf("staged media should be removed after dispatch, stat err = %v", err)
+	}
+	if dispatched.Content != "Article text" {
+		t.Errorf("content = %q, want 'Article text' (MEDIA: stripped)", dispatched.Content)
+	}
+	if dispatched.Metadata["approved_media_sha256"] != imgSHA {
+		t.Errorf("approved_media_sha256 = %q, want %q", dispatched.Metadata["approved_media_sha256"], imgSHA)
+	}
+}
+
+func TestMessagePost_RejectsMediaDigestMismatch(t *testing.T) {
+	workspace := t.TempDir()
+	imgFile := filepath.Join(workspace, "photo.png")
+	if err := os.WriteFile(imgFile, []byte("unapproved-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	approvedFile := filepath.Join(workspace, "approved.png")
+	if err := os.WriteFile(approvedFile, []byte("approved-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	approvedSHA, err := hashFeedPostFile(approvedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+	ctx := approvedFeedPostCtxFor("Article text", "review-msg-media-mismatch", "approved.png="+approvedSHA)
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Article text\nMEDIA:" + imgFile,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected media digest mismatch, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not be called for unapproved media")
+	}
+}
+
+func TestMessagePost_MalformedFeedPostMediaAborts(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), true)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Article text\nMEDIA: /tmp/photo.png",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected malformed media error, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not receive malformed MEDIA content")
+	}
+}
+
+func TestMessagePost_MixedMalformedFeedPostMediaAborts(t *testing.T) {
+	workspace := t.TempDir()
+	imgFile := filepath.Join(workspace, "photo.png")
+	os.WriteFile(imgFile, []byte("png-data"), 0o644)
+	imgCanonical, _ := filepath.EvalSymlinks(imgFile)
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Article text MEDIA:" + imgCanonical + " MEDIA: /tmp/private.png",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected mixed malformed media error, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not receive mixed malformed MEDIA content")
+	}
+}
+
+func TestMessagePost_InvalidFeedPostMediaAborts(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.png")
+	os.WriteFile(outside, []byte("secret"), 0o644)
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched bool
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = true
+		return nil
+	})
+
+	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        "Article text\nMEDIA:" + outside,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected invalid media error, got: %+v", res)
+	}
+	if dispatched {
+		t.Fatal("dispatcher must not receive unresolved MEDIA content")
+	}
+	if strings.Contains(res.ForLLM, outside) {
+		t.Fatalf("error leaked raw media path: %q", res.ForLLM)
 	}
 }

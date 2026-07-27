@@ -233,6 +233,33 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			ch.botSentAt.Store(msg.ChatID, time.Now())
 		}
 
+	case "feed_post":
+		if len(msg.Media) > 1 {
+			return fmt.Errorf("facebook: feed post supports exactly one image")
+		}
+		if len(msg.Media) > 0 && msg.Media[0].URL != "" {
+			postID, err := ch.graphClient.CreatePhotoPostVerified(
+				ctx,
+				msg.Content,
+				msg.Media[0].URL,
+				msg.Metadata["approved_media_sha256"],
+			)
+			if err != nil {
+				ch.handleAPIError(err)
+				return err
+			}
+			slog.Info("facebook: feed post published with photo",
+				"post_id", postID, "page_id", ch.graphClient.pageID)
+		} else {
+			postID, err := ch.graphClient.CreateFeedPost(ctx, msg.Content)
+			if err != nil {
+				ch.handleAPIError(err)
+				return err
+			}
+			slog.Info("facebook: feed post published",
+				"post_id", postID, "page_id", ch.graphClient.pageID)
+		}
+
 	default: // "comment"
 		commentID := msg.Metadata["reply_to_comment_id"]
 		if commentID == "" {

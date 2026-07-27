@@ -18,9 +18,12 @@ type discordCreds struct {
 
 // discordInstanceConfig maps the non-secret config JSONB from the channel_instances table.
 type discordInstanceConfig struct {
-	DMPolicy          string                     `json:"dm_policy,omitempty"`
-	GroupPolicy       string                     `json:"group_policy,omitempty"`
-	AllowFrom         []string                   `json:"allow_from,omitempty"`
+	DMPolicy    string   `json:"dm_policy,omitempty"`
+	GroupPolicy string   `json:"group_policy,omitempty"`
+	AllowFrom   []string `json:"allow_from,omitempty"`
+	// ApprovalAllowFrom gates public-fanpage publishing approvals. Separate from
+	// AllowFrom on purpose: chat access must not imply publish authority.
+	ApprovalAllowFrom []string                   `json:"approval_allow_from,omitempty"`
 	RequireMention    *bool                      `json:"require_mention,omitempty"`
 	HistoryLimit      int                        `json:"history_limit,omitempty"`
 	BlockReply        *bool                      `json:"block_reply,omitempty"`
@@ -78,6 +81,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		Enabled:           true,
 		Token:             c.Token,
 		AllowFrom:         ic.AllowFrom,
+		ApprovalAllowFrom: ic.ApprovalAllowFrom,
 		DMPolicy:          ic.DMPolicy,
 		GroupPolicy:       ic.GroupPolicy,
 		RequireMention:    ic.RequireMention,

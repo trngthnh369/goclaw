@@ -309,6 +309,10 @@
     "media_max_mb": { "label": "最大媒体大小 (MB)" },
     "link_preview": { "label": "链接预览" },
     "allow_from": { "label": "允许的用户" },
+    "approval_allow_from": {
+      "label": "允许审批的用户",
+      "help": "允许批准不可撤销的公开操作（例如发布到 Facebook 主页）的用户 ID。与「允许的用户」分开配置——留空表示无人可以批准。"
+    },
     "domain": { "label": "域名" },
     "connection_mode": { "label": "连接模式", "help": "WebSocket 无需公网 IP — 仅需出站连接" },
     "webhook_port": { "label": "Webhook 端口", "help": "0 = 共享主网关端口（推荐）" },

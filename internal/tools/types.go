@@ -101,6 +101,15 @@ type ChannelSenderAware interface {
 	SetChannelSender(ChannelSender)
 }
 
+// OutboundDispatcher sends a full OutboundMessage synchronously (with metadata/media).
+// Implemented by channels.Manager.DispatchOutbound.
+type OutboundDispatcher func(ctx context.Context, msg bus.OutboundMessage) error
+
+// OutboundDispatcherAware tools can receive an outbound dispatcher.
+type OutboundDispatcherAware interface {
+	SetOutboundDispatcher(OutboundDispatcher)
+}
+
 // ChannelTenantChecker returns the tenant UUID for a channel instance.
 // Used by the message tool to prevent cross-tenant sends.
 // Returns (tenantID, exists). Zero tenantID means legacy/config-based channel.

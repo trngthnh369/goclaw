@@ -511,10 +511,13 @@ func runGateway() {
 		channelInstancesH.SetChannelManager(channelMgr)
 	}
 
-	// Wire channel sender + tenant checker on message tool (now that channelMgr exists)
+	// Wire channel sender + tenant checker + outbound dispatcher on message tool (now that channelMgr exists)
 	if t, ok := toolsReg.Get("message"); ok {
 		if cs, ok := t.(tools.ChannelSenderAware); ok {
 			cs.SetChannelSender(channelMgr.SendToChannel)
+		}
+		if od, ok := t.(tools.OutboundDispatcherAware); ok {
+			od.SetOutboundDispatcher(channelMgr.DispatchOutbound)
 		}
 		if tc, ok := t.(tools.ChannelTenantCheckerAware); ok {
 			tc.SetChannelTenantChecker(channelMgr.ChannelTenantID)

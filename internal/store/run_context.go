@@ -21,15 +21,25 @@ type runContextKey struct{}
 // accessor functions (which fall back to individual keys when RunContext is absent).
 type RunContext struct {
 	// Identity
-	AgentID          uuid.UUID
-	AgentKey         string
-	TenantID         uuid.UUID
-	UserID           string
-	RunID            string
-	SessionKey       string
-	CredentialUserID string // resolved tenant user for credential lookups (empty = use UserID)
-	AgentType        string
-	SenderID         string
+	AgentID               uuid.UUID
+	AgentKey              string
+	TenantID              uuid.UUID
+	UserID                string
+	RunID                 string
+	SessionKey            string
+	CredentialUserID      string // resolved tenant user for credential lookups (empty = use UserID)
+	AgentType             string
+	SenderID              string
+	InboundMessage        string // enriched message that triggered this run
+	CurrentMessage        string // raw current user message without quoted/history context
+	ReplyToMessageID      string // source channel message ID being replied to, when available
+	ReplyToContent        string // source channel message content being replied to, when available
+	ReplyToMedia          string // newline-separated filename=sha256 entries from the replied-to message
+	ReplyToMediaCount     int    // number of attachments declared by the replied-to message
+	ReplyToMediaComplete  bool   // true only when every declared attachment was downloaded and hashed
+	ReplyToAuthorID       string // author ID of the replied-to message
+	ChannelBotUserID      string // authenticated bot user ID for the source channel instance
+	ApprovalSenderAllowed bool   // sender is explicitly allowlisted for public-post approval
 
 	// Flags
 	SelfEvolve          bool

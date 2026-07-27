@@ -2,14 +2,18 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,20 +25,50 @@ import (
 // Duplicated from agent.mediaPathPattern to avoid tools→agent import cycle.
 var embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
 
+const (
+	contentFactoryApprovalChannelID = "1530127001602625677"
+	contentFactoryFacebookChannel   = "fb-page"
+	contentFactoryFacebookTarget    = "feed"
+	feedPostLedgerDir               = ".goclaw/feed-post-ledger"
+	feedPostStagingDir              = ".goclaw/feed-post-staging"
+	maxFeedPostMediaBytes           = 25 << 20
+)
+
+type feedPostLedgerEntry struct {
+	Version          int       `json:"version"`
+	Status           string    `json:"status"`
+	TenantID         string    `json:"tenant_id"`
+	Channel          string    `json:"channel"`
+	Target           string    `json:"target"`
+	ReplyToMessageID string    `json:"reply_to_message_id"`
+	PayloadSHA256    string    `json:"payload_sha256"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type feedPostReservation struct {
+	path  string
+	entry feedPostLedgerEntry
+}
+
 // MessageTool allows the agent to proactively send messages to channels.
 type MessageTool struct {
-	workspace     string
-	restrict      bool
-	sender        ChannelSender
-	msgBus        *bus.MessageBus
-	tenantChecker ChannelTenantChecker
+	workspace          string
+	dataDir            string
+	restrict           bool
+	sender             ChannelSender
+	outboundDispatcher OutboundDispatcher
+	msgBus             *bus.MessageBus
+	tenantChecker      ChannelTenantChecker
 }
 
 func NewMessageTool(workspace string, restrict bool) *MessageTool {
 	return &MessageTool{workspace: workspace, restrict: restrict}
 }
 
+func (t *MessageTool) SetDataDir(dataDir string)                      { t.dataDir = dataDir }
 func (t *MessageTool) SetChannelSender(s ChannelSender)               { t.sender = s }
+func (t *MessageTool) SetOutboundDispatcher(d OutboundDispatcher)     { t.outboundDispatcher = d }
 func (t *MessageTool) SetMessageBus(b *bus.MessageBus)                { t.msgBus = b }
 func (t *MessageTool) SetChannelTenantChecker(c ChannelTenantChecker) { t.tenantChecker = c }
 
@@ -49,8 +83,8 @@ func (t *MessageTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "Action to perform: 'send'",
-				"enum":        []string{"send"},
+				"description": "Action to perform: 'send' to deliver a message, 'post' to publish to a channel feed (e.g. Facebook page)",
+				"enum":        []string{"send", "post"},
 			},
 			"channel": map[string]any{
 				"type":        "string",
@@ -79,8 +113,8 @@ func (t *MessageTool) Parameters() map[string]any {
 
 func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result {
 	action := argString(args, "action")
-	if action != "send" {
-		return ErrorResult(fmt.Sprintf("unsupported action: %s (only 'send' is supported)", action))
+	if action != "send" && action != "post" {
+		return ErrorResult(fmt.Sprintf("unsupported action: %s (supported: 'send', 'post')", action))
 	}
 
 	message := argString(args, "message")
@@ -97,11 +131,17 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	}
 
 	target := argString(args, "target")
+	if target == "" && action == "post" {
+		target = "feed"
+	}
 	if target == "" {
 		target = ToolChatIDFromCtx(ctx)
 	}
 	if target == "" {
 		return ErrorResult("target chat ID is required (no current chat in context)")
+	}
+	if action == "post" && (channel != contentFactoryFacebookChannel || target != contentFactoryFacebookTarget) {
+		return ErrorResult("feed post destination must be fb-page/feed")
 	}
 
 	// Self-send guard: prevent agent from sending to its own chat via message tool.
@@ -179,6 +219,89 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		return res
 	}
 
+	// action="post": publish the exact Discord-reviewed payload to the fixed
+	// ContentFactory Facebook destination. Reservation happens before dispatch so
+	// duplicate approvals and ambiguous Graph API outcomes fail closed.
+	if action == "post" {
+		forward, _ := args["forward"].(bool)
+		reason := strings.TrimSpace(argString(args, "forward_reason"))
+		if err := validateFeedPostApprovalContext(ctx, forward, reason); err != nil {
+			return ErrorResult(err.Error())
+		}
+		if t.outboundDispatcher == nil {
+			return ErrorResult("post action requires synchronous outbound dispatcher")
+		}
+
+		rc := store.RunContextFromCtx(ctx)
+		if rc == nil || rc.AgentKey == "" {
+			return ErrorResult("feed post requires an authenticated publisher agent")
+		}
+		outMsg := bus.OutboundMessage{
+			Channel:  channel,
+			ChatID:   target,
+			Content:  message,
+			TenantID: rc.TenantID,
+			AgentID:  rc.AgentID,
+			Metadata: map[string]string{
+				"fb_mode":            "feed_post",
+				"publisher_agent_id": rc.AgentKey,
+			},
+		}
+		if strings.Contains(message, "MEDIA:") {
+			cleanMsg, embeddedMedia, err := t.extractFeedPostMedia(ctx, message)
+			if err != nil {
+				slog.Warn("message.feed_post_media_rejected", "reason", "validation_failed")
+				return ErrorResult("feed post media validation failed")
+			}
+			outMsg.Content = cleanMsg
+			outMsg.Media = embeddedMedia
+		}
+
+		if !feedPostContentMatchesApproval(outMsg.Content, rc.ReplyToContent) {
+			return ErrorResult("feed post content does not match the approved Discord reply")
+		}
+		approvedMediaSHA, err := approvedFeedPostMediaSHA(rc.ReplyToMedia, rc.ReplyToMediaCount)
+		if err != nil {
+			slog.Warn("message.feed_post_reply_media_rejected", "error", err)
+			return ErrorResult("approved Discord media metadata is invalid")
+		}
+		cleanupMedia, err := t.bindFeedPostMedia(ctx, outMsg.Media, approvedMediaSHA)
+		if err != nil {
+			slog.Warn("message.feed_post_media_mismatch", "reason", "binding_failed")
+			return ErrorResult("feed post media does not match the approved Discord reply")
+		}
+		defer cleanupMedia()
+		if approvedMediaSHA != "" {
+			outMsg.Metadata["approved_media_sha256"] = approvedMediaSHA
+		}
+
+		payloadSHA := feedPostPayloadSHA(outMsg.Content, approvedMediaSHA)
+		reservation, err := t.reserveFeedPost(ctx, rc, channel, target, payloadSHA)
+		if err != nil {
+			slog.Warn("message.feed_post_reservation_rejected", "error_type", fmt.Sprintf("%T", err))
+			return ErrorResult("feed post is already reserved; operator reconciliation is required")
+		}
+
+		slog.Warn("message.feed_post_approval",
+			"channel", channel,
+			"target", target,
+			"reply_to_message_id", rc.ReplyToMessageID,
+			"publisher_agent_id", rc.AgentKey,
+			"reason", reason,
+		)
+		if err := t.outboundDispatcher(ctx, outMsg); err != nil {
+			if markErr := reservation.mark("pending_unknown"); markErr != nil {
+				slog.Error("message.feed_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", markErr))
+			}
+			slog.Error("message.feed_post_dispatch_failed", "error_type", fmt.Sprintf("%T", err))
+			return ErrorResult("feed post failed; status is unknown and automatic retry is blocked")
+		}
+		if err := reservation.mark("posted"); err != nil {
+			slog.Error("message.feed_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", err))
+		}
+		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"posted","channel":"%s"}`, channel)))
+	}
+
 	// Handle MEDIA: prefix — send file as attachment instead of text.
 	if filePath, ok := t.resolveMediaPath(ctx, message); ok {
 		return noticeOnSuccess(t.sendMedia(ctx, channel, target, filePath))
@@ -245,6 +368,301 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	return ErrorResult("no channel sender or message bus available")
 }
 
+func isPositiveFeedPostApproval(message string) bool {
+	cmd := strings.ToLower(strings.TrimSpace(message))
+	cmd = strings.Trim(cmd, " \t\r\n.!✅👍")
+	switch cmd {
+	case "duyệt", "approve", "đăng", "post":
+		return true
+	default:
+		return false
+	}
+}
+
+func feedPostContentMatchesApproval(postContent, replyContent string) bool {
+	post := normalizeApprovalContent(postContent)
+	reply := normalizeApprovalContent(replyContent)
+	return post != "" && post == reply
+}
+
+func normalizeApprovalContent(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.TrimSpace(s)
+}
+
+func approvedFeedPostMediaSHA(replyMedia string, attachmentCount int) (string, error) {
+	if attachmentCount < 0 || attachmentCount > 1 {
+		return "", fmt.Errorf("expected at most one approved media attachment")
+	}
+	if attachmentCount == 0 {
+		if strings.TrimSpace(replyMedia) != "" {
+			return "", fmt.Errorf("unexpected approved media digest")
+		}
+		return "", nil
+	}
+	if strings.TrimSpace(replyMedia) == "" {
+		return "", fmt.Errorf("approved media digest missing")
+	}
+	lines := strings.Split(strings.TrimSpace(replyMedia), "\n")
+	if len(lines) != attachmentCount {
+		return "", fmt.Errorf("approved media digest count mismatch")
+	}
+	entry := strings.TrimSpace(lines[0])
+	separator := strings.LastIndexByte(entry, '=')
+	if separator <= 0 {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	digest := strings.ToLower(strings.TrimSpace(entry[separator+1:]))
+	if len(digest) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	return digest, nil
+}
+
+func (t *MessageTool) bindFeedPostMedia(
+	ctx context.Context,
+	media []bus.MediaAttachment,
+	approvedSHA string,
+) (func(), error) {
+	if len(media) == 0 {
+		if approvedSHA != "" {
+			return nil, fmt.Errorf("approved payload has media but post does not")
+		}
+		return func() {}, nil
+	}
+	if len(media) != 1 || approvedSHA == "" {
+		return nil, fmt.Errorf("post media count does not match approved payload")
+	}
+
+	preInfo, err := os.Lstat(media[0].URL)
+	if err != nil || preInfo.Mode()&os.ModeSymlink != 0 || !preInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("approved media source is not a regular file")
+	}
+	source, err := os.Open(media[0].URL)
+	if err != nil {
+		return nil, fmt.Errorf("open approved media: %w", err)
+	}
+	defer source.Close()
+	openedInfo, err := source.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(preInfo, openedInfo) {
+		return nil, fmt.Errorf("approved media identity changed")
+	}
+	if openedInfo.Size() > maxFeedPostMediaBytes {
+		return nil, fmt.Errorf("approved media exceeds size limit")
+	}
+
+	stateRoot := t.feedPostStateRoot(ctx)
+	if stateRoot == "" {
+		return nil, fmt.Errorf("gateway data directory unavailable for media staging")
+	}
+	stagingDir := filepath.Join(stateRoot, filepath.FromSlash(feedPostStagingDir))
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create media staging directory: %w", err)
+	}
+	staged, err := os.CreateTemp(stagingDir, "upload-*.media")
+	if err != nil {
+		return nil, fmt.Errorf("create media snapshot: %w", err)
+	}
+	stagedPath := staged.Name()
+	cleanup := func() { _ = os.Remove(stagedPath) }
+	if err := staged.Chmod(0o600); err != nil {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("secure media snapshot: %w", err)
+	}
+
+	h := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(staged, h), io.LimitReader(source, maxFeedPostMediaBytes+1))
+	if copyErr != nil || written > maxFeedPostMediaBytes {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("snapshot approved media")
+	}
+	if err := staged.Sync(); err != nil {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("sync media snapshot: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("close media snapshot: %w", err)
+	}
+	if actualSHA := hex.EncodeToString(h.Sum(nil)); actualSHA != approvedSHA {
+		cleanup()
+		return nil, fmt.Errorf("post media digest mismatch")
+	}
+
+	media[0].URL = stagedPath
+	return cleanup, nil
+}
+
+func hashFeedPostFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func feedPostPayloadSHA(content, mediaSHA string) string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, normalizeApprovalContent(content))
+	_, _ = io.WriteString(h, "\x00")
+	_, _ = io.WriteString(h, mediaSHA)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (t *MessageTool) feedPostStateRoot(ctx context.Context) string {
+	if t.dataDir != "" {
+		return t.dataDir
+	}
+	if teamRoot := ToolTeamRootFromCtx(ctx); teamRoot != "" {
+		return teamRoot
+	}
+	return t.workspace
+}
+
+func (t *MessageTool) reserveFeedPost(
+	ctx context.Context,
+	rc *store.RunContext,
+	channel string,
+	target string,
+	payloadSHA string,
+) (*feedPostReservation, error) {
+	ledgerRoot := t.feedPostStateRoot(ctx)
+	if ledgerRoot == "" {
+		return nil, fmt.Errorf("gateway data directory unavailable for feed post ledger")
+	}
+	ledgerDir := filepath.Join(ledgerRoot, filepath.FromSlash(feedPostLedgerDir))
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create feed post ledger: %w", err)
+	}
+
+	keyHash := sha256.Sum256([]byte(strings.Join([]string{
+		rc.TenantID.String(),
+		channel,
+		target,
+		rc.ReplyToMessageID,
+	}, "\x00")))
+	path := filepath.Join(ledgerDir, hex.EncodeToString(keyHash[:])+".json")
+	now := time.Now().UTC()
+	entry := feedPostLedgerEntry{
+		Version:          1,
+		Status:           "pending",
+		TenantID:         rc.TenantID.String(),
+		Channel:          channel,
+		Target:           target,
+		ReplyToMessageID: rc.ReplyToMessageID,
+		PayloadSHA256:    payloadSHA,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("feed post reservation already exists")
+		}
+		return nil, fmt.Errorf("create feed post reservation: %w", err)
+	}
+	reservation := &feedPostReservation{path: path, entry: entry}
+	if err := json.NewEncoder(f).Encode(entry); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("write feed post reservation: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("sync feed post reservation: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close feed post reservation: %w", err)
+	}
+	return reservation, nil
+}
+
+func (r *feedPostReservation) mark(status string) error {
+	r.entry.Status = status
+	r.entry.UpdatedAt = time.Now().UTC()
+	f, err := os.OpenFile(r.path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(f).Encode(r.entry); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func validateFeedPostApprovalContext(ctx context.Context, forward bool, reason string) error {
+	if !forward || reason == "" {
+		return fmt.Errorf("feed post requires explicit forward=true and forward_reason quoting the user's approval")
+	}
+	if !MessageTargetEnforced(ToolSessionKeyFromCtx(ctx)) {
+		return fmt.Errorf("feed post requires a live user approval session")
+	}
+	ctxChannel := ToolChannelFromCtx(ctx)
+	ctxChatID := ToolChatIDFromCtx(ctx)
+	if ctxChannel == "" || ctxChatID == "" {
+		return fmt.Errorf("feed post requires an origin channel and chat for approval evidence")
+	}
+	if ctxChatID != contentFactoryApprovalChannelID {
+		return fmt.Errorf("feed post approval must originate from the ContentFactory review channel")
+	}
+	channelType := ToolChannelTypeFromCtx(ctx)
+	if channelType != "" && channelType != "discord" {
+		return fmt.Errorf("feed post approval must originate from Discord")
+	}
+	if channelType == "" && !strings.Contains(strings.ToLower(ctxChannel), "discord") {
+		return fmt.Errorf("feed post approval must originate from Discord")
+	}
+	rc := store.RunContextFromCtx(ctx)
+	if rc == nil || strings.TrimSpace(rc.SenderID) == "" {
+		return fmt.Errorf("feed post approval requires an authenticated sender")
+	}
+	if !rc.ApprovalSenderAllowed {
+		return fmt.Errorf("feed post approval sender is not explicitly allowlisted")
+	}
+	if strings.TrimSpace(rc.ReplyToMessageID) == "" {
+		return fmt.Errorf("feed post approval must be a structured reply to reviewed content")
+	}
+	if strings.TrimSpace(rc.ChannelBotUserID) == "" || rc.ReplyToAuthorID != rc.ChannelBotUserID {
+		return fmt.Errorf("feed post approval must reply to a bot-authored review message")
+	}
+	if !rc.ReplyToMediaComplete {
+		return fmt.Errorf("feed post approval media evidence is incomplete")
+	}
+	if !isPositiveFeedPostApproval(rc.CurrentMessage) {
+		return fmt.Errorf("feed post requires a positive approval command in the current message")
+	}
+	lowerReason := strings.ToLower(reason)
+	if !strings.Contains(lowerReason, "duyệt") &&
+		!strings.Contains(lowerReason, "approve") &&
+		!strings.Contains(lowerReason, "đăng") &&
+		!strings.Contains(lowerReason, "post") {
+		return fmt.Errorf("feed post approval reason must quote the user's approval command")
+	}
+	return nil
+}
+
 // validateChannelTenant checks the target channel belongs to the current tenant.
 // Returns an error Result if the send should be blocked, nil if allowed.
 func (t *MessageTool) validateChannelTenant(ctx context.Context, channel, target string) *Result {
@@ -304,6 +722,96 @@ func (t *MessageTool) sendMedia(ctx context.Context, channel, target, filePath s
 		"media":   filepath.Base(filePath),
 	})
 	return SilentResult(string(out))
+}
+
+// extractFeedPostMedia scans a feed post body for MEDIA: image references.
+// Unlike ordinary message sends, feed posts fail closed: every MEDIA token must
+// resolve to a workspace-owned regular image file before any public post occurs.
+func (t *MessageTool) extractFeedPostMedia(ctx context.Context, message string) (string, []bus.MediaAttachment, error) {
+	lines := strings.Split(message, "\n")
+	var cleaned []string
+	var media []bus.MediaAttachment
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		matches := embeddedMediaPattern.FindAllString(trimmed, -1)
+		if len(matches) == 0 {
+			if strings.Contains(trimmed, "MEDIA:") {
+				return "", nil, fmt.Errorf("malformed MEDIA token")
+			}
+			cleaned = append(cleaned, line)
+			continue
+		}
+		for _, raw := range matches {
+			resolved, err := t.resolveFeedPostMediaPath(ctx, raw)
+			if err != nil {
+				return "", nil, err
+			}
+			media = append(media, bus.MediaAttachment{
+				URL:         resolved,
+				ContentType: mimeFromPath(resolved),
+			})
+		}
+		remainder := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(line, ""))
+		if strings.Contains(remainder, "MEDIA:") {
+			return "", nil, fmt.Errorf("malformed MEDIA token")
+		}
+		if remainder != "" {
+			cleaned = append(cleaned, remainder)
+		}
+	}
+
+	if len(media) > 1 {
+		return "", nil, fmt.Errorf("feed posts support exactly one image attachment, got %d", len(media))
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n")), media, nil
+}
+
+func (t *MessageTool) resolveFeedPostMediaPath(ctx context.Context, s string) (string, error) {
+	filePath, ok := t.resolveMediaPath(ctx, s)
+	if !ok {
+		return "", fmt.Errorf("invalid MEDIA path")
+	}
+	contentType := mimeFromPath(filePath)
+	if !strings.HasPrefix(contentType, "image/") {
+		return "", fmt.Errorf("feed posts only support image media, got %s", contentType)
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("stat media file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("media file must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("media file must be a regular file")
+	}
+	if err := checkHardlink(filePath); err != nil {
+		return "", err
+	}
+
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		workspace = t.workspace
+	}
+	if effectiveRestrict(ctx, t.restrict) {
+		if workspace == "" {
+			return "", fmt.Errorf("workspace is required for feed post media")
+		}
+		wsReal, err := filepath.EvalSymlinks(workspace)
+		if err != nil {
+			return "", fmt.Errorf("resolve workspace: %w", err)
+		}
+		realPath, err := filepath.EvalSymlinks(filePath)
+		if err != nil {
+			return "", fmt.Errorf("resolve media file: %w", err)
+		}
+		if !isPathInside(realPath, wsReal) {
+			return "", fmt.Errorf("media file outside workspace")
+		}
+		return realPath, nil
+	}
+	return filePath, nil
 }
 
 // extractEmbeddedMedia scans a multi-line message for embedded MEDIA: path references.

@@ -309,6 +309,10 @@
     "media_max_mb": { "label": "Kích thước media tối đa (MB)" },
     "link_preview": { "label": "Xem trước liên kết" },
     "allow_from": { "label": "Người dùng được phép" },
+    "approval_allow_from": {
+      "label": "Người dùng được duyệt",
+      "help": "ID người dùng được phép duyệt các hành động công khai không thể hoàn tác (ví dụ đăng bài lên trang Facebook). Tách riêng khỏi Người dùng được phép — để trống nghĩa là không ai được duyệt."
+    },
     "domain": { "label": "Tên miền" },
     "connection_mode": { "label": "Chế độ kết nối", "help": "WebSocket không cần IP công khai — chỉ kết nối ra ngoài" },
     "webhook_port": { "label": "Cổng webhook", "help": "0 = chia sẻ cổng gateway chính (khuyến nghị)" },

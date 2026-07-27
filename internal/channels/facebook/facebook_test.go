@@ -1,6 +1,7 @@
 package facebook
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 )
 
 // --- verifySignature ---
@@ -329,6 +332,21 @@ func TestParseRetryAfter(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.header, got, tt.want)
 		}
+	}
+}
+
+func TestSendFeedPostRejectsMultipleImages(t *testing.T) {
+	ch := &Channel{graphClient: NewGraphClient("fake-token", "111222333")}
+	err := ch.Send(context.Background(), bus.OutboundMessage{
+		Content:  "caption",
+		Metadata: map[string]string{"fb_mode": "feed_post"},
+		Media: []bus.MediaAttachment{
+			{URL: "first.png", ContentType: "image/png"},
+			{URL: "second.png", ContentType: "image/png"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one image") {
+		t.Fatalf("err = %v, want multiple-image rejection", err)
 	}
 }
 

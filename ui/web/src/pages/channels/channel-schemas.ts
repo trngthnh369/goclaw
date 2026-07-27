@@ -164,6 +164,7 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "require_mention", label: "Require @mention in groups", type: "boolean", defaultValue: true },
     { key: "history_limit", label: "Group History Limit", type: "number", defaultValue: 50, help: "Max pending group messages for context (0 = disabled)" },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Discord user IDs" },
+    { key: "approval_allow_from", label: "Approval Allowed Users", type: "tags", help: "Discord user IDs allowed to approve irreversible public actions (e.g. publishing to a Facebook page). Separate from Allowed Users — empty means nobody can approve." },
     ...chatBehaviorOverrideFields,
   ],
   slack: [
