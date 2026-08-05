@@ -55,6 +55,27 @@ const (
 	contentFactoryTerminalKey       = "contentfactory-terminal"
 )
 
+// ContentFactoryTerminalActionPending reports whether agentKey is the
+// ContentFactory director and its one required terminal action — the review
+// draft (or abort notice) sent to the review channel — has not happened yet in
+// this run.
+//
+// The agent loop uses this to refuse to end a run on progress narration. That
+// invariant used to live only in the director's prompt, and prompts do not hold
+// it: runs on 2026-08-02 and 2026-08-05 both ended with an assistant turn that
+// announced the next delegation without emitting the tool call, and both were
+// recorded as status=ok with no review message ever sent.
+func ContentFactoryTerminalActionPending(ctx context.Context, agentKey string) bool {
+	if agentKey != contentFactoryDirectorAgentKey {
+		return false
+	}
+	latch := OutboundActionLatchFromCtx(ctx)
+	if latch == nil {
+		return false
+	}
+	return !latch.Reserved(contentFactoryTerminalKey)
+}
+
 var articleSHAPattern = regexp.MustCompile(`(?i)(?:\[Article SHA-256:\s*|article_sha256:|article_hash:)([a-fA-F0-9]{64})\]?`)
 
 type feedPostLedgerEntry struct {

@@ -344,7 +344,11 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	ctx = tools.WithToolAgentKey(ctx, l.id)
 
 	// Inject per-run trackers so tools can coordinate terminal actions and media delivery.
-	ctx = tools.WithOutboundActionLatch(ctx, tools.NewOutboundActionLatch())
+	// runViaPipeline creates the latch so the end-of-run terminal-action check
+	// can observe it; only create one here when running outside that path.
+	if tools.OutboundActionLatchFromCtx(ctx) == nil {
+		ctx = tools.WithOutboundActionLatch(ctx, tools.NewOutboundActionLatch())
+	}
 	// write_file(deliver=true) marks paths, message self-send guard checks before allowing.
 	ctx = tools.WithDeliveredMedia(ctx, tools.NewDeliveredMedia())
 

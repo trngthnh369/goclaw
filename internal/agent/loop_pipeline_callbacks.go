@@ -289,7 +289,16 @@ func (l *Loop) makeAuthorizeToolCall() func(ctx context.Context, state *pipeline
 	}
 }
 
+// maxTerminalActionNudges bounds how many times one run may be pushed to emit
+// its required terminal action. The nudge costs a full extra LLM call, and a
+// model that ignores it twice will not comply on a third — past that the run is
+// allowed to end and is reported as failed instead of silently ok.
+const maxTerminalActionNudges = 2
+
 func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx context.Context, state *pipeline.RunState, chatReq providers.ChatRequest) (*providers.ChatResponse, error) {
+	// Per-run counter: makeCallLLM is constructed once per run, so this closure
+	// variable cannot leak nudges between runs of the same agent.
+	terminalNudges := 0
 	return func(ctx context.Context, state *pipeline.RunState, chatReq providers.ChatRequest) (*providers.ChatResponse, error) {
 		provider := state.Provider
 		model := state.Model
@@ -437,6 +446,10 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		}
 
 		resp, err := callProvider("initial", chatReq)
+		// finish_reason distinguishes "the model chose to answer" from "the model
+		// was cut off at max_tokens mid-tool-call". Without it a run that ends on
+		// narration is indistinguishable from a truncated one, and think_stage
+		// treats text-only length-truncation as a valid final answer.
 		slog.Info("debug.llm.first_response",
 			"has_error", err != nil,
 			"tool_calls_count", func() int {
@@ -445,13 +458,49 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 				}
 				return len(resp.ToolCalls)
 			}(),
+			"finish_reason", func() string {
+				if resp == nil {
+					return ""
+				}
+				return resp.FinishReason
+			}(),
+			"completion_tokens", func() int {
+				if resp == nil || resp.Usage == nil {
+					return -1
+				}
+				return resp.Usage.CompletionTokens
+			}(),
+			"thinking_tokens", func() int {
+				if resp == nil || resp.Usage == nil {
+					return -1
+				}
+				return resp.Usage.ThinkingTokens
+			}(),
 			"tools_provided", len(chatReq.Tools))
 
-		// One guarded retry when MCP task tools are available but the model
-		// returns text-only instead of tool calls.
-		retryEligible := err == nil && resp != nil && len(resp.ToolCalls) == 0 && shouldRetryTaskMCP(chatReq)
-		slog.Info("debug.llm.retry_guard", "retry_eligible", retryEligible)
-		if retryEligible {
+		// One guarded retry when the model returns text-only but this turn is not
+		// allowed to end yet. Two independent triggers share the mechanism:
+		// unused MCP task tools, and a pending required terminal action.
+		var retryReason, retryNudge string
+		if err == nil && resp != nil && len(resp.ToolCalls) == 0 {
+			switch {
+			case shouldRetryTaskMCP(chatReq):
+				retryReason = "mcp_task_tools"
+				retryNudge = "MCP task tools are available in this turn. Do not ask for CRM identifier/email first. Call the relevant MCP task tool immediately, then answer with the tool result."
+			case terminalNudges < maxTerminalActionNudges && isPipelineRun(req) &&
+				tools.ContentFactoryTerminalActionPending(ctx, l.id):
+				terminalNudges++
+				retryReason = "terminal_action_pending"
+				// The abort option names the wording constraint on purpose: the
+				// review channel rejects internal status JSON, tracebacks and
+				// abort markers (message.go internalNoisePattern), so an abort
+				// notice phrased the obvious way is refused and the run still
+				// ends with nothing delivered.
+				retryNudge = "[System] You ended this turn with narration instead of a tool call, and the run's required terminal action has not happened yet. Describing what you are about to do does NOT perform it. Emit the tool call now: either send the review draft to the review channel, or send an abort notice there explaining why the pipeline cannot finish — written as plain prose, since that channel rejects status JSON, tool tracebacks and markers such as \"CRITICAL:\" or \"[ABORT PIPELINE]\". Do not reply with prose instead of calling the tool."
+			}
+		}
+		slog.Info("debug.llm.retry_guard", "retry_eligible", retryReason != "", "reason", retryReason)
+		if retryReason != "" {
 			retryReq := chatReq
 			if retryReq.Options == nil {
 				retryReq.Options = make(map[string]any)
@@ -459,17 +508,26 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 			retryReq.Options[providers.OptToolChoice] = "required"
 			retryReq.Messages = append(append([]providers.Message{}, chatReq.Messages...), providers.Message{
 				Role:    "system",
-				Content: "MCP task tools are available in this turn. Do not ask for CRM identifier/email first. Call the relevant MCP task tool immediately, then answer with the tool result.",
+				Content: retryNudge,
 			})
-			resp, err = callProvider("retry-tool-choice", retryReq)
+			retryResp, retryErr := callProvider("retry-tool-choice", retryReq)
 			slog.Info("debug.llm.retry_response",
-				"has_error", err != nil,
+				"reason", retryReason,
+				"has_error", retryErr != nil,
 				"tool_calls_count", func() int {
-					if resp == nil {
+					if retryResp == nil {
 						return -1
 					}
-					return len(resp.ToolCalls)
+					return len(retryResp.ToolCalls)
 				}())
+			// Keep the original answer when the nudge itself fails. The retry sets
+			// tool_choice=required, which not every provider accepts; letting its
+			// error escape would turn a run that merely under-delivered into a run
+			// that errors out.
+			// err is nil here: a retry is only eligible after a successful call.
+			if retryErr == nil && retryResp != nil {
+				resp = retryResp
+			}
 		}
 
 		if req.Stream && err == nil && resp != nil && resp.Thinking != "" && !streamThinkingEmitted {
@@ -503,6 +561,19 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		l.emitLLMSpanEnd(ctx, spanID, start, resp, err, opts...)
 		return resp, err
 	}
+}
+
+// isPipelineRun reports whether the scheduler started this run rather than a
+// person talking to the agent. Only scheduled runs owe a terminal action: the
+// ContentFactory director also holds an ordinary Discord conversation on the
+// same channel as the cron job delivers to (cron_jobs.deliver_channel =
+// cf-discord), so channel alone cannot tell the two apart, and forcing a tool
+// call on a human's question would break that conversation.
+func isPipelineRun(req *RunRequest) bool {
+	if req == nil {
+		return false
+	}
+	return strings.HasPrefix(req.RunID, "cron:") || req.Channel == "wake"
 }
 
 func shouldRetryTaskMCP(chatReq providers.ChatRequest) bool {

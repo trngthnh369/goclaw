@@ -685,6 +685,18 @@ func (l *OutboundActionLatch) TryReserve(key string) bool {
 	return true
 }
 
+// Reserved reports whether key is already reserved WITHOUT reserving it.
+// Callers that only want to observe progress must use this — TryReserve
+// mutates, so probing with it would consume the one-shot it is checking.
+func (l *OutboundActionLatch) Reserved(key string) bool {
+	if l == nil || key == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reserved[key]
+}
+
 // WithOutboundActionLatch injects an outbound action latch into context.
 func WithOutboundActionLatch(ctx context.Context, latch *OutboundActionLatch) context.Context {
 	return context.WithValue(ctx, ctxOutboundActionLatch, latch)
