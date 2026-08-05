@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 50
+const SchemaVersion = 51
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -856,7 +856,103 @@ CREATE INDEX IF NOT EXISTS idx_skill_user_grants_tenant ON skill_user_grants(ten
 	49: `DROP INDEX IF EXISTS idx_channel_contacts_tenant_type_sender;
 CREATE UNIQUE INDEX idx_channel_contacts_tenant_type_sender
   ON channel_contacts(tenant_id, channel_type, COALESCE(channel_instance, ''), sender_id, COALESCE(thread_id, ''));`,
+	// Version 50 → 51: managed team runs — parity with PG migration 000082.
+	50: addManagedTeamRunTables,
 }
+
+// addManagedTeamRunTables mirrors migrations/000082_managed_team_runs.up.sql.
+// SQLite has no ALTER TABLE ... IF NOT EXISTS, so the columns are added
+// unconditionally — EnsureSchema applies each patch exactly once per DB.
+const addManagedTeamRunTables = `
+ALTER TABLE team_tasks ADD COLUMN batch_id TEXT;
+ALTER TABLE team_tasks ADD COLUMN idempotency_key VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE team_tasks ADD COLUMN task_role VARCHAR(60) NOT NULL DEFAULT '';
+ALTER TABLE team_tasks ADD COLUMN dependency_policy VARCHAR(30) NOT NULL DEFAULT 'terminal';
+ALTER TABLE team_tasks ADD COLUMN execution_mode VARCHAR(30) NOT NULL DEFAULT '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_tasks_batch_idempotency
+  ON team_tasks(tenant_id, team_id, batch_id, idempotency_key)
+  WHERE batch_id IS NOT NULL AND idempotency_key <> '';
+CREATE INDEX IF NOT EXISTS idx_team_tasks_batch_status
+  ON team_tasks(tenant_id, team_id, batch_id, status)
+  WHERE batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_team_tasks_execution_mode
+  ON team_tasks(tenant_id, execution_mode)
+  WHERE execution_mode <> '';
+
+CREATE TABLE IF NOT EXISTS publication_slots (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workflow_key        VARCHAR(120) NOT NULL,
+    publication_date    TEXT NOT NULL,
+    current_generation  INT NOT NULL DEFAULT 1,
+    status              VARCHAR(30) NOT NULL DEFAULT 'open',
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, workflow_key, publication_date)
+);
+
+CREATE TABLE IF NOT EXISTS team_task_batches (
+    id                    TEXT NOT NULL PRIMARY KEY,
+    tenant_id             TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    slot_id               TEXT REFERENCES publication_slots(id) ON DELETE CASCADE,
+    team_id               TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+    batch_key             VARCHAR(180) NOT NULL,
+    generation            INT NOT NULL DEFAULT 1,
+    status                VARCHAR(30) NOT NULL DEFAULT 'constructing',
+    occurrence_id         VARCHAR(240) NOT NULL DEFAULT '',
+    attempt_id            VARCHAR(260) NOT NULL DEFAULT '',
+    collector_run_id      VARCHAR(160) NOT NULL DEFAULT '',
+    collector_run_path    TEXT NOT NULL DEFAULT '',
+    collector_manifest_sha256 VARCHAR(64) NOT NULL DEFAULT '',
+    collector_config_hash VARCHAR(64) NOT NULL DEFAULT '',
+    collector_committed_at TEXT,
+    publish_not_after     TEXT,
+    batch_deadline        TEXT,
+    destination           TEXT NOT NULL DEFAULT '{}',
+    quiesce_generation    INT NOT NULL DEFAULT 1,
+    failure_reason        TEXT NOT NULL DEFAULT '',
+    metadata              TEXT NOT NULL DEFAULT '{}',
+    created_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, team_id, batch_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_task_batches_status
+  ON team_task_batches(tenant_id, status, batch_deadline);
+CREATE INDEX IF NOT EXISTS idx_team_task_batches_team_status
+  ON team_task_batches(tenant_id, team_id, status);
+
+CREATE TABLE IF NOT EXISTS publication_deliveries (
+    id              TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    batch_id        TEXT NOT NULL REFERENCES team_task_batches(id) ON DELETE CASCADE,
+    destination     TEXT NOT NULL DEFAULT '{}',
+    artifact_sha256 VARCHAR(64) NOT NULL,
+    status          VARCHAR(30) NOT NULL DEFAULT 'planned',
+    error           TEXT NOT NULL DEFAULT '',
+    lease_owner     VARCHAR(160) NOT NULL DEFAULT '',
+    lease_expires_at TEXT,
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, batch_id, artifact_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS publication_delivery_chunks (
+    id              TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    delivery_id     TEXT NOT NULL REFERENCES publication_deliveries(id) ON DELETE CASCADE,
+    chunk_index     INT NOT NULL,
+    content_sha256  VARCHAR(64) NOT NULL,
+    status          VARCHAR(30) NOT NULL DEFAULT 'planned',
+    discord_message_id VARCHAR(120) NOT NULL DEFAULT '',
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, delivery_id, chunk_index)
+);
+`
 
 const addUsageEventAnalyticsTables = `
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -1454,6 +1550,11 @@ func idempotentColumnMigration(version int) (string, string, bool) {
 		return "secure_cli_user_credentials", "host_scope", true
 	case 41:
 		return "secure_cli_binaries", "adapter_name", true
+	case 50:
+		// Patch 50 adds five team_tasks columns plus four managed-run tables,
+		// all of which schema.sql already creates for fresh databases. batch_id
+		// is the sentinel: present means the whole patch is already applied.
+		return "team_tasks", "batch_id", true
 	default:
 		return "", "", false
 	}

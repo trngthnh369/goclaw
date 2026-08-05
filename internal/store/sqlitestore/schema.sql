@@ -993,10 +993,25 @@ CREATE TABLE IF NOT EXISTS team_tasks (
     comment_count        INT NOT NULL DEFAULT 0,
     attachment_count     INT NOT NULL DEFAULT 0,
     custom_scope         TEXT,
+    batch_id             TEXT,
+    idempotency_key      VARCHAR(120) NOT NULL DEFAULT '',
+    task_role            VARCHAR(60) NOT NULL DEFAULT '',
+    dependency_policy    VARCHAR(30) NOT NULL DEFAULT 'terminal',
+    execution_mode       VARCHAR(30) NOT NULL DEFAULT '',
     tenant_id            TEXT NOT NULL REFERENCES tenants(id),
     created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_tasks_batch_idempotency
+  ON team_tasks(tenant_id, team_id, batch_id, idempotency_key)
+  WHERE batch_id IS NOT NULL AND idempotency_key <> '';
+CREATE INDEX IF NOT EXISTS idx_team_tasks_batch_status
+  ON team_tasks(tenant_id, team_id, batch_id, status)
+  WHERE batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_team_tasks_execution_mode
+  ON team_tasks(tenant_id, execution_mode)
+  WHERE execution_mode <> '';
 
 CREATE INDEX IF NOT EXISTS idx_team_tasks_team ON team_tasks(team_id);
 CREATE INDEX IF NOT EXISTS idx_team_tasks_status ON team_tasks(team_id, status);
@@ -1010,6 +1025,85 @@ CREATE INDEX IF NOT EXISTS idx_tt_followup ON team_tasks(followup_at) WHERE foll
 -- idx_tt_blocked_by (GIN on array) omitted: Go code handles JSON array filtering
 CREATE INDEX IF NOT EXISTS idx_tt_owner_status ON team_tasks(team_id, owner_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_team_tasks_tenant ON team_tasks(tenant_id);
+
+-- ============================================================
+-- Managed team runs (PG migration 000082 parity)
+-- Tables: publication_slots, team_task_batches,
+--         publication_deliveries, publication_delivery_chunks
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS publication_slots (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workflow_key        VARCHAR(120) NOT NULL,
+    publication_date    TEXT NOT NULL,
+    current_generation  INT NOT NULL DEFAULT 1,
+    status              VARCHAR(30) NOT NULL DEFAULT 'open',
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, workflow_key, publication_date)
+);
+
+CREATE TABLE IF NOT EXISTS team_task_batches (
+    id                    TEXT NOT NULL PRIMARY KEY,
+    tenant_id             TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    slot_id               TEXT REFERENCES publication_slots(id) ON DELETE CASCADE,
+    team_id               TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+    batch_key             VARCHAR(180) NOT NULL,
+    generation            INT NOT NULL DEFAULT 1,
+    status                VARCHAR(30) NOT NULL DEFAULT 'constructing',
+    occurrence_id         VARCHAR(240) NOT NULL DEFAULT '',
+    attempt_id            VARCHAR(260) NOT NULL DEFAULT '',
+    collector_run_id      VARCHAR(160) NOT NULL DEFAULT '',
+    collector_run_path    TEXT NOT NULL DEFAULT '',
+    collector_manifest_sha256 VARCHAR(64) NOT NULL DEFAULT '',
+    collector_config_hash VARCHAR(64) NOT NULL DEFAULT '',
+    collector_committed_at TEXT,
+    publish_not_after     TEXT,
+    batch_deadline        TEXT,
+    destination           TEXT NOT NULL DEFAULT '{}',
+    quiesce_generation    INT NOT NULL DEFAULT 1,
+    failure_reason        TEXT NOT NULL DEFAULT '',
+    metadata              TEXT NOT NULL DEFAULT '{}',
+    created_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, team_id, batch_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_task_batches_status
+  ON team_task_batches(tenant_id, status, batch_deadline);
+CREATE INDEX IF NOT EXISTS idx_team_task_batches_team_status
+  ON team_task_batches(tenant_id, team_id, status);
+
+CREATE TABLE IF NOT EXISTS publication_deliveries (
+    id              TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    batch_id        TEXT NOT NULL REFERENCES team_task_batches(id) ON DELETE CASCADE,
+    destination     TEXT NOT NULL DEFAULT '{}',
+    artifact_sha256 VARCHAR(64) NOT NULL,
+    status          VARCHAR(30) NOT NULL DEFAULT 'planned',
+    error           TEXT NOT NULL DEFAULT '',
+    lease_owner     VARCHAR(160) NOT NULL DEFAULT '',
+    lease_expires_at TEXT,
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, batch_id, artifact_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS publication_delivery_chunks (
+    id              TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    delivery_id     TEXT NOT NULL REFERENCES publication_deliveries(id) ON DELETE CASCADE,
+    chunk_index     INT NOT NULL,
+    content_sha256  VARCHAR(64) NOT NULL,
+    status          VARCHAR(30) NOT NULL DEFAULT 'planned',
+    discord_message_id VARCHAR(120) NOT NULL DEFAULT '',
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(tenant_id, delivery_id, chunk_index)
+);
 
 -- ============================================================
 -- Table: team_task_comments
