@@ -2,6 +2,7 @@ package agent
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -322,6 +323,45 @@ func TestAgentToolPolicyWithWorkspace_NoDuplicates(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("read_file should appear exactly once, got %d", count)
+	}
+}
+
+// An explicit agent-level deny must win. alsoAllow is unioned AFTER deny is
+// subtracted in tools.PolicyEngine, so injecting a denied tool here silently
+// re-enabled it — the defect that let cf-designer keep calling list_files.
+func TestAgentToolPolicyWithWorkspace_DeniedToolNotInjected(t *testing.T) {
+	p := &config.ToolPolicySpec{Deny: []string{"list_files", "exec"}}
+	got := agentToolPolicyWithWorkspace(p, true)
+	for _, a := range got.AlsoAllow {
+		if a == "list_files" {
+			t.Fatal("list_files is denied and must not be injected into AlsoAllow")
+		}
+	}
+	// The tools that were not denied are still injected.
+	for _, tool := range []string{"read_file", "write_file"} {
+		if !slices.Contains(got.AlsoAllow, tool) {
+			t.Errorf("expected %q in AlsoAllow (not denied)", tool)
+		}
+	}
+}
+
+// A restrictive allow list keeps the documented injection behaviour: team
+// members must still reach the shared workspace unless they explicitly deny it.
+func TestAgentToolPolicyWithWorkspace_AllowListStillInjected(t *testing.T) {
+	p := &config.ToolPolicySpec{Allow: []string{"web_search", "web_fetch"}}
+	got := agentToolPolicyWithWorkspace(p, true)
+	for _, tool := range []string{"read_file", "write_file", "list_files"} {
+		if !slices.Contains(got.AlsoAllow, tool) {
+			t.Errorf("expected %q in AlsoAllow for an allow-list agent", tool)
+		}
+	}
+}
+
+func TestAgentToolPolicyWithWorkspace_AllDeniedInjectsNothing(t *testing.T) {
+	p := &config.ToolPolicySpec{Deny: []string{"read_file", "write_file", "list_files"}}
+	got := agentToolPolicyWithWorkspace(p, true)
+	if len(got.AlsoAllow) != 0 {
+		t.Errorf("nothing should be injected when all file tools are denied, got %v", got.AlsoAllow)
 	}
 }
 
