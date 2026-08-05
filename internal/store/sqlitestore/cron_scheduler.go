@@ -92,7 +92,7 @@ func (s *SQLiteCronStore) recomputeStaleJobs() {
 
 	now := time.Now()
 	rows, err := s.db.QueryContext(s.baseCtx,
-		`SELECT id, schedule_kind, cron_expression, run_at, timezone, interval_ms
+		`SELECT id, schedule_kind, cron_expression, run_at, timezone, interval_ms, name, next_run_at
 		 FROM cron_jobs WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at < ?)`, now)
 	if err != nil {
 		slog.Warn("cron: failed to query stale jobs", "error", err)
@@ -107,8 +107,10 @@ func (s *SQLiteCronStore) recomputeStaleJobs() {
 		var cronExpr, tz *string
 		var runAt *time.Time
 		var intervalMS *int64
+		var name string
+		var prevNextRun *time.Time
 
-		if err := rows.Scan(&id, &scheduleKind, &cronExpr, &runAt, &tz, &intervalMS); err != nil {
+		if err := rows.Scan(&id, &scheduleKind, &cronExpr, &runAt, &tz, &intervalMS, &name, &prevNextRun); err != nil {
 			continue
 		}
 
@@ -139,6 +141,16 @@ func (s *SQLiteCronStore) recomputeStaleJobs() {
 
 		if _, err := s.db.ExecContext(s.baseCtx, "UPDATE cron_jobs SET next_run_at = ?, updated_at = ? WHERE id = ?", *next, now, id); err != nil {
 			slog.Warn("cron: failed to advance stale job", "id", id, "error", err)
+		}
+		// A past-due slot is skipped, never run late. Say so per job: a daily
+		// job whose slot falls inside the host's restart window is starved
+		// silently forever otherwise.
+		if prevNextRun != nil {
+			slog.Warn("cron.missed_run",
+				"job", name, "id", id,
+				"missed_slot", prevNextRun.UTC().Format(time.RFC3339),
+				"rescheduled_to", next.UTC().Format(time.RFC3339),
+				"reason", "slot passed while the scheduler was not running; missed runs are skipped, not caught up")
 		}
 		fixed++
 	}
