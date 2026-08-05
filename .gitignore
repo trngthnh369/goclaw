@@ -237,3 +237,6 @@ backups/
 # tech-ai-research collector runtime artifacts
 skills/tech-ai-research/state/
 skills/tech-ai-research/runs/
+
+# local binary staging for image patching
+.build-out/
