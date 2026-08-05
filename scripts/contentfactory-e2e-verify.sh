@@ -141,6 +141,20 @@ else
   esac
 fi
 
+# Direct signal from the runtime, independent of how the summary happens to be
+# worded: the run finished with its required terminal action still pending.
+# A run can also end this way with a summary that reads like a result, so this
+# check is not redundant with the narration heuristic above.
+noterm=$(gwlogs | grep -c "contentfactory.run_without_terminal_action" || true)
+[ "${noterm:-0}" -eq 0 ] \
+  && pass "no run ended with a pending terminal action" \
+  || fail "${noterm} run(s) ended without the required terminal action (no review draft, no abort notice)"
+
+# Nudges are recoveries, not failures — but a run that needed them is worth
+# seeing, because the budget is 2 and a run that spends both is one step from failing.
+nudges=$(gwlogs | grep 'debug.llm.retry_guard' | grep -c 'reason=terminal_action_pending' || true)
+info "terminal-action nudges fired: ${nudges:-0} (budget 2 per run)"
+
 # Only channel=wake matters here — that is the cross-target breadcrumb a /wake
 # canary produces. channel=http warnings come from a different, unrelated path.
 breadcrumb=$(gwlogs | grep "unknown channel for outbound message" | grep -c "channel=wake" || true)
