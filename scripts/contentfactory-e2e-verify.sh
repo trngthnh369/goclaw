@@ -49,9 +49,14 @@ done
 
 designer=$(q "select count(*) from sessions s join agents a on a.id=s.agent_id
               where a.agent_key='cf-designer' and s.created_at > '$SINCE';")
-audit_passed=$(q "select count(*) from sessions s join agents a on a.id=s.agent_id
+# Only the auditor's OWN output counts. The delegation prompt quotes the phrase
+# "AUDIT_VERDICT: PASS" as an instruction, so matching the whole session blob
+# reports a pass on every run, including ones the gate correctly blocked.
+audit_passed=$(q "select count(*) from sessions s join agents a on a.id=s.agent_id,
+                    jsonb_array_elements(s.messages) m
                   where a.agent_key='cf-auditor' and s.created_at > '$SINCE'
-                    and s.messages::text like '%AUDIT_VERDICT: PASS%';")
+                    and m->>'role' = 'assistant'
+                    and m->>'content' ~ '(^|\n)AUDIT_VERDICT: PASS';")
 if [ "${audit_passed:-0}" -ge 1 ]; then
   [ "${designer:-0}" -eq 1 ] \
     && pass "cf-designer ran exactly once after audit PASS" \
