@@ -240,3 +240,8 @@ skills/tech-ai-research/runs/
 
 # local binary staging for image patching
 .build-out/
+
+# Rollback copy of the deployed gateway binary (74 MB) — never commit
+.goclaw-rollback
+.goclaw-new
+.goclaw-old
