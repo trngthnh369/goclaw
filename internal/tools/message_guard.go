@@ -48,6 +48,9 @@ func (t *MessageTool) postCrossTargetNotice(ctx context.Context, target, reason 
 	if origCh == "" || origChat == "" {
 		return
 	}
+	if origCh == "wake" && origChat == "api" {
+		return
+	}
 	locale := store.LocaleFromContext(ctx)
 	text := i18n.T(locale, i18n.MessageCrossTargetForwarded, target, reason)
 

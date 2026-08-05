@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -1431,6 +1433,56 @@ func TestMessagePost_WithMedia(t *testing.T) {
 	}
 }
 
+func TestMessagePost_ApprovedReplyTokenBindsExactContentAndMedia(t *testing.T) {
+	workspace := t.TempDir()
+	imgFile := filepath.Join(workspace, "approved.png")
+	if err := os.WriteFile(imgFile, []byte("approved-png-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imgCanonical, err := filepath.EvalSymlinks(imgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgSHA, err := hashFeedPostFile(imgCanonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched bus.OutboundMessage
+	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+		dispatched = msg
+		return nil
+	})
+
+	ctx := approvedFeedPostCtxFor(
+		"Complete approved article beyond any prompt preview truncation.",
+		"review-msg-approved-token",
+		"approved.png="+imgSHA,
+	)
+	store.RunContextFromCtx(ctx).ReplyToMediaPaths = []string{imgCanonical}
+	res := tool.Execute(ctx, map[string]any{
+		"action":         "post",
+		"channel":        "fb-page",
+		"target":         "feed",
+		"forward":        true,
+		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+		"message":        approvedReplyPayloadToken,
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+	if dispatched.Content != "Complete approved article beyond any prompt preview truncation." {
+		t.Fatalf("content = %q", dispatched.Content)
+	}
+	if len(dispatched.Media) != 1 {
+		t.Fatalf("media count = %d, want 1", len(dispatched.Media))
+	}
+	if dispatched.Metadata["approved_media_sha256"] != imgSHA {
+		t.Fatalf("approved media sha = %q, want %q", dispatched.Metadata["approved_media_sha256"], imgSHA)
+	}
+}
+
 func TestMessagePost_RejectsMediaDigestMismatch(t *testing.T) {
 	workspace := t.TempDir()
 	imgFile := filepath.Join(workspace, "photo.png")
@@ -1550,5 +1602,101 @@ func TestMessagePost_InvalidFeedPostMediaAborts(t *testing.T) {
 	}
 	if strings.Contains(res.ForLLM, outside) {
 		t.Fatalf("error leaked raw media path: %q", res.ForLLM)
+	}
+}
+
+func TestFeedPostContentMatchesApproval_Hybrid(t *testing.T) {
+	postContent := "Heading\n\nThis is a long article about AI Engineering and n8n workflows.\n\nConclusion."
+	h := sha256.Sum256([]byte(normalizeApprovalContent(postContent)))
+	postSHA := hex.EncodeToString(h[:])
+
+	// 1. Exact match
+	if !feedPostContentMatchesApproval(postContent, postContent, "") {
+		t.Errorf("exact match failed")
+	}
+
+	// 2. Tag match [Article SHA-256: <hex>]
+	tagReply := "Duyệt bài này [Article SHA-256: " + postSHA + "]"
+	if !feedPostContentMatchesApproval(postContent, tagReply, "") {
+		t.Errorf("tag match failed")
+	}
+
+	// 3. Document attachment match (.md)
+	docReplyMedia := "draft_article.md=" + postSHA
+	if !feedPostContentMatchesApproval(postContent, "Duyệt nhé", docReplyMedia) {
+		t.Errorf("doc attachment match failed")
+	}
+
+	// 4. Mismatch
+	if feedPostContentMatchesApproval(postContent, "Wrong content", "") {
+		t.Errorf("expected false on mismatch")
+	}
+}
+
+func TestIsPositiveFeedPostApproval_PhrasesAndNegation(t *testing.T) {
+	positives := []string{
+		"duyệt", "approve", "đăng", "post",
+		"duyệt nhé", "duyệt bài", "duyệt bài này", "duyệt đi", "duyệt nha",
+		"approve this", "ok duyệt", "đã duyệt",
+	}
+	for _, p := range positives {
+		if !isPositiveFeedPostApproval(p) {
+			t.Errorf("isPositiveFeedPostApproval(%q) = false, want true", p)
+		}
+	}
+
+	negatives := []string{
+		"chưa duyệt", "không duyệt", "đừng đăng", "hủy", "bỏ", "sửa bài", "edit this", "từ chối", "don't post", "stop",
+	}
+	for _, n := range negatives {
+		if isPositiveFeedPostApproval(n) {
+			t.Errorf("isPositiveFeedPostApproval(%q) = true, want false", n)
+		}
+	}
+}
+
+func TestApprovedFeedPostMediaSHA_Separation(t *testing.T) {
+	imgSHA := "1111111111111111111111111111111111111111111111111111111111111111"
+	docSHA := "2222222222222222222222222222222222222222222222222222222222222222"
+
+	// Single image + single doc attachment: image SHA extracted without triggering >1 image error
+	replyMedia := "article.md=" + docSHA + "\nphoto.png=" + imgSHA
+	gotSHA, err := approvedFeedPostMediaSHA(replyMedia, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotSHA != imgSHA {
+		t.Errorf("approvedFeedPostMediaSHA got %q, want %q", gotSHA, imgSHA)
+	}
+}
+
+func TestCleanStagedMedia(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := filepath.Join(dir, "old.media")
+	newFile := filepath.Join(dir, "new.media")
+
+	if err := os.WriteFile(oldFile, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newFile, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate oldFile modtime by 2 hours
+	oldTime := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(oldFile, oldTime, oldTime)
+
+	removed, err := CleanStagedMedia(dir, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("CleanStagedMedia error: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("CleanStagedMedia removed %d, want 1", removed)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Errorf("expected oldFile to be removed")
+	}
+	if _, err := os.Stat(newFile); err != nil {
+		t.Errorf("expected newFile to exist")
 	}
 }

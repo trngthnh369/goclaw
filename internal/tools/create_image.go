@@ -37,6 +37,8 @@ var imageGenModelDefaults = map[string]string{
 	"byteplus":   "seedream-5-0-260128",
 }
 
+const contentFactoryDesignerImageActionKey = "contentfactory-designer-image"
+
 // CreateImageTool generates images using an image generation API.
 type CreateImageTool struct {
 	registry  *providers.Registry
@@ -87,8 +89,23 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 	}
 	filenameHint, _ := args["filename_hint"].(string)
 
+	isContentFactoryDesigner := ToolAgentKeyFromCtx(ctx) == "cf-designer"
+	if isContentFactoryDesigner {
+		latch := OutboundActionLatchFromCtx(ctx)
+		if latch == nil {
+			return ErrorResult("ContentFactory designer image generation requires a run-scoped latch. Refusing to call the image provider because duplicate suppression is unavailable.")
+		}
+		if !latch.TryReserve(contentFactoryDesignerImageActionKey) {
+			return ErrorResult("ContentFactory designer image generation was already attempted in this run. Do not retry create_image or call any other tool. Return the prior MEDIA path as DESIGN_STATUS: COMPLETE when the first call succeeded; otherwise return DESIGN_STATUS: FAILED.")
+		}
+	}
+
 	chain := ResolveMediaProviderChain(ctx, "create_image", "", "",
 		imageGenProviderPriority, imageGenModelDefaults, t.registry)
+	if isContentFactoryDesigner && len(chain) > 0 {
+		chain = chain[:1]
+		chain[0].MaxRetries = 1
+	}
 
 	// Inject prompt and aspect_ratio into each chain entry's params
 	for i := range chain {
@@ -99,7 +116,16 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		chain[i].Params["aspect_ratio"] = aspectRatio
 	}
 
-	chainResult, err := ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
+	var chainResult *ChainResult
+	var err error
+	if isContentFactoryDesigner {
+		if len(chain) == 0 {
+			return ErrorResult("image generation failed: no providers configured")
+		}
+		chainResult, err = t.executeSingleProviderAttempt(ctx, chain[0])
+	} else {
+		chainResult, err = ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
+	}
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("image generation failed: %v", err))
 	}
@@ -130,7 +156,11 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		slog.Info("create_image: file saved", "path", imagePath, "size", fi.Size(), "data_len", len(imageData))
 	}
 
-	result := &Result{ForLLM: fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))}
+	forLLM := fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))
+	if isContentFactoryDesigner {
+		forLLM = fmt.Sprintf("DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nIMAGE_PATH: MEDIA:%s\n\nDo not call create_image, list_files, or any other tool again. Return the DESIGN_STATUS block above as your final response now.", imagePath)
+	}
+	result := &Result{ForLLM: forLLM}
 	result.Media = []bus.MediaFile{{Path: imagePath, MimeType: "image/png", Filename: filepath.Base(imagePath)}}
 	result.MediaPrompts = map[int]string{0: prompt}
 	result.Deliverable = fmt.Sprintf("[Generated image: %s]\nPrompt: %s", filepath.Base(imagePath), prompt)
@@ -143,6 +173,33 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		result.Usage = chainResult.Usage
 	}
 	return result
+}
+
+// executeSingleProviderAttempt performs exactly one upstream image request.
+// ContentFactory uses this path so provider pools and fallback chains cannot
+// create multiple billable images from one designer invocation.
+func (t *CreateImageTool) executeSingleProviderAttempt(ctx context.Context, entry MediaProviderEntry) (*ChainResult, error) {
+	provider, err := t.registry.Get(ctx, entry.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("provider %q not available: %w", entry.Provider, err)
+	}
+
+	params := make(map[string]any, len(entry.Params)+2)
+	for key, value := range entry.Params {
+		params[key] = value
+	}
+	params["_provider_type"] = ResolveProviderType(provider)
+	params["_native_provider"] = provider
+	credential, _ := provider.(credentialProvider)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(entry.Timeout)*time.Second)
+	timeoutCtx = providers.WithRetryMaxAttempts(timeoutCtx, 1)
+	defer cancel()
+	data, usage, err := t.callProvider(timeoutCtx, credential, entry.Provider, entry.Model, params)
+	if err != nil {
+		return nil, err
+	}
+	return &ChainResult{Data: data, Usage: usage, Provider: entry.Provider, Model: entry.Model}, nil
 }
 
 // embedPromptIntoPNG wraps agent.EmbedPNGPrompt for the tools package.

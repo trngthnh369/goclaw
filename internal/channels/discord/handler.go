@@ -169,6 +169,9 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	// Process media: STT, document extraction, build tags
 	var mediaFiles []bus.MediaFile
 	if len(mediaList) > 0 {
+		preserveApprovedReplyBytes := replySameChannel &&
+			replyToAuthorID == c.botUserID &&
+			c.isExplicitApprovalSender(senderID)
 		var extraContent string
 		for i := range mediaList {
 			mi := &mediaList[i]
@@ -208,9 +211,10 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 
 			if mi.FilePath != "" {
 				mediaFiles = append(mediaFiles, bus.MediaFile{
-					Path:     mi.FilePath,
-					MimeType: mi.ContentType,
-					Filename: mi.FileName,
+					Path:          mi.FilePath,
+					MimeType:      mi.ContentType,
+					Filename:      mi.FileName,
+					PreserveBytes: mi.FromReply && preserveApprovedReplyBytes,
 				})
 			}
 		}

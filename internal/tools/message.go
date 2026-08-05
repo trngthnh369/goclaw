@@ -21,9 +21,28 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// maxReviewMessageBytes mirrors the Discord single-message content limit
+// enforced in channels/discord.sendMediaMessage. Duplicated to avoid a
+// tools→channels import cycle; keep the two in sync.
+const maxReviewMessageBytes = 2000
+
+// reviewTextBytesWithMedia returns the byte length of the text that would be
+// delivered alongside an image, or 0 when the draft carries no image (text-only
+// sends are chunked by the channel adapter and are not size-limited here).
+func reviewTextBytesWithMedia(message string) int {
+	if !embeddedMediaPattern.MatchString(message) {
+		return 0
+	}
+	text := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(message, ""))
+	return len(text)
+}
+
 // embeddedMediaPattern matches "MEDIA:" followed by a non-whitespace path.
 // Duplicated from agent.mediaPathPattern to avoid tools→agent import cycle.
-var embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
+var (
+	embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
+	internalNoisePattern = regexp.MustCompile(`(?i)(?:^\s*\{.*"(?:agent|delegation_id|task_id|status)".*\}\s*$|I was unable to complete this task|CRITICAL:|\[ABORT PIPELINE\]|tool execution error:|context deadline exceeded)`)
+)
 
 const (
 	contentFactoryApprovalChannelID = "1530127001602625677"
@@ -32,7 +51,11 @@ const (
 	feedPostLedgerDir               = ".goclaw/feed-post-ledger"
 	feedPostStagingDir              = ".goclaw/feed-post-staging"
 	maxFeedPostMediaBytes           = 25 << 20
+	approvedReplyPayloadToken       = "APPROVED_REPLY"
+	contentFactoryTerminalKey       = "contentfactory-terminal"
 )
+
+var articleSHAPattern = regexp.MustCompile(`(?i)(?:\[Article SHA-256:\s*|article_sha256:|article_hash:)([a-fA-F0-9]{64})\]?`)
 
 type feedPostLedgerEntry struct {
 	Version          int       `json:"version"`
@@ -60,10 +83,56 @@ type MessageTool struct {
 	outboundDispatcher OutboundDispatcher
 	msgBus             *bus.MessageBus
 	tenantChecker      ChannelTenantChecker
+
+	approvalChannelID string
+	facebookChannel   string
+	facebookTarget    string
 }
 
 func NewMessageTool(workspace string, restrict bool) *MessageTool {
-	return &MessageTool{workspace: workspace, restrict: restrict}
+	return &MessageTool{
+		workspace:         workspace,
+		restrict:          restrict,
+		approvalChannelID: contentFactoryApprovalChannelID,
+		facebookChannel:   contentFactoryFacebookChannel,
+		facebookTarget:    contentFactoryFacebookTarget,
+	}
+}
+
+func (t *MessageTool) SetApprovalChannelID(id string) {
+	if id != "" {
+		t.approvalChannelID = id
+	}
+}
+
+func (t *MessageTool) SetFeedPostDestination(channel, target string) {
+	if channel != "" {
+		t.facebookChannel = channel
+	}
+	if target != "" {
+		t.facebookTarget = target
+	}
+}
+
+func (t *MessageTool) getApprovalChannelID() string {
+	if t.approvalChannelID != "" {
+		return t.approvalChannelID
+	}
+	return contentFactoryApprovalChannelID
+}
+
+func (t *MessageTool) getFacebookChannel() string {
+	if t.facebookChannel != "" {
+		return t.facebookChannel
+	}
+	return contentFactoryFacebookChannel
+}
+
+func (t *MessageTool) getFacebookTarget() string {
+	if t.facebookTarget != "" {
+		return t.facebookTarget
+	}
+	return contentFactoryFacebookTarget
 }
 
 func (t *MessageTool) SetDataDir(dataDir string)                      { t.dataDir = dataDir }
@@ -96,7 +165,7 @@ func (t *MessageTool) Parameters() map[string]any {
 			},
 			"message": map[string]any{
 				"type":        "string",
-				"description": "Message content to send. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'. The file will be uploaded as a document/photo/audio depending on its type.",
+				"description": "Message content to send. For action='post' after a structured approval reply, pass exactly 'APPROVED_REPLY' to bind the complete reviewed text and attachment natively. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'.",
 			},
 			"forward": map[string]any{
 				"type":        "boolean",
@@ -105,6 +174,10 @@ func (t *MessageTool) Parameters() map[string]any {
 			"forward_reason": map[string]any{
 				"type":        "string",
 				"description": "Quote the user's literal request when forward=true (e.g. 'gửi báo cáo này sang group dev'). Required when forward=true.",
+			},
+			"idempotency_key": map[string]any{
+				"type":        "string",
+				"description": "Optional per-run idempotency key. Required for ContentFactory terminal sends to the review channel; use contentfactory-terminal.",
 			},
 		},
 		"required": []string{"action", "message"},
@@ -132,7 +205,7 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 
 	target := argString(args, "target")
 	if target == "" && action == "post" {
-		target = "feed"
+		target = t.facebookTarget
 	}
 	if target == "" {
 		target = ToolChatIDFromCtx(ctx)
@@ -140,8 +213,31 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	if target == "" {
 		return ErrorResult("target chat ID is required (no current chat in context)")
 	}
-	if action == "post" && (channel != contentFactoryFacebookChannel || target != contentFactoryFacebookTarget) {
-		return ErrorResult("feed post destination must be fb-page/feed")
+	if action == "post" && (channel != t.facebookChannel || target != t.facebookTarget) {
+		return ErrorResult(fmt.Sprintf("feed post destination must be %s/%s", t.facebookChannel, t.facebookTarget))
+	}
+	isContentFactoryReviewTarget := action == "send" && (target == t.getApprovalChannelID() || target == contentFactoryApprovalChannelID)
+	if isContentFactoryReviewTarget {
+		// Every rejection below must run BEFORE the latch is reserved. The latch
+		// is one-shot per run, so validating after reserving turns a recoverable
+		// mistake into a run with no review message and no way to retry.
+		if key := argString(args, "idempotency_key"); key != contentFactoryTerminalKey {
+			return ErrorResult(fmt.Sprintf("ContentFactory review-channel sends require idempotency_key=%q", contentFactoryTerminalKey))
+		}
+		if internalNoisePattern.MatchString(message) {
+			return ErrorResult("Internal status JSON, abort messages, and tool error tracebacks cannot be sent to the review channel. Send ONLY clean article draft content.")
+		}
+		// A review draft carrying an image is delivered as a single media
+		// message, which fails closed above the platform limit instead of
+		// chunking. Reject it here so the sender can shorten and retry.
+		if n := reviewTextBytesWithMedia(message); n > maxReviewMessageBytes {
+			return ErrorResult(fmt.Sprintf(
+				"review draft with an image is %d bytes; the platform limit is %d. Shorten the article body — it will NOT be truncated.",
+				n, maxReviewMessageBytes))
+		}
+		if latch := OutboundActionLatchFromCtx(ctx); latch != nil && !latch.TryReserve(contentFactoryTerminalKey) {
+			return SilentResult(fmt.Sprintf(`{"status":"duplicate_suppressed","channel":"%s","target":"%s"}`, channel, target))
+		}
 	}
 
 	// Self-send guard: prevent agent from sending to its own chat via message tool.
@@ -152,8 +248,9 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	// (deliver=false then message MEDIA: blocked unconditionally).
 	ctxChannel := ToolChannelFromCtx(ctx)
 	ctxChatID := ToolChatIDFromCtx(ctx)
+	forward, _ := args["forward"].(bool)
 	isSelfSend := ctxChannel != "" && ctxChatID != "" && channel == ctxChannel && target == ctxChatID
-	if isSelfSend {
+	if isSelfSend && !forward {
 		isMediaSend := embeddedMediaPattern.MatchString(message)
 		if !isMediaSend {
 			return ErrorResult("You are already responding to this chat. Your response text will be delivered automatically. Do not use the message tool to send text to your own chat — just include the content in your response text. To deliver files, use write_file with deliver=true instead.")
@@ -225,7 +322,7 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	if action == "post" {
 		forward, _ := args["forward"].(bool)
 		reason := strings.TrimSpace(argString(args, "forward_reason"))
-		if err := validateFeedPostApprovalContext(ctx, forward, reason); err != nil {
+		if err := t.validateFeedPostApprovalContext(ctx, forward, reason); err != nil {
 			return ErrorResult(err.Error())
 		}
 		if t.outboundDispatcher == nil {
@@ -247,7 +344,25 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 				"publisher_agent_id": rc.AgentKey,
 			},
 		}
-		if strings.Contains(message, "MEDIA:") {
+		if strings.TrimSpace(message) == approvedReplyPayloadToken {
+			if strings.TrimSpace(rc.ReplyToContent) == "" {
+				return ErrorResult("approved Discord reply has no publishable content")
+			}
+			outMsg.Content = rc.ReplyToContent
+			if len(rc.ReplyToMediaPaths) > 1 {
+				return ErrorResult("approved Discord reply has too many bound media files")
+			}
+			if len(rc.ReplyToMediaPaths) == 1 {
+				resolved, err := t.resolveFeedPostMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0])
+				if err != nil {
+					return ErrorResult("approved Discord media path is unavailable")
+				}
+				outMsg.Media = []bus.MediaAttachment{{
+					URL:         resolved,
+					ContentType: mimeFromPath(resolved),
+				}}
+			}
+		} else if strings.Contains(message, "MEDIA:") {
 			cleanMsg, embeddedMedia, err := t.extractFeedPostMedia(ctx, message)
 			if err != nil {
 				slog.Warn("message.feed_post_media_rejected", "reason", "validation_failed")
@@ -257,7 +372,7 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			outMsg.Media = embeddedMedia
 		}
 
-		if !feedPostContentMatchesApproval(outMsg.Content, rc.ReplyToContent) {
+		if !feedPostContentMatchesApproval(outMsg.Content, rc.ReplyToContent, rc.ReplyToMedia) {
 			return ErrorResult("feed post content does not match the approved Discord reply")
 		}
 		approvedMediaSHA, err := approvedFeedPostMediaSHA(rc.ReplyToMedia, rc.ReplyToMediaCount)
@@ -368,21 +483,64 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	return ErrorResult("no channel sender or message bus available")
 }
 
+var (
+	positiveApprovalPattern = regexp.MustCompile(`(?i)^(ok\s+|đã\s+)?(duyệt|approve|đăng|post)(d?|d\s+this|\s+(bài\s+này|bài|này|nhé|ngay|đi|nha|this))?$`)
+	negationPattern         = regexp.MustCompile(`(?i)\b(chưa|không|ko|k|đừng|hủy|bỏ|sửa|edit|change|từ\s+chối|no|don'?t|stop)\b`)
+)
+
 func isPositiveFeedPostApproval(message string) bool {
 	cmd := strings.ToLower(strings.TrimSpace(message))
 	cmd = strings.Trim(cmd, " \t\r\n.!✅👍")
-	switch cmd {
-	case "duyệt", "approve", "đăng", "post":
-		return true
-	default:
+	if negationPattern.MatchString(cmd) {
 		return false
 	}
+	return positiveApprovalPattern.MatchString(cmd)
 }
 
-func feedPostContentMatchesApproval(postContent, replyContent string) bool {
-	post := normalizeApprovalContent(postContent)
-	reply := normalizeApprovalContent(replyContent)
-	return post != "" && post == reply
+func feedPostContentMatchesApproval(postContent, replyContent, replyMedia string) bool {
+	postNormalized := normalizeApprovalContent(postContent)
+	if postNormalized == "" {
+		return false
+	}
+	replyNormalized := normalizeApprovalContent(replyContent)
+	if replyNormalized != "" && postNormalized == replyNormalized {
+		return true
+	}
+
+	// Go-computed SHA-256 hex digest match
+	h := sha256.Sum256([]byte(postNormalized))
+	postSHA := hex.EncodeToString(h[:])
+
+	// Match tag embedded in replyContent: [Article SHA-256: <hex>], article_sha256:<hex>, etc.
+	if match := articleSHAPattern.FindStringSubmatch(replyContent); len(match) == 2 {
+		if strings.EqualFold(match[1], postSHA) {
+			return true
+		}
+	}
+
+	// Match attached .md / .txt document hash in replyMedia
+	if replyMedia != "" {
+		lines := strings.Split(replyMedia, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			sep := strings.LastIndexByte(line, '=')
+			if sep <= 0 || sep >= len(line)-1 {
+				continue
+			}
+			filename := strings.ToLower(strings.TrimSpace(line[:sep]))
+			digest := strings.ToLower(strings.TrimSpace(line[sep+1:]))
+			if (strings.HasSuffix(filename, ".md") || strings.HasSuffix(filename, ".txt")) && len(digest) == 64 {
+				if strings.EqualFold(digest, postSHA) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func normalizeApprovalContent(s string) string {
@@ -392,25 +550,43 @@ func normalizeApprovalContent(s string) string {
 }
 
 func approvedFeedPostMediaSHA(replyMedia string, attachmentCount int) (string, error) {
-	if attachmentCount < 0 || attachmentCount > 1 {
-		return "", fmt.Errorf("expected at most one approved media attachment")
+	if attachmentCount < 0 {
+		return "", fmt.Errorf("invalid attachment count")
 	}
-	if attachmentCount == 0 {
-		if strings.TrimSpace(replyMedia) != "" {
-			return "", fmt.Errorf("unexpected approved media digest")
+	if replyMedia == "" {
+		if attachmentCount == 0 {
+			return "", nil
 		}
-		return "", nil
-	}
-	if strings.TrimSpace(replyMedia) == "" {
 		return "", fmt.Errorf("approved media digest missing")
 	}
+
 	lines := strings.Split(strings.TrimSpace(replyMedia), "\n")
-	if len(lines) != attachmentCount {
-		return "", fmt.Errorf("approved media digest count mismatch")
+	var imageEntries []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		sep := strings.LastIndexByte(line, '=')
+		if sep <= 0 || sep >= len(line)-1 {
+			continue
+		}
+		filename := strings.ToLower(strings.TrimSpace(line[:sep]))
+		if !strings.HasSuffix(filename, ".md") && !strings.HasSuffix(filename, ".txt") {
+			imageEntries = append(imageEntries, line)
+		}
 	}
-	entry := strings.TrimSpace(lines[0])
+
+	if len(imageEntries) == 0 {
+		return "", nil
+	}
+	if len(imageEntries) > 1 {
+		return "", fmt.Errorf("expected at most one approved media attachment")
+	}
+
+	entry := imageEntries[0]
 	separator := strings.LastIndexByte(entry, '=')
-	if separator <= 0 {
+	if separator <= 0 || separator >= len(entry)-1 {
 		return "", fmt.Errorf("invalid approved media digest")
 	}
 	digest := strings.ToLower(strings.TrimSpace(entry[separator+1:]))
@@ -612,7 +788,7 @@ func (r *feedPostReservation) mark(status string) error {
 	return f.Close()
 }
 
-func validateFeedPostApprovalContext(ctx context.Context, forward bool, reason string) error {
+func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forward bool, reason string) error {
 	if !forward || reason == "" {
 		return fmt.Errorf("feed post requires explicit forward=true and forward_reason quoting the user's approval")
 	}
@@ -624,7 +800,7 @@ func validateFeedPostApprovalContext(ctx context.Context, forward bool, reason s
 	if ctxChannel == "" || ctxChatID == "" {
 		return fmt.Errorf("feed post requires an origin channel and chat for approval evidence")
 	}
-	if ctxChatID != contentFactoryApprovalChannelID {
+	if ctxChatID != t.getApprovalChannelID() {
 		return fmt.Errorf("feed post approval must originate from the ContentFactory review channel")
 	}
 	channelType := ToolChannelTypeFromCtx(ctx)
@@ -982,4 +1158,35 @@ func isInTempDir(path string) bool {
 	}
 	tmpDir := filepath.Clean(os.TempDir())
 	return strings.HasPrefix(cleaned, tmpDir+string(filepath.Separator))
+}
+
+// CleanStagedMedia removes files older than maxAge from the feed post staging directory.
+func CleanStagedMedia(stagingDir string, maxAge time.Duration) (int, error) {
+	if stagingDir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	now := time.Now()
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".media") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > maxAge {
+			if err := os.Remove(filepath.Join(stagingDir, entry.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
 }

@@ -67,6 +67,11 @@ func isDirWritable(dir string) bool {
 	return true
 }
 
+// CheckHardlink rejects regular files with NumberOfLinks > 1 (hardlink attack prevention).
+func CheckHardlink(path string) error {
+	return checkHardlink(path)
+}
+
 // checkHardlink rejects regular files with NumberOfLinks > 1 (hardlink attack prevention).
 func checkHardlink(path string) error {
 	info, err := os.Lstat(path)

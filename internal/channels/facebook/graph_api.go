@@ -17,7 +17,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 const (
@@ -31,8 +34,7 @@ const (
 // graphAPIBase is the Graph API root. Declared as a variable so tests can
 // override it with an httptest.NewServer URL.
 var (
-	graphAPIBase     = "https://graph.facebook.com"
-	photoUploadSlots = make(chan struct{}, 2)
+	graphAPIBase = "https://graph.facebook.com"
 )
 
 // fbIDPattern validates Facebook object IDs: numeric or "{num}_{num}" form (post IDs).
@@ -40,17 +42,29 @@ var fbIDPattern = regexp.MustCompile(`^\d+(_\d+)?$`)
 
 // GraphClient wraps the Facebook Graph API for a single page instance.
 type GraphClient struct {
-	httpClient      *http.Client
-	pageAccessToken string
-	pageID          string
+	httpClient       *http.Client
+	pageAccessToken  string
+	pageID           string
+	photoUploadSlots chan struct{}
+	slotsOnce        sync.Once
+}
+
+func (g *GraphClient) getUploadSlots() chan struct{} {
+	g.slotsOnce.Do(func() {
+		if g.photoUploadSlots == nil {
+			g.photoUploadSlots = make(chan struct{}, 2)
+		}
+	})
+	return g.photoUploadSlots
 }
 
 // NewGraphClient creates a new GraphClient for the given page.
 func NewGraphClient(pageAccessToken, pageID string) *GraphClient {
 	return &GraphClient{
-		httpClient:      &http.Client{Timeout: 15 * time.Second},
-		pageAccessToken: pageAccessToken,
-		pageID:          pageID,
+		httpClient:       &http.Client{Timeout: 15 * time.Second},
+		pageAccessToken:  pageAccessToken,
+		pageID:           pageID,
+		photoUploadSlots: make(chan struct{}, 2),
 	}
 }
 
@@ -233,6 +247,9 @@ func (g *GraphClient) CreatePhotoPostVerified(
 	if err != nil {
 		return "", fmt.Errorf("facebook: stat image file: %w", err)
 	}
+	if err := tools.CheckHardlink(filePath); err != nil {
+		return "", fmt.Errorf("facebook: image file check failed: %w", err)
+	}
 	if preInfo.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("facebook: image file must not be a symlink")
 	}
@@ -275,9 +292,10 @@ func (g *GraphClient) CreatePhotoPostVerified(
 		}
 	}
 
+	slots := g.getUploadSlots()
 	select {
-	case photoUploadSlots <- struct{}{}:
-		defer func() { <-photoUploadSlots }()
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}

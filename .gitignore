@@ -229,3 +229,7 @@ cliproxy/
 skills/daily-report/_daily-report.log
 skills/daily-report/_preview/
 skills/daily-report/__pycache__/
+
+# Runtime config dumps + throwaway e2e harness (never commit — contain live channel config)
+backups/
+.codex-e2e-chat/

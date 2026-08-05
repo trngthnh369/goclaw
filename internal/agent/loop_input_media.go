@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -65,6 +69,7 @@ func (l *Loop) enrichInputMedia(ctx context.Context, req *RunRequest, messages [
 	var mediaRefs []providers.MediaRef
 	if len(req.Media) > 0 {
 		mediaRefs = l.persistMedia(req.SessionKey, req.Media, tools.ToolWorkspaceFromCtx(ctx))
+		bindReplyMediaPaths(ctx, req, mediaRefs)
 
 		// Register persisted text uploads in vault (async, non-blocking).
 		if l.onTextUploaded != nil {
@@ -165,4 +170,62 @@ func (l *Loop) enrichInputMedia(ctx context.Context, req *RunRequest, messages [
 	}
 
 	return ctx, messages, mediaRefs
+}
+
+func bindReplyMediaPaths(ctx context.Context, req *RunRequest, refs []providers.MediaRef) {
+	if req.ReplyToMediaCount == 0 || req.ReplyToMedia == "" {
+		return
+	}
+
+	expected := make(map[string]struct{}, req.ReplyToMediaCount)
+	for _, line := range strings.Split(req.ReplyToMedia, "\n") {
+		separator := strings.LastIndexByte(strings.TrimSpace(line), '=')
+		if separator < 0 {
+			continue
+		}
+		digest := strings.ToLower(strings.TrimSpace(line[separator+1:]))
+		decoded, err := hex.DecodeString(digest)
+		if err == nil && len(decoded) == sha256.Size {
+			expected[digest] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(expected))
+	for _, ref := range refs {
+		if ref.Path == "" {
+			continue
+		}
+		digest, err := hashMediaFile(ref.Path)
+		if err != nil {
+			continue
+		}
+		if _, ok := expected[digest]; ok {
+			paths = append(paths, ref.Path)
+			delete(expected, digest)
+		}
+	}
+
+	if len(paths) != req.ReplyToMediaCount || len(expected) != 0 {
+		req.ReplyToMediaComplete = false
+		paths = nil
+	}
+	req.ReplyToMediaPaths = paths
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		rc.ReplyToMediaPaths = append([]string(nil), paths...)
+		rc.ReplyToMediaComplete = req.ReplyToMediaComplete
+	}
+}
+
+func hashMediaFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

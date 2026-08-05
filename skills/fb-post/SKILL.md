@@ -19,7 +19,12 @@ Publish approved content (article + optional image) to a Facebook Fanpage feed. 
 2. **Check workspace state BEFORE posting.** Read the article file — if it contains `status: posted`, STOP and report "Bài này đã đăng rồi."
 3. **Update workspace state AFTER posting.** Immediately prepend `status: posted` + `posted_at: <timestamp>` to the article file. The gateway also keeps a durable reservation keyed to the Discord review message; workspace state is only a secondary operator hint.
 4. **Single reviewed image only.** The image bytes must match the attachment on the reviewed Discord message. If the review has zero or multiple images, do not select a different/newest image; request a fresh review message with exactly one primary image.
-4b. **The review message must be one single Discord message.** Content binding is byte-exact against the replied-to message body, and Discord caps a message at 2000 characters. An article that had to be split across several messages can never be approved — the reply only binds to the one chunk it quotes. Deliver long articles as a single message (or a file attachment plus a short body that is itself the exact post content).
+4b. **Articles >2000 characters (Discord message limit):**
+   Content binding supports 3 matching modes for Discord review messages:
+   - **Exact text match**: For short articles (<= 2000 chars) where the full article fits in the Discord message body.
+   - **Attached `.md` document**: Deliver the article draft as an attached `.md` file (`MEDIA:path/article.md`). The gateway computes the SHA-256 digest of the attached file in Go for byte-exact verification.
+   - **Go-computed Message Digest Tag**: Include `[Article SHA-256: <64-hex-chars>]` in the Discord review message. The gateway extracts the tag and compares `sha256(normalizeApprovalContent(postContent))` in Go.
+   *(Note: Never rely on LLM prompts to calculate SHA-256 hashes — digests are computed programmatically in Go.)*
 5. **Fail closed on errors.** Report the stable tool error without adding internal details. Do NOT retry automatically. A failed/ambiguous post keeps a `pending_unknown` reservation and requires operator reconciliation.
 
 ## When to Use

@@ -35,6 +35,7 @@ type RunContext struct {
 	ReplyToMessageID      string // source channel message ID being replied to, when available
 	ReplyToContent        string // source channel message content being replied to, when available
 	ReplyToMedia          string // newline-separated filename=sha256 entries from the replied-to message
+	ReplyToMediaPaths     []string
 	ReplyToMediaCount     int    // number of attachments declared by the replied-to message
 	ReplyToMediaComplete  bool   // true only when every declared attachment was downloaded and hashed
 	ReplyToAuthorID       string // author ID of the replied-to message

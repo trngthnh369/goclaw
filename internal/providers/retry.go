@@ -95,8 +95,20 @@ func IsRetryableError(err error) bool {
 	return false
 }
 
+type retryMaxAttemptsOverrideKey struct{}
+
+// WithRetryMaxAttempts overrides the max retry attempts for all RetryDo calls
+// within this context. Used by ContentFactory designer to ensure exactly one
+// upstream image request regardless of provider-level retry config.
+func WithRetryMaxAttempts(ctx context.Context, max int) context.Context {
+	return context.WithValue(ctx, retryMaxAttemptsOverrideKey{}, max)
+}
+
 // RetryDo executes fn with retry logic using exponential backoff and jitter.
 func RetryDo[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
+	if override, ok := ctx.Value(retryMaxAttemptsOverrideKey{}).(int); ok && override > 0 && override < cfg.Attempts {
+		cfg.Attempts = override
+	}
 	if cfg.Attempts <= 0 {
 		cfg.Attempts = 1
 	}

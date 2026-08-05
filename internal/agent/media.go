@@ -212,10 +212,13 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 		}
 		kind := mediaKindFromMime(mime)
 
-		// Sanitize images before persistent storage.
+		// Sanitize images before persistent storage. A same-channel bot-authored
+		// attachment replied to by an explicitly allowlisted approver is the one
+		// exception: its exact bytes are the approval evidence and must continue
+		// to match the Discord SHA-256 recorded by the channel handler.
 		srcPath := f.Path
 		var sanitizedTemp string // track temp file for cleanup
-		if kind == "image" {
+		if kind == "image" && !f.PreserveBytes {
 			sanitized, err := SanitizeImage(f.Path)
 			if err != nil {
 				slog.Warn("media: sanitize image failed, using original", "path", f.Path, "error", err)

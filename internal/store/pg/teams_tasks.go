@@ -23,7 +23,8 @@ const taskLockDuration = 60 * time.Minute
 
 // taskSelectCols is the shared SELECT column list for task queries (must match scanTaskRowsJoined).
 const taskSelectCols = `t.id, t.team_id, t.tenant_id, t.subject, t.description, t.status, t.owner_agent_id, t.blocked_by, t.priority, t.result, t.user_id, t.channel,
-		 t.task_type, t.task_number, COALESCE(t.identifier,''), t.created_by_agent_id, COALESCE(t.assignee_user_id,''), t.parent_id,
+		 t.task_type, t.task_number, COALESCE(t.identifier,''), t.batch_id, COALESCE(t.idempotency_key,''), COALESCE(t.task_role,''), COALESCE(t.dependency_policy,'terminal'), COALESCE(t.execution_mode,''),
+		 t.created_by_agent_id, COALESCE(t.assignee_user_id,''), t.parent_id,
 		 COALESCE(t.chat_id,''), t.metadata, t.locked_at, t.lock_expires_at, COALESCE(t.progress_percent,0), COALESCE(t.progress_step,''),
 		 t.followup_at, COALESCE(t.followup_count,0), COALESCE(t.followup_max,0), COALESCE(t.followup_message,''), COALESCE(t.followup_channel,''), COALESCE(t.followup_chat_id,''),
 		 COALESCE(t.comment_count,0), COALESCE(t.attachment_count,0),
@@ -89,6 +90,9 @@ func (s *PGTeamStore) CreateTask(ctx context.Context, task *store.TeamTaskData) 
 	if task.TaskType == "" {
 		task.TaskType = "general"
 	}
+	if task.DependencyPolicy == "" {
+		task.DependencyPolicy = store.DependencyPolicyTerminal
+	}
 
 	// Wrap entire operation in a transaction for atomicity.
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -129,14 +133,20 @@ func (s *PGTeamStore) CreateTask(ctx context.Context, task *store.TeamTaskData) 
 	// INSERT with all fields in one statement.
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO team_tasks (id, team_id, subject, description, status, owner_agent_id, blocked_by, priority, result, user_id, channel,
-		 task_type, task_number, identifier, created_by_agent_id, parent_id, chat_id, metadata, locked_at, lock_expires_at, created_at, updated_at, tenant_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+		 task_type, task_number, identifier, batch_id, idempotency_key, task_role, dependency_policy, execution_mode,
+			 created_by_agent_id, parent_id, chat_id, metadata, locked_at, lock_expires_at, created_at, updated_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
 		task.ID, task.TeamID, task.Subject, task.Description,
 		task.Status, task.OwnerAgentID, pq.Array(task.BlockedBy),
 		task.Priority, task.Result,
 		sql.NullString{String: task.UserID, Valid: task.UserID != ""},
 		sql.NullString{String: task.Channel, Valid: task.Channel != ""},
 		task.TaskType, taskNumber, task.Identifier,
+		task.BatchID,
+		sql.NullString{String: task.IdempotencyKey, Valid: task.IdempotencyKey != ""},
+		sql.NullString{String: task.TaskRole, Valid: task.TaskRole != ""},
+		task.DependencyPolicy,
+		sql.NullString{String: task.ExecutionMode, Valid: task.ExecutionMode != ""},
 		task.CreatedByAgentID, task.ParentID,
 		sql.NullString{String: task.ChatID, Valid: task.ChatID != ""},
 		metaJSON,
@@ -164,8 +174,13 @@ var allowedTaskUpdateCols = map[string]bool{
 	"priority":         true,
 	"assignee_user_id": true,
 	"metadata":         true,
-	"blocked_by":       true,
-	"updated_at":       true,
+	"blocked_by":        true,
+	"batch_id":          true,
+	"idempotency_key":   true,
+	"task_role":         true,
+	"dependency_policy": true,
+	"execution_mode":    true,
+	"updated_at":        true,
 }
 
 func (s *PGTeamStore) UpdateTask(ctx context.Context, taskID uuid.UUID, updates map[string]any) error {
@@ -552,9 +567,10 @@ func scanTaskRowsJoined(rows *sql.Rows) ([]store.TeamTaskData, error) {
 	for rows.Next() {
 		var d store.TeamTaskData
 		var desc, result, userID, channel sql.NullString
-		var ownerID, createdByAgentID, parentID *uuid.UUID
+		var ownerID, batchID, createdByAgentID, parentID *uuid.UUID
 		var blockedBy []uuid.UUID
 		var assigneeUserID, chatID, progressStep, identifier string
+		var idempotencyKey, taskRole, dependencyPolicy, executionMode string
 		var metadataJSON []byte
 		var lockedAt, lockExpiresAt, followupAt *time.Time
 		var followupCount, followupMax int
@@ -563,7 +579,8 @@ func scanTaskRowsJoined(rows *sql.Rows) ([]store.TeamTaskData, error) {
 			&d.ID, &d.TeamID, &d.TenantID, &d.Subject, &desc, &d.Status,
 			&ownerID, pq.Array(&blockedBy), &d.Priority, &result,
 			&userID, &channel,
-			&d.TaskType, &d.TaskNumber, &identifier, &createdByAgentID, &assigneeUserID, &parentID,
+			&d.TaskType, &d.TaskNumber, &identifier, &batchID, &idempotencyKey, &taskRole, &dependencyPolicy, &executionMode,
+			&createdByAgentID, &assigneeUserID, &parentID,
 			&chatID, &metadataJSON, &lockedAt, &lockExpiresAt, &d.ProgressPercent, &progressStep,
 			&followupAt, &followupCount, &followupMax, &followupMessage, &followupChannel, &followupChatID,
 			&d.CommentCount, &d.AttachmentCount,
@@ -588,6 +605,11 @@ func scanTaskRowsJoined(rows *sql.Rows) ([]store.TeamTaskData, error) {
 		d.OwnerAgentID = ownerID
 		d.BlockedBy = blockedBy
 		d.Identifier = identifier
+		d.BatchID = batchID
+		d.IdempotencyKey = idempotencyKey
+		d.TaskRole = taskRole
+		d.DependencyPolicy = dependencyPolicy
+		d.ExecutionMode = executionMode
 		d.CreatedByAgentID = createdByAgentID
 		d.AssigneeUserID = assigneeUserID
 		d.ParentID = parentID

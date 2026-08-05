@@ -57,10 +57,12 @@ func (c *Channel) sendMediaMessage(channelID string, content string, mediaList [
 		Files: files,
 	}
 
-	// Attach text content if provided (Discord limit: 2000 chars for message with files).
+	// Attach text content if provided. Fail closed instead of truncating so
+	// outbound review text remains byte-for-byte identical to audited content.
+	const maxDiscordMessageBytes = 2000
 	if content != "" {
-		if len(content) > 2000 {
-			content = content[:2000]
+		if len([]byte(content)) > maxDiscordMessageBytes {
+			return fmt.Errorf("discord media message content too long: %d bytes (limit %d)", len([]byte(content)), maxDiscordMessageBytes)
 		}
 		msg.Content = content
 	}

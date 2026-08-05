@@ -611,6 +611,7 @@ type RunRequest struct {
 	ReplyToMessageID      string             // source channel message ID being replied to, when available
 	ReplyToContent        string             // source channel message content being replied to, when available
 	ReplyToMedia          string             // filename=sha256 entries from source channel message being replied to
+	ReplyToMediaPaths     []string           // workspace-local exact-byte files bound to ReplyToMedia digests
 	ReplyToMediaCount     int                // number of attachments declared by the replied-to message
 	ReplyToMediaComplete  bool               // true only when every declared attachment was downloaded and hashed
 	ReplyToAuthorID       string             // author ID of the replied-to message

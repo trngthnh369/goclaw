@@ -63,6 +63,20 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		return
 	}
 
+	// Some agents are reachable only through the audited `delegate` path. This
+	// dispatcher runs no audit check at all, so a lead could otherwise route
+	// around the gate simply by creating a team task — the workflow TEAM.md
+	// itself recommends. Refuse outright rather than reproduce the gate here.
+	if assignee, err := m.cachedGetAgentByID(ctx, agentID); err == nil && ContentFactoryGatedAssignee(assignee.AgentKey) {
+		slog.Warn("security.team_tasks.dispatch_blocked_gated_agent",
+			"task_id", task.ID, "agent_key", assignee.AgentKey, "team_id", teamID)
+		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
+			"status": store.TeamTaskStatusFailed,
+			"result": "Cannot dispatch task to " + assignee.AgentKey + " — this agent must be reached through the audited delegate path",
+		})
+		return
+	}
+
 	// Circuit breaker: auto-fail tasks that have been dispatched too many times.
 	dispatchCount := 0
 	if dc, ok := task.Metadata["dispatch_count"].(float64); ok {
