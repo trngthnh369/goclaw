@@ -233,3 +233,7 @@ skills/daily-report/__pycache__/
 # Runtime config dumps + throwaway e2e harness (never commit — contain live channel config)
 backups/
 .codex-e2e-chat/
+
+# tech-ai-research collector runtime artifacts
+skills/tech-ai-research/state/
+skills/tech-ai-research/runs/
