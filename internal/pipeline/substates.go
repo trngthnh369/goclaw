@@ -61,6 +61,10 @@ type ToolState struct {
 	MediaResults   []MediaResult // media files produced by tools
 	Deliverables   []string      // tool output content for team task results
 	LoopKilled     bool          // set when loop detector triggers critical
+	// EndRun is set when a tool returned Result.EndRun: stop the loop and use
+	// the tool's output as the answer, WITHOUT reporting the run as failed the
+	// way LoopKilled does.
+	EndRun bool
 }
 
 // ObserveState: owned by ObserveStage.

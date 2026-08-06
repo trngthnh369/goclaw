@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -46,6 +47,27 @@ func TestProcessToolResult_EndRunBreaksImmediately(t *testing.T) {
 	// so reusing it here would fail a delegation whose work actually succeeded.
 	if rs.loopKilled {
 		t.Error("loopKilled set; a deliberate end must not report the run as failed")
+	}
+}
+
+// ToolStage decides whether to break by reading pipeline state, not the action
+// processToolResult returns. Testing only processToolResult passed while the
+// loop kept running in production: the tool logged "ended run" and the agent
+// carried on calling it.
+func TestSyncBridgeToState_PropagatesEndRunToPipeline(t *testing.T) {
+	bridgeRS := &runState{endRunRequested: true, finalContent: "DESIGN_STATUS: COMPLETE"}
+	state := &pipeline.RunState{}
+
+	syncBridgeToState(bridgeRS, state, toolResultBreak)
+
+	if !state.Tool.EndRun {
+		t.Fatal("Tool.EndRun not set; ToolStage would never break")
+	}
+	if state.Tool.LoopKilled {
+		t.Error("Tool.LoopKilled set; a deliberate end must not read as failure")
+	}
+	if state.Observe.FinalContent != "DESIGN_STATUS: COMPLETE" {
+		t.Errorf("FinalContent = %q, want the tool's answer", state.Observe.FinalContent)
 	}
 }
 

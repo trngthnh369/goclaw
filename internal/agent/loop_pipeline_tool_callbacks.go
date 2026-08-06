@@ -219,6 +219,9 @@ func (l *Loop) makeCheckReadOnly(req *RunRequest, bridgeRS *runState) func(state
 // syncBridgeToState copies side effects from bridgeRS to pipeline RunState.
 func syncBridgeToState(bridgeRS *runState, state *pipeline.RunState, action toolResultAction) {
 	state.Tool.LoopKilled = bridgeRS.loopKilled
+	// Without this the tool's stop request never reaches ToolStage, which drives
+	// the break off pipeline state rather than off the action returned here.
+	state.Tool.EndRun = bridgeRS.endRunRequested
 	state.Tool.AsyncToolCalls = bridgeRS.asyncToolCalls
 	state.Tool.Deliverables = bridgeRS.deliverables
 	state.Evolution.BootstrapWrite = bridgeRS.bootstrapWriteDetected
