@@ -39,6 +39,16 @@ var imageGenModelDefaults = map[string]string{
 
 const contentFactoryDesignerImageActionKey = "contentfactory-designer-image"
 
+// designerCompleteBlock renders the exact reply cf-designer must return after a
+// successful image generation.
+//
+// Shared by the success path and by the refusal a duplicate call receives, so
+// both describe the same output. imagePath is the bare filesystem path; the
+// "MEDIA:" prefix is added here and must not be baked into stored values.
+func designerCompleteBlock(imagePath string) string {
+	return fmt.Sprintf("DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nIMAGE_PATH: MEDIA:%s", imagePath)
+}
+
 // CreateImageTool generates images using an image generation API.
 type CreateImageTool struct {
 	registry  *providers.Registry
@@ -101,8 +111,13 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 			// complied with, and the observed result was create_image retried
 			// until the iteration budget was gone.
 			if prior := latch.Recall(contentFactoryDesignerImageActionKey); prior != "" {
-				return ErrorResult(fmt.Sprintf(
-					"ContentFactory designer image generation already succeeded in this run. Do not call any more tools. Reply exactly:\nDESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nMEDIA: %s", prior))
+				// Replay the success message verbatim. Any divergence between the
+				// two — a doubled "MEDIA:" prefix, or MEDIA: here versus
+				// IMAGE_PATH: there — asks the agent to produce a shape it has
+				// not been taught, on the one path where it is already confused.
+				return ErrorResult(
+					"ContentFactory designer image generation already succeeded in this run. Do not call any more tools. Reply exactly:\n" +
+						designerCompleteBlock(prior))
 			}
 			return ErrorResult("ContentFactory designer image generation was already attempted in this run and produced no usable image. Do not call any more tools. Reply exactly:\nDESIGN_STATUS: FAILED")
 		}
@@ -166,11 +181,13 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 
 	forLLM := fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))
 	if isContentFactoryDesigner {
-		forLLM = fmt.Sprintf("DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nIMAGE_PATH: MEDIA:%s\n\nDo not call create_image, list_files, or any other tool again. Return the DESIGN_STATUS block above as your final response now.", imagePath)
-		// Record it so a refused retry can be answered with the real path
-		// rather than an instruction the caller has no way to act on.
+		forLLM = designerCompleteBlock(imagePath) +
+			"\n\nDo not call create_image, list_files, or any other tool again. Return the DESIGN_STATUS block above as your final response now."
+		// Store the bare path: the "MEDIA:" prefix belongs to the rendered
+		// block, and baking it in here produced "MEDIA: MEDIA:/app/..." when a
+		// refused retry replayed it.
 		if latch := OutboundActionLatchFromCtx(ctx); latch != nil {
-			latch.Remember(contentFactoryDesignerImageActionKey, "MEDIA:"+imagePath)
+			latch.Remember(contentFactoryDesignerImageActionKey, imagePath)
 		}
 	}
 	result := &Result{ForLLM: forLLM}

@@ -73,15 +73,36 @@ func TestOutboundActionLatch_RemembersResultForRefusedRetry(t *testing.T) {
 	if !latch.TryReserve(key) {
 		t.Fatal("first reservation failed")
 	}
-	latch.Remember(key, "MEDIA:/w/img.png")
+	// The bare path is stored; the MEDIA: prefix belongs to the rendered block.
+	latch.Remember(key, "/w/img.png")
 
 	if latch.TryReserve(key) {
 		t.Fatal("second reservation succeeded; the one-shot is broken")
 	}
 	// Without this, "return the prior MEDIA path" is an instruction the caller
 	// cannot follow — the observed result was retrying until iterations ran out.
-	if got := latch.Recall(key); got != "MEDIA:/w/img.png" {
+	if got := latch.Recall(key); got != "/w/img.png" {
 		t.Errorf("Recall = %q, want the remembered path", got)
+	}
+}
+
+// The refusal replays the success block, so both must render identically. A
+// stored value carrying its own "MEDIA:" produced "MEDIA: MEDIA:/app/..." in a
+// live run — the agent was asked to emit a shape it had never been taught.
+func TestDesignerCompleteBlock_SinglePrefixAndStableShape(t *testing.T) {
+	block := designerCompleteBlock("/app/workspace/cf-designer/generated/x.png")
+
+	if strings.Count(block, "MEDIA:") != 1 {
+		t.Errorf("block has %d MEDIA: prefixes, want exactly 1:\n%s", strings.Count(block, "MEDIA:"), block)
+	}
+	for _, want := range []string{"DESIGN_STATUS: COMPLETE", "IMAGE_COUNT: 1", "IMAGE_PATH: MEDIA:/app/workspace/cf-designer/generated/x.png"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block missing %q:\n%s", want, block)
+		}
+	}
+	// Feeding a stored value back through the renderer must not compound.
+	if again := designerCompleteBlock("/p.png"); strings.Count(again, "MEDIA:") != 1 {
+		t.Errorf("renderer is not idempotent in shape: %s", again)
 	}
 }
 
