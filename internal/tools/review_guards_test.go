@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 )
 
 // --- F10: an abort notice must be able to reach the review channel ---
@@ -61,6 +63,41 @@ func TestReviewOversizeError_StatesHowMuchToRemove(t *testing.T) {
 	chars := len([]rune(strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(msg, ""))))
 	if ratio := float64(n) / float64(chars); ratio < 1.2 {
 		t.Errorf("fixture bytes/char = %.2f, too ASCII to represent Vietnamese", ratio)
+	}
+}
+
+// --- the terminal send is one-shot: a repeat must end the run ---
+
+// After the review draft (or abort notice) is out, the run's work is done. A
+// live abort-path test showed the director re-sending five more times, each
+// getting the same suppression, until the loop detector killed a run whose work
+// had actually succeeded.
+func TestReviewTerminalDuplicate_EndsRunWithNoReply(t *testing.T) {
+	mb := bus.New()
+	tool := NewMessageTool(t.TempDir(), false)
+	tool.SetMessageBus(mb)
+	ctx := contentFactoryWakeCtx()
+
+	if res := tool.Execute(ctx, contentFactoryTerminalArgs("the review draft")); res == nil || res.IsError {
+		t.Fatalf("first send failed: %+v", res)
+	}
+	second := tool.Execute(ctx, contentFactoryTerminalArgs("a second send after the terminal action"))
+
+	if second == nil || !second.EndRun {
+		t.Fatalf("duplicate terminal send must end the run, got: %+v", second)
+	}
+	// NO_REPLY is what the pipeline already suppresses, so the run ends quietly
+	// instead of surfacing internal status JSON as its answer.
+	if second.ForLLM != "NO_REPLY" {
+		t.Errorf("ForLLM = %q, want NO_REPLY", second.ForLLM)
+	}
+	// The send already succeeded; reporting an error here would fail a
+	// delegated task whose work was done.
+	if second.IsError {
+		t.Error("a suppressed duplicate is not an error")
+	}
+	if got := drainBusNow(mb); len(got) != 1 {
+		t.Fatalf("outbound count = %d, want 1 (the duplicate must not send)", len(got))
 	}
 }
 

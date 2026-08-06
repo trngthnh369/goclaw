@@ -323,7 +323,17 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 				n, maxReviewMessageBytes, cutChars+1, overBytes))
 		}
 		if latch := OutboundActionLatchFromCtx(ctx); latch != nil && !latch.TryReserve(contentFactoryTerminalKey) {
-			return SilentResult(fmt.Sprintf(`{"status":"duplicate_suppressed","channel":"%s","target":"%s"}`, channel, target))
+			// The terminal action already happened, so the run is over and the
+			// contract says answer NO_REPLY. End it here rather than returning a
+			// status the agent is free to ignore: a live abort-path test showed
+			// the director re-sending five more times after a successful notice,
+			// each getting the same suppression, until the loop detector killed
+			// the run — a run whose actual work had succeeded.
+			slog.Info("message.contentfactory_terminal_duplicate_suppressed",
+				"channel", channel, "target", target)
+			res := SilentResult("NO_REPLY")
+			res.EndRun = true
+			return res
 		}
 	}
 
