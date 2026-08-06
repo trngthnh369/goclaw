@@ -394,6 +394,17 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 				"publisher_agent_id": rc.AgentKey,
 			},
 		}
+		// Tell the publisher where to announce success. The post id is created
+		// inside the channel and cannot come back here — OutboundDispatcher
+		// returns only an error — so the channel has to send the confirmation
+		// itself. Without this the approver gets nothing after replying "duyệt":
+		// the director is instructed to answer NO_REPLY once its terminal tool
+		// returns, and the only message that did go out was a generic
+		// cross-target forward breadcrumb that never mentions publishing.
+		if origCh, origChat := ToolChannelFromCtx(ctx), ToolChatIDFromCtx(ctx); origCh != "" && origChat != "" {
+			outMsg.Metadata["notify_channel"] = origCh
+			outMsg.Metadata["notify_chat"] = origChat
+		}
 		if strings.TrimSpace(message) == approvedReplyPayloadToken {
 			if strings.TrimSpace(rc.ReplyToContent) == "" {
 				return ErrorResult("approved Discord reply has no publishable content")

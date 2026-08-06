@@ -101,6 +101,32 @@ func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	return nil
 }
 
+// GetPostPermalink returns the canonical URL of a published post.
+//
+// The URL must be fetched, not assembled. Graph reports permalinks under the
+// page's own numeric id, which is not the page_id used to publish: a post to
+// page 1193343723865442 came back as
+// facebook.com/122104624239290721/posts/122104618611290721. A hand-built
+// "facebook.com/{page_id}/posts/{id}" link therefore renders as unavailable,
+// which is exactly what happened when one was handed to an operator who needed
+// to take the post down.
+func (g *GraphClient) GetPostPermalink(ctx context.Context, postID string) (string, error) {
+	if err := validateFBID(postID); err != nil {
+		return "", fmt.Errorf("facebook: get permalink: %w", err)
+	}
+	data, err := g.doRequest(ctx, http.MethodGet, "/"+postID+"?fields=permalink_url", nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		PermalinkURL string `json:"permalink_url"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("facebook: permalink parse error: %w", err)
+	}
+	return result.PermalinkURL, nil
+}
+
 // SubscribeApp subscribes the app to the page's webhook events.
 func (g *GraphClient) SubscribeApp(ctx context.Context) error {
 	if err := validateFBID(g.pageID); err != nil {

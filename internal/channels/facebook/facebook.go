@@ -250,6 +250,7 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			}
 			slog.Info("facebook: feed post published with photo",
 				"post_id", postID, "page_id", ch.graphClient.pageID)
+			ch.announcePublished(ctx, msg, postID)
 		} else {
 			postID, err := ch.graphClient.CreateFeedPost(ctx, msg.Content)
 			if err != nil {
@@ -258,6 +259,7 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			}
 			slog.Info("facebook: feed post published",
 				"post_id", postID, "page_id", ch.graphClient.pageID)
+			ch.announcePublished(ctx, msg, postID)
 		}
 
 	default: // "comment"
