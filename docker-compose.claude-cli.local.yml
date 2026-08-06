@@ -43,6 +43,32 @@ services:
         source: "C:/Users/truon/.codex"
         target: /app/.codex-host
         read_only: true
+      # Patched gateway binary, mounted instead of baked into the image.
+      #
+      # A binary pushed in with `docker cp` lives in the container's WRITABLE
+      # LAYER, so it is silently discarded the moment the container is
+      # recreated. That happened on 2026-08-06 at 02:04 (the daily host boot
+      # window): the gateway reverted to the image's pre-P0 binary and ran the
+      # 09:33 cron with the audit gate and every other fix missing. Nothing
+      # surfaced it — the container looked healthy and the schema check passed.
+      #
+      # Bind-mounting keeps the binary on the host and in this compose file, so
+      # it survives recreate and reboot, and adds no image layer (the from-source
+      # image build crashes Docker Desktop at buildkit layer export on this host).
+      #
+      # Rebuild:  docker run --rm -e VERSION=v3.14.0 -v D:/Projects/personal/goclaw:/src \
+      #             -v goclaw-out:/out -v goclaw-gocache:/root/.cache/go-build \
+      #             -v goclaw-gomod:/go/pkg/mod -w /src golang:1.26-bookworm \
+      #             sh /src/scripts/build-gateway-binary.sh
+      #           then copy /out/goclaw to .deploy/goclaw and `docker restart goclaw-goclaw-1`.
+      # Rollback: comment this mount out and `up -d goclaw` — the image binary returns.
+      #
+      # ⚠️ The source must exist as a FILE before `up`, or Docker creates a
+      #    DIRECTORY at that path and the container fails to start.
+      - type: bind
+        source: "D:/Projects/personal/goclaw/.deploy/goclaw"
+        target: /app/goclaw
+        read_only: true
 
   chrome:
     # Shared read-only view of the agent workspace so the sidecar can open
