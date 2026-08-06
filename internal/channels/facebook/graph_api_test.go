@@ -81,7 +81,7 @@ func TestVerifyToken_Success(t *testing.T) {
 	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"id":"111","name":"TestPage"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"TestPage"}`))
 	}))
 	if err := g.VerifyToken(context.Background()); err != nil {
 		t.Fatalf("VerifyToken: %v", err)
@@ -363,7 +363,7 @@ func TestDoRequest_500RetriesThenSucceeds(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	// Use a long context so backoff sleeps don't exceed the deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -437,7 +437,7 @@ func TestDoRequest_429RetriesWithBackoff(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":4,"message":"rate limited"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -485,7 +485,7 @@ func TestDoRequest_TransportErrorThenSuccess(t *testing.T) {
 			conn.Close()
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111","name":"n"}`))
 	}))
 	t.Cleanup(srv.Close)
 	swapGraphBase(t, srv.URL)

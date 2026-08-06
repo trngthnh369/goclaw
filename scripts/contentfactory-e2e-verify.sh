@@ -122,9 +122,25 @@ fbout=$(gwlogs | grep "channel=fb-page" \
   && pass "no fb-page outbound since $SINCE" \
   || fail "${fbout} fb-page outbound event(s) since $SINCE"
 
-info "ledger entries under dataDir (expect unchanged):"
-docker exec "$GW_CONTAINER" sh -c 'ls -1 "$GOCLAW_DATA_DIR/.goclaw/feed-post-ledger" 2>/dev/null | wc -l' 2>/dev/null \
-  | sed 's/^/        /' || echo "        (ledger dir not readable)"
+# The ledger dir is not readable from inside the container (capabilities are
+# dropped, so even `exec -u root` gets Permission denied). `ls | wc -l` there
+# returns 0 on failure, which is indistinguishable from "no entries" — it
+# printed 0 during a run that had two. Copy it out daemon-side instead and fail
+# when the count cannot be established.
+ledger_tmp="$(mktemp -d)"
+if docker cp "$GW_CONTAINER:/app/data/.goclaw/feed-post-ledger" "$ledger_tmp/ledger" >/dev/null 2>&1; then
+  entries=$(find "$ledger_tmp/ledger" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')
+  stuck=$(grep -l '"status"[[:space:]]*:[[:space:]]*"pending_unknown"' "$ledger_tmp/ledger"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  info "ledger entries: ${entries} (pending_unknown: ${stuck})"
+  # pending_unknown means a Graph dispatch failed with the post's fate unknown,
+  # and it blocks any retry for that review message until the file is removed.
+  [ "${stuck:-0}" -eq 0 ] \
+    && pass "no ledger entry stuck in pending_unknown" \
+    || fail "${stuck} ledger entry(ies) stuck in pending_unknown — retry is blocked until removed"
+else
+  fail "ledger not readable via docker cp — entry count NOT evaluated"
+fi
+rm -rf "$ledger_tmp"
 
 # --- 4. Terminal action ------------------------------------------------------
 echo

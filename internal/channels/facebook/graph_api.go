@@ -68,7 +68,15 @@ func NewGraphClient(pageAccessToken, pageID string) *GraphClient {
 	}
 }
 
-// VerifyToken checks the page access token by calling GET /me.
+// VerifyToken checks that the credential really is a Page access token for the
+// configured page, by calling GET /me and comparing the identity it returns.
+//
+// The comparison is the whole point. GET /me answers with whoever owns the
+// token: a Page token names the page, but a user or Business-Manager system-user
+// token names that identity instead. Without the check this logged
+// "page token verified" for a system-user token and returned nil, so a
+// misconfigured channel started clean and only failed later at publish time with
+// an opaque Graph error — that shipped and hid a broken credential for three days.
 func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	data, err := g.doRequest(ctx, http.MethodGet, "/me?fields=id,name", nil)
 	if err != nil {
@@ -80,6 +88,14 @@ func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("facebook: token verification parse error: %w", err)
+	}
+	if result.ID != g.pageID {
+		slog.Error("facebook: credential is not a Page token for the configured page",
+			"configured_page_id", g.pageID, "token_identity_id", result.ID, "token_identity_name", result.Name)
+		return fmt.Errorf(
+			"facebook: page_access_token belongs to %q (id %s), not the configured page %s — "+
+				"exchange it for a Page token first (GET /%s?fields=access_token)",
+			result.Name, result.ID, g.pageID, g.pageID)
 	}
 	slog.Info("facebook: page token verified", "page_id", result.ID, "name", result.Name)
 	return nil
@@ -553,6 +569,18 @@ type graphAPIError struct {
 func (e *graphAPIError) Error() string {
 	return fmt.Sprintf("facebook graph api error %d: %s", e.code, e.msg)
 }
+
+// APIErrorCode and APIErrorMessage expose the Graph API's own diagnostic so
+// callers outside this package can log WHY a request failed.
+//
+// They exist because logging err.Error() blindly is unsafe here: a transport
+// failure surfaces as *url.Error, whose text embeds the full request URL
+// including the access_token query parameter. Callers therefore log the detail
+// only for errors that implement this pair — Facebook's own message, which
+// never contains our credential.
+func (e *graphAPIError) APIErrorCode() int { return e.code }
+
+func (e *graphAPIError) APIErrorMessage() string { return e.msg }
 
 // IsAuthError returns true when the error is an expired or invalid token.
 func IsAuthError(err error) bool {

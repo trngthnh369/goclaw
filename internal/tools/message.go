@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,6 +55,34 @@ const (
 	approvedReplyPayloadToken       = "APPROVED_REPLY"
 	contentFactoryTerminalKey       = "contentfactory-terminal"
 )
+
+// structuredAPIError is implemented by remote-API errors whose text is the
+// service's own diagnostic and therefore safe to log.
+//
+// This path used to log only the error's TYPE, which made a failed publish
+// undiagnosable: "*facebook.graphAPIError" says nothing about whether the token
+// was rejected, a permission was missing, or the payload was malformed. The
+// caution behind that choice was still sound, though — outboundDispatcher is
+// generic over every channel, so an error here can come from any transport, and
+// a transport failure arrives as *url.Error whose text embeds the full request
+// URL. Any channel that carries a credential in a query parameter would leak it.
+//
+// Opting in per error type keeps the diagnosis without betting on how every
+// present and future channel builds its URLs.
+type structuredAPIError interface {
+	APIErrorCode() int
+	APIErrorMessage() string
+}
+
+// safeAPIErrorAttrs returns loggable slog attributes describing err, or nothing
+// when err carries no vetted-safe detail.
+func safeAPIErrorAttrs(err error) []any {
+	var apiErr structuredAPIError
+	if !errors.As(err, &apiErr) {
+		return nil
+	}
+	return []any{"api_error_code", apiErr.APIErrorCode(), "api_error_message", apiErr.APIErrorMessage()}
+}
 
 // ContentFactoryTerminalActionPending reports whether agentKey is the
 // ContentFactory director and its one required terminal action — the review
@@ -429,7 +458,8 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			if markErr := reservation.mark("pending_unknown"); markErr != nil {
 				slog.Error("message.feed_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", markErr))
 			}
-			slog.Error("message.feed_post_dispatch_failed", "error_type", fmt.Sprintf("%T", err))
+			slog.Error("message.feed_post_dispatch_failed",
+				append([]any{"error_type", fmt.Sprintf("%T", err)}, safeAPIErrorAttrs(err)...)...)
 			return ErrorResult("feed post failed; status is unknown and automatic retry is blocked")
 		}
 		if err := reservation.mark("posted"); err != nil {
