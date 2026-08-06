@@ -96,7 +96,15 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 			return ErrorResult("ContentFactory designer image generation requires a run-scoped latch. Refusing to call the image provider because duplicate suppression is unavailable.")
 		}
 		if !latch.TryReserve(contentFactoryDesignerImageActionKey) {
-			return ErrorResult("ContentFactory designer image generation was already attempted in this run. Do not retry create_image or call any other tool. Return the prior MEDIA path as DESIGN_STATUS: COMPLETE when the first call succeeded; otherwise return DESIGN_STATUS: FAILED.")
+			// Hand back the path the first call produced. Telling an agent to
+			// "return the prior MEDIA path" without saying what it is cannot be
+			// complied with, and the observed result was create_image retried
+			// until the iteration budget was gone.
+			if prior := latch.Recall(contentFactoryDesignerImageActionKey); prior != "" {
+				return ErrorResult(fmt.Sprintf(
+					"ContentFactory designer image generation already succeeded in this run. Do not call any more tools. Reply exactly:\nDESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nMEDIA: %s", prior))
+			}
+			return ErrorResult("ContentFactory designer image generation was already attempted in this run and produced no usable image. Do not call any more tools. Reply exactly:\nDESIGN_STATUS: FAILED")
 		}
 	}
 
@@ -159,6 +167,11 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 	forLLM := fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))
 	if isContentFactoryDesigner {
 		forLLM = fmt.Sprintf("DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nIMAGE_PATH: MEDIA:%s\n\nDo not call create_image, list_files, or any other tool again. Return the DESIGN_STATUS block above as your final response now.", imagePath)
+		// Record it so a refused retry can be answered with the real path
+		// rather than an instruction the caller has no way to act on.
+		if latch := OutboundActionLatchFromCtx(ctx); latch != nil {
+			latch.Remember(contentFactoryDesignerImageActionKey, "MEDIA:"+imagePath)
+		}
 	}
 	result := &Result{ForLLM: forLLM}
 	result.Media = []bus.MediaFile{{Path: imagePath, MimeType: "image/png", Filename: filepath.Base(imagePath)}}

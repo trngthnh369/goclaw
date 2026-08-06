@@ -664,6 +664,7 @@ const ctxOutboundActionLatch toolContextKey = "tool_outbound_action_latch"
 type OutboundActionLatch struct {
 	mu       sync.Mutex
 	reserved map[string]bool
+	results  map[string]string
 }
 
 // NewOutboundActionLatch creates an empty action latch.
@@ -695,6 +696,33 @@ func (l *OutboundActionLatch) Reserved(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.reserved[key]
+}
+
+// Remember stores what a reservation produced, so a later caller that is
+// refused can be told the result of the first attempt instead of a bare "already
+// done". Without it, telling an agent to "return the prior path" is unactionable
+// — it has no way to know that path — and the observed behaviour was retrying
+// the refused call until the iteration budget ran out.
+func (l *OutboundActionLatch) Remember(key, value string) {
+	if l == nil || key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.results == nil {
+		l.results = make(map[string]string)
+	}
+	l.results[key] = value
+}
+
+// Recall returns what Remember stored for key, or "".
+func (l *OutboundActionLatch) Recall(key string) string {
+	if l == nil || key == "" {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.results[key]
 }
 
 // WithOutboundActionLatch injects an outbound action latch into context.

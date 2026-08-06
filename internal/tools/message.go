@@ -42,7 +42,20 @@ func reviewTextBytesWithMedia(message string) int {
 // Duplicated from agent.mediaPathPattern to avoid tools→agent import cycle.
 var (
 	embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
-	internalNoisePattern = regexp.MustCompile(`(?i)(?:^\s*\{.*"(?:agent|delegation_id|task_id|status)".*\}\s*$|I was unable to complete this task|CRITICAL:|\[ABORT PIPELINE\]|tool execution error:|context deadline exceeded)`)
+	// internalNoisePattern blocks machine plumbing that no human asked for:
+	// delegate status envelopes and tool tracebacks. These are never a
+	// deliberate message to the reviewer, so they stay rejected outright.
+	internalNoisePattern = regexp.MustCompile(`(?i)(?:^\s*\{.*"(?:agent|delegation_id|task_id|status)".*\}\s*$|tool execution error:|context deadline exceeded)`)
+	// abortPhrasePattern used to be part of internalNoisePattern, which made the
+	// abort path unreachable: the director is told to send an abort notice to
+	// this same channel (CAPABILITIES "Every terminal Discord review or abort
+	// send"), but the natural wording for one was refused. A run that cannot
+	// abort out loud ends silently with nothing delivered — strictly worse than
+	// a blunt notice, because the review channel is internal and the
+	// irreversible boundary is the Facebook publish, which is guarded
+	// separately and byte-bound. Kept only to strip these phrases out of
+	// article drafts.
+	abortPhrasePattern = regexp.MustCompile(`(?i)(?:I was unable to complete this task|CRITICAL:|\[ABORT PIPELINE\])`)
 )
 
 const (
@@ -275,15 +288,39 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			return ErrorResult(fmt.Sprintf("ContentFactory review-channel sends require idempotency_key=%q", contentFactoryTerminalKey))
 		}
 		if internalNoisePattern.MatchString(message) {
-			return ErrorResult("Internal status JSON, abort messages, and tool error tracebacks cannot be sent to the review channel. Send ONLY clean article draft content.")
+			return ErrorResult("Internal status JSON and tool error tracebacks cannot be sent to the review channel. Send a clean article draft, or a plainly worded abort notice.")
 		}
-		// A review draft carrying an image is delivered as a single media
-		// message, which fails closed above the platform limit instead of
-		// chunking. Reject it here so the sender can shorten and retry.
+		// An abort notice may say why the pipeline stopped; a draft may not
+		// carry these phrases. Distinguished by whether an image is attached:
+		// a review draft always ships with one, an abort notice never does.
+		if !embeddedMediaPattern.MatchString(message) && abortPhrasePattern.MatchString(message) {
+			// abort notice: allowed through, but recorded so a run that ends
+			// this way is visible without reading the channel.
+			slog.Warn("message.contentfactory_abort_notice", "target", target, "bytes", len(message))
+		} else if abortPhrasePattern.MatchString(message) {
+			return ErrorResult("An article draft cannot contain abort/error phrasing. Send the clean draft, or send the abort notice on its own without an image.")
+		}
+		// A review draft carrying an image must go out as ONE message: the
+		// approval binds content and media from the single message the reviewer
+		// replies to (rc.ReplyToContent + rc.ReplyToMediaPaths). Chunking the
+		// text into a second message would leave the approver unable to approve
+		// both halves at once, so this fails closed rather than splitting.
+		//
+		// The budget is bytes but the writer's brief is characters, and
+		// Vietnamese runs well over one byte per character — a draft sized at
+		// the top of its allowed character range lands over the limit. Say how
+		// much to cut, in the unit the writer works in, so one revision is enough.
 		if n := reviewTextBytesWithMedia(message); n > maxReviewMessageBytes {
+			overBytes := n - maxReviewMessageBytes
+			text := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(message, ""))
+			cutChars := overBytes
+			if chars := len([]rune(text)); chars > 0 {
+				// Cut using this draft's own bytes-per-character, not a guess.
+				cutChars = int(float64(overBytes) * float64(chars) / float64(n))
+			}
 			return ErrorResult(fmt.Sprintf(
-				"review draft with an image is %d bytes; the platform limit is %d. Shorten the article body — it will NOT be truncated.",
-				n, maxReviewMessageBytes))
+				"review draft with an image is %d bytes; the platform limit is %d. Remove at least %d characters (~%d bytes) from the article body and resend. It will NOT be truncated, and the draft must stay one message.",
+				n, maxReviewMessageBytes, cutChars+1, overBytes))
 		}
 		if latch := OutboundActionLatchFromCtx(ctx); latch != nil && !latch.TryReserve(contentFactoryTerminalKey) {
 			return SilentResult(fmt.Sprintf(`{"status":"duplicate_suppressed","channel":"%s","target":"%s"}`, channel, target))

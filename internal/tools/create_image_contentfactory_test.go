@@ -95,8 +95,39 @@ func TestCreateImageContentFactoryDesignerAllowsExactlyOneGeneration(t *testing.
 	if provider.calls != 1 {
 		t.Fatalf("provider calls after duplicate = %d, want 1", provider.calls)
 	}
-	if !strings.Contains(second.ForLLM, "already attempted") {
+	// The refusal must hand back the path the first call produced. Telling the
+	// designer to "return the prior MEDIA path" without saying what it is is an
+	// instruction it cannot follow, and the observed result was create_image
+	// retried until the iteration budget was gone.
+	if !strings.Contains(second.ForLLM, "DESIGN_STATUS: COMPLETE") {
 		t.Fatalf("duplicate result missing terminal guidance: %s", second.ForLLM)
+	}
+	priorPath := first.Media[0].Path
+	if !strings.Contains(second.ForLLM, priorPath) {
+		t.Fatalf("duplicate result does not repeat the produced path %q: %s", priorPath, second.ForLLM)
+	}
+}
+
+// When the first attempt produced nothing, the refusal must steer to FAILED
+// rather than claim a completion that never happened.
+func TestCreateImageContentFactoryDesignerRefusalWithoutPriorImage(t *testing.T) {
+	latch := NewOutboundActionLatch()
+	if !latch.TryReserve(contentFactoryDesignerImageActionKey) {
+		t.Fatal("reserve failed on a fresh latch")
+	}
+	tool, provider, ctx := contentFactoryImageTestTool(t)
+	ctx = WithToolAgentKey(ctx, "cf-designer")
+	ctx = WithOutboundActionLatch(ctx, latch)
+
+	res := tool.Execute(ctx, map[string]any{"prompt": "no image was ever produced"})
+	if !res.IsError {
+		t.Fatalf("expected fail-closed, got: %s", res.ForLLM)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("provider called %d times, want 0", provider.calls)
+	}
+	if !strings.Contains(res.ForLLM, "DESIGN_STATUS: FAILED") {
+		t.Errorf("refusal should steer to FAILED: %s", res.ForLLM)
 	}
 }
 
