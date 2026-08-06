@@ -238,7 +238,10 @@ func syncBridgeToState(bridgeRS *runState, state *pipeline.RunState, action tool
 			})
 		}
 	}
-	if state.Tool.LoopKilled && action == toolResultBreak {
+	// A break carries its final answer whether it came from the loop detector
+	// (LoopKilled) or from a tool declaring the run finished (endRunRequested).
+	// Keying this on LoopKilled alone would drop the answer and end the run empty.
+	if action == toolResultBreak && (state.Tool.LoopKilled || bridgeRS.endRunRequested) {
 		state.Observe.FinalContent = bridgeRS.finalContent
 	}
 }

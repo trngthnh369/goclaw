@@ -110,16 +110,20 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 			// "return the prior MEDIA path" without saying what it is cannot be
 			// complied with, and the observed result was create_image retried
 			// until the iteration budget was gone.
+			// End the run here rather than asking the agent to stop. The answer
+			// is already fully determined — the image either exists or it does
+			// not — so there is nothing left to decide, and a refusal phrased as
+			// an instruction was ignored six times in a live run.
 			if prior := latch.Recall(contentFactoryDesignerImageActionKey); prior != "" {
-				// Replay the success message verbatim. Any divergence between the
-				// two — a doubled "MEDIA:" prefix, or MEDIA: here versus
-				// IMAGE_PATH: there — asks the agent to produce a shape it has
-				// not been taught, on the one path where it is already confused.
-				return ErrorResult(
-					"ContentFactory designer image generation already succeeded in this run. Do not call any more tools. Reply exactly:\n" +
-						designerCompleteBlock(prior))
+				// Same renderer as the success path: a divergent shape would ask
+				// the agent for output it was never taught.
+				res := SilentResult(designerCompleteBlock(prior))
+				res.EndRun = true
+				return res
 			}
-			return ErrorResult("ContentFactory designer image generation was already attempted in this run and produced no usable image. Do not call any more tools. Reply exactly:\nDESIGN_STATUS: FAILED")
+			res := SilentResult("DESIGN_STATUS: FAILED\nIMAGE_COUNT: 0")
+			res.EndRun = true
+			return res
 		}
 	}
 

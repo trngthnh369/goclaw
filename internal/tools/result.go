@@ -14,6 +14,16 @@ type Result struct {
 	Async   bool   `json:"async"`               // running asynchronously
 	Err     error  `json:"-"`                   // internal error (not serialized)
 
+	// EndRun stops the agent loop after this result, using ForLLM as the run's
+	// final answer. Unlike the loop detector's kill it does NOT mark the run
+	// failed, so a delegated task still reports success.
+	//
+	// For guards where the correct output is already fully determined and the
+	// call must not be repeated. A refusal the model can ignore is not a guard:
+	// cf-designer ignored a one-shot image refusal six times in one run — 119k
+	// tokens — because the only thing stopping it was text asking it to stop.
+	EndRun bool `json:"-"`
+
 	// Media holds media files to forward as output (e.g. images from delegation).
 	Media []bus.MediaFile `json:"-"`
 

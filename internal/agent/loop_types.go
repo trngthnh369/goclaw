@@ -748,6 +748,10 @@ type runState struct {
 	// Propagated to RunResult.LoopKilled so the consumer can auto-fail team tasks.
 	loopKilled bool
 
+	// endRunRequested is set when a tool returned Result.EndRun: the loop stops
+	// and finalContent becomes the answer, but the run is NOT marked failed.
+	endRunRequested bool
+
 	// Truncation retry counter — caps consecutive truncation/parse-error retries
 	// to prevent burning through all iterations when max_tokens is too low.
 	truncationRetries int

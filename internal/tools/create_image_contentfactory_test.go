@@ -89,11 +89,19 @@ func TestCreateImageContentFactoryDesignerAllowsExactlyOneGeneration(t *testing.
 	}
 
 	second := tool.Execute(ctx, map[string]any{"prompt": "should not reach provider"})
-	if !second.IsError {
-		t.Fatalf("second create_image should fail closed, got: %s", second.ForLLM)
-	}
 	if provider.calls != 1 {
 		t.Fatalf("provider calls after duplicate = %d, want 1", provider.calls)
+	}
+	// The duplicate ends the run instead of asking the agent to stop. Text
+	// telling it to stop was ignored six times in a live run; the answer is
+	// already determined here, so there is nothing left for it to decide.
+	if !second.EndRun {
+		t.Fatalf("duplicate must end the run, got: %+v", second)
+	}
+	// Not an error: the image exists, so the delegated task succeeded. Marking
+	// it an error would fail the team task over a redundant call.
+	if second.IsError {
+		t.Errorf("duplicate marked IsError; the run succeeded: %s", second.ForLLM)
 	}
 	// The refusal must hand back the path the first call produced. Telling the
 	// designer to "return the prior MEDIA path" without saying what it is is an
@@ -120,14 +128,19 @@ func TestCreateImageContentFactoryDesignerRefusalWithoutPriorImage(t *testing.T)
 	ctx = WithOutboundActionLatch(ctx, latch)
 
 	res := tool.Execute(ctx, map[string]any{"prompt": "no image was ever produced"})
-	if !res.IsError {
-		t.Fatalf("expected fail-closed, got: %s", res.ForLLM)
-	}
 	if provider.calls != 0 {
 		t.Fatalf("provider called %d times, want 0", provider.calls)
 	}
+	if !res.EndRun {
+		t.Fatalf("refusal must end the run, got: %+v", res)
+	}
+	// No image was produced, so the run must report FAILED rather than claim a
+	// completion that never happened.
 	if !strings.Contains(res.ForLLM, "DESIGN_STATUS: FAILED") {
 		t.Errorf("refusal should steer to FAILED: %s", res.ForLLM)
+	}
+	if strings.Contains(res.ForLLM, "COMPLETE") {
+		t.Errorf("refusal must not claim completion: %s", res.ForLLM)
 	}
 }
 
