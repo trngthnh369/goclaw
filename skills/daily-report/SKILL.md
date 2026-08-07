@@ -32,7 +32,7 @@ Toàn bộ pipeline đóng gói trong **script deterministic**. Việc của b�
 
 ---
 
-## TRIGGER A — GENERATE (cron "daily-report" 17:10 T2-T6, hoặc user "báo cáo ngay")
+## TRIGGER A — GENERATE (cron "daily-report" 16:30 T2-T6, hoặc user "báo cáo ngay")
 Chạy đúng 1 lệnh:
 ```
 exec: python3 /app/workspace/_daily-report/daily_report_run.py --hours 24 --auto-weekly
@@ -79,10 +79,10 @@ Item có `skip_sheet` vẫn nằm trong báo cáo/ảnh, chỉ không tạo dòn
 "báo cáo ngay" / "daily report now" → TRIGGER A. "báo cáo tuần ngay" → `exec: python3 /app/workspace/_daily-report/weekly_report.py --report` rồi `exec: python3 /app/workspace/_daily-report/daily_report_run.py --post-pending`.
 
 ## Ghi chú vận hành
-- **Ai chạy cái gì** (chốt 2026-08-07): Windows Task `GoClaw-DailyReport-Gen` 17:00 chạy
+- **Ai chạy cái gì** (chốt 2026-08-07): Windows Task `GoClaw-DailyReport-Gen` 16:20 chạy
   `run_daily_report.ps1 -CollectOnly` — bật Docker nếu tắt, thu thập git + Antigravity từ máy host
   (container KHÔNG mount `D:\Projects\work` nên phần này bắt buộc ở host), sync script vào
-  container. Cron GoClaw `daily-report` 17:10 mới GENERATE. Trước đó cả hai cùng generate → mỗi
+  container. Cron GoClaw `daily-report` 16:30 mới GENERATE. Trước đó cả hai cùng generate → mỗi
   ngày 2 bản nháp + 2 tiến trình cùng ghi `report.json`.
 - Timeout exec của agent đã nâng 60s → 600s (`builtin_tools.settings.timeout_seconds`); script chạy
   ~90-150s, ngày thứ Sáu lâu hơn. Ở 60s Zip luôn bị cắt giữa chừng.

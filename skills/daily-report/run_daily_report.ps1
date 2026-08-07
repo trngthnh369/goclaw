@@ -1,19 +1,19 @@
 # run_daily_report.ps1 — daily report host-side job (Windows Task Scheduler, Mon-Fri).
 #
 # MODES
-#   -CollectOnly  (current production mode, task GoClaw-DailyReport-Gen at 17:00)
+#   -CollectOnly  (current production mode, task GoClaw-DailyReport-Gen at 16:20)
 #       Ensure Docker is up -> run the HOST collector -> sync scripts into the container. The
 #       GENERATE step is then triggered by the GoClaw cron `daily-report` (agent zip-crazy) at
-#       17:10, so the report is produced in exactly one place.
+#       16:30, so the report is produced in exactly one place.
 #       This half cannot move into GoClaw: the collector reads D:\Projects\work git repos and the
 #       Antigravity SQLite DB, and neither is mounted into the container (verified).
-#   -IfMissing    (task GoClaw-DailyReport-Safety at 17:25) Safety net: generate ONLY if the cron
+#   -IfMissing    (task GoClaw-DailyReport-Safety at 16:45) Safety net: generate ONLY if the cron
 #       produced nothing for today. Moving GENERATE into GoClaw made the report depend on the
-#       gateway being alive at 17:10 with a working agent turn; this restores a fallback without
+#       gateway being alive at 16:30 with a working agent turn; this restores a fallback without
 #       reintroducing the duplicate run (it exits as soon as it sees today's posted draft).
 #   (no flag)     Full pipeline (collector + generate + Friday weekly), for manual runs.
 #
-# Replaces the dead GoClaw cron. Self-heals the common failure mode:
+# Self-heals the common failure mode:
 #   - Docker engine down at fire time (the docker-desktop WSL distro can stop) -> start Docker
 #     Desktop + wait for the engine before doing anything.
 #   - LLM (Gemini ag-pro via GoClaw gateway) down -> retry once; last resort post a deterministic
@@ -131,7 +131,7 @@ try {
   Sync-Scripts
 
   if ($CollectOnly) {
-    # Fresh digest + scripts are in place; the GoClaw cron runs the generate at 17:10.
+    # Fresh digest + scripts are in place; the GoClaw cron runs the generate at 16:30.
     Log "=== collect OK (generate se do cron GoClaw chay) ==="
     exit 0
   }
