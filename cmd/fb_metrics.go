@@ -44,6 +44,15 @@ this is the only durable copy.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			records, err := facebook.LoadPublications()
 			if err != nil {
+				if os.IsPermission(err) {
+					// The data dir is 0700 owned by the gateway user, and
+					// `docker exec` lands as root without CAP_DAC_OVERRIDE, so
+					// root is refused here. Say so instead of leaving a bare
+					// "permission denied".
+					return fmt.Errorf("read publication records: %w\n\n"+
+						"The data dir belongs to the gateway user. Run as that user, e.g.\n"+
+						"  docker exec -u goclaw <container> /app/goclaw fb-metrics", err)
+				}
 				return fmt.Errorf("read publication records: %w", err)
 			}
 			if len(records) == 0 {
