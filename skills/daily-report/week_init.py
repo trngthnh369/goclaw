@@ -24,10 +24,20 @@ import sheets_client as sc  # noqa: E402
 
 TZ = timezone(timedelta(hours=7))
 STAGING_PREFIX = "_init "
+CARRY_MARKER = "(chuyển từ tuần trước)"
 
 
 def log(*a: object) -> None:
     print("[week_init]", *a, file=sys.stderr)
+
+
+def _with_carry_marker(note: object) -> str:
+    """Add the carry marker at most once — it was appended unconditionally every week, so a task
+    carried N weeks accumulated N copies of it in the note."""
+    text = str(note or "").strip()
+    if CARRY_MARKER in text:
+        return text
+    return (text + " " if text else "") + CARRY_MARKER
 
 
 def _weekly_tabs(today: date) -> list:
@@ -113,9 +123,11 @@ def main() -> None:
     _clear_data_rows(staging)
 
     if carried:
+        # Append the marker ONCE: it used to be added unconditionally every week, so a task carried
+        # 3 weeks read "... (chuyển từ tuần trước) (chuyển từ tuần trước) (chuyển từ tuần trước)".
         rows = [[str(i + 1), t["name"], "", t["status"] or "WIP",
                  f"{t['pct']}%" if t["pct"] is not None else "",
-                 (t["note"] + " " if t["note"] else "") + "(chuyển từ tuần trước)"]
+                 _with_carry_marker(t["note"])]
                 for i, t in enumerate(carried)]
         sc.append_rows(drs.SPREADSHEET_ID, f"'{staging_name}'!A1", rows)
 

@@ -33,11 +33,13 @@ BADGE = {
     "new": ("new", "Mới"),
 }
 
+# "carry" is gone on purpose: it re-listed every unfinished task already shown in doing/blocked.
+# Backlog now renders as the one-line idle summary at the bottom (weekly_report.build_sections).
 SECTIONS = (
     ("done", "done", "Hoàn thành"),
     ("doing", "doing", "Đang làm"),
     ("blocked", "blocked", "Blocked"),
-    ("carry", "carry", "Tồn đọng chuyển tuần sau"),
+    ("nopct", "carry", "Chưa có %"),
 )
 
 
@@ -136,6 +138,10 @@ def build_weekly_sections(d: dict) -> str:
             )
         blocks.append(f'<div class="section"><span class="section-title {cls}">{esc(label)}</span>\n'
                       + "\n".join(items_html) + "</div>")
+    idle = int(secs.get("idle_count") or 0)
+    if idle:
+        blocks.append(f'<div class="note" style="margin-top:10px">Tồn đọng: {idle} task chưa động '
+                      f'tới tuần này (xem sheet kế hoạch tuần).</div>')
     if not d.get("refreshed", True):
         blocks.append('<div class="warn">Luu y: % chua refresh tu phien phan tich (LLM loi) — so lieu theo sheet hien co.</div>')
     return "\n".join(blocks)

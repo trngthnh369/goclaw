@@ -157,10 +157,27 @@ def write_sheet_daily(report: dict) -> str:
             if t.get("pct") is not None and p < t["pct"]:
                 p = t["pct"]  # % không lùi (re-check session must not regress a done task)
             updates.append({"row": t["row"], "percent": p, "status": status})
+        elif it.get("skip_sheet"):
+            # user replied "bỏ mới: N" during review -> report keeps the item, sheet does not
+            log(f"skip sheet append (user rejected): {it.get('title', '')}")
         else:
             new_tasks.append({"name": it.get("title", ""), "percent": p,
                               "status": status, "note": it.get("note", "")})
     res = drs.write_progress(tab, pct_col, updates, new_tasks)
+
+    # Remember the bindings the user just approved so tomorrow's run matches them deterministically
+    # instead of re-asking the agent (whose answer varies between runs).
+    import daily_report_run as dr
+    learned = {dr._norm(it["group_key"]): it["sheet_match"]
+               for it in items
+               if it.get("sheet_match") and not it.get("is_new") and it.get("group_key")}
+    if learned:
+        try:
+            dr.save_learned(learned)
+            log(f"learned {len(learned)} binding(s)")
+        except Exception as exc:  # noqa: BLE001
+            log(f"save learned bindings failed: {exc}")
+
     return f"tab='{tab['title']}' updated={res['updated']} appended={res['appended']}"
 
 

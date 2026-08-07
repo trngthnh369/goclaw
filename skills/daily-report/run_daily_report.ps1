@@ -31,7 +31,10 @@ $DIGEST_DIR = Join-Path $env:USERPROFILE ".claude\host-digest"
 function Log($m) {
   $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m
   try { Add-Content -Path $LOG -Value $line } catch {}
-  Write-Output $line
+  # Write-Host, NOT Write-Output: Log is called from inside functions whose return value is an exit
+  # code. Writing to the output stream made Invoke-Generate return Object[] (log lines + code), so
+  # `$rc -eq 3` never matched (the LLM retry/fallback branch was dead) and `exit $rc` was garbage.
+  Write-Host $line
 }
 
 function Test-Engine {
@@ -62,13 +65,10 @@ function Wait-Healthy {
 }
 
 function Sync-Scripts {
-  $files = @("daily_report_run.py","daily_report_publish.py","daily_report_sheet.py",
-             "daily_report_edit.py","build_and_render.py","digest_sessions.py","sheets_client.py",
-             "weekly_report.py","build_summary_tab.py","render_report.mjs","template.html",
-             "template_weekly.html","week_init.py","edit_repost.py","task_aliases.json")
-  foreach ($f in $files) {
-    & $DOCKER exec -u goclaw $GOCLAW cp -f "/app/data/skills/daily-report/$f" "/app/workspace/_daily-report/$f" 2>$null
-  }
+  # ONE exec, not one per file: 15 sequential `docker exec` cost ~4.8s of the run (measured) and
+  # each round-trip is pure Docker Desktop overhead. The glob copies the same set of artefacts.
+  & $DOCKER exec -u goclaw $GOCLAW sh -c 'cp -f /app/data/skills/daily-report/*.py /app/data/skills/daily-report/*.html /app/data/skills/daily-report/*.mjs /app/data/skills/daily-report/task_aliases.json /app/workspace/_daily-report/' 2>$null
+  if ($LASTEXITCODE -ne 0) { Log "WARN: script sync rc=$LASTEXITCODE (container dung ban cu)" }
   # Refresh the gateway-token file so Zip-triggered publish/edit can auth (GoClaw v3.14 exec env
   # does NOT expose GOCLAW_GATEWAY_TOKEN; scripts read this chmod-600 file as fallback).
   & $DOCKER exec -u goclaw $GOCLAW sh -c 'printf "%s" "$GOCLAW_GATEWAY_TOKEN" > /app/workspace/_daily-report/.gwtoken && chmod 600 /app/workspace/_daily-report/.gwtoken' 2>$null
@@ -89,7 +89,8 @@ function Invoke-Generate([bool]$RequireLlm, [bool]$NoPost = $false) {
   if ($RequireLlm) { $dargs += "--require-llm" }
   if ($NoPost)     { $dargs += "--no-post" }
   & $DOCKER @dargs 2>&1 | ForEach-Object { Log "gen> $_" }
-  return $LASTEXITCODE
+  $code = $LASTEXITCODE          # capture before anything else can clobber it
+  return $code
 }
 
 Log "=== daily-report generate start ==="

@@ -148,15 +148,37 @@ def load_host_digest(path: str = HOST_DIGEST, max_age_h: float = 3.0) -> dict | 
     return hd
 
 
-def synth_host_sessions(hd: dict | None, start_idx: int) -> list:
+def _ts_ge(raw: object, since: datetime | None) -> bool:
+    """True if the collector timestamp is at/after `since`. Unparseable -> kept (fail-open: the
+    collector already window-filtered; we only re-slice a WIDER file)."""
+    if since is None:
+        return True
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=TZ)
+    return ts >= since
+
+
+def synth_host_sessions(hd: dict | None, start_idx: int, since: datetime | None = None) -> list:
     """Antigravity convo -> 1 pseudo-session; git repo -> 1 pseudo-session (commit msgs as
     intents). Same shape as flatten_sessions output so the alias pipeline treats all three
-    sources identically (D5 alias-first dedupe)."""
+    sources identically (D5 alias-first dedupe).
+
+    `since` re-slices the file to the caller's window. REQUIRED for the daily run: on Friday the
+    wrapper collects the whole WEEK into week.json and copies it to latest.json, so without this
+    the daily report presented the entire week's commits as today's work."""
     out: list = []
     if not hd:
         return out
     idx = start_idx
+    dropped = 0
     for r in hd.get("antigravity", []):
+        if not _ts_ge(r.get("ts"), since):
+            dropped += 1
+            continue
         out.append({
             "idx": idx, "project": r.get("project_label", ""), "src": "antigravity",
             "name": str(r.get("title") or "antigravity session"),
@@ -165,16 +187,20 @@ def synth_host_sessions(hd: dict | None, start_idx: int) -> list:
         })
         idx += 1
     for g in hd.get("git", []):
-        msgs = [c.get("msg", "") for c in g.get("commits", [])][:6]
+        commits = [c for c in g.get("commits", []) if _ts_ge(c.get("ts"), since)]
+        dropped += len(g.get("commits", [])) - len(commits)
+        msgs = [c.get("msg", "") for c in commits][:6]
         if not msgs:
             continue
         out.append({
             "idx": idx, "project": g.get("repo", ""), "src": "git",
             "name": f"{g.get('repo', '')} (commits)",
-            "edits": len(g.get("commits", [])),
+            "edits": len(commits),
             "intent": [m[:140] for m in msgs],
         })
         idx += 1
+    if dropped:
+        log(f"host digest: dropped {dropped} entries outside window (since={since.isoformat()})")
     return out
 
 
@@ -198,7 +224,10 @@ def flatten_sessions(projects: list) -> tuple[list, list]:
                 "src": "claude",
                 "name": str(name),
                 "edits": tools.get("Edit", 0) + tools.get("Write", 0),
-                "intent": [str(x)[:140] for x in (s.get("prompts") or [])[:3]],
+                # 6x200 rather than 3x140: the LLM decides task identity and sheet binding from
+                # this text, and three truncated prompts were not enough to tell two tasks in the
+                # same repo apart (it invented generic names like "Công việc không xác định").
+                "intent": [str(x)[:200] for x in (s.get("prompts") or [])[:6]],
             })
     return sessions, order
 
@@ -215,21 +244,57 @@ def load_aliases() -> list:
         return []
 
 
+def _pattern_hit(pat: str, hay: str) -> bool:
+    """Short patterns match on word boundaries only — 'pcs' used to fire inside unrelated words."""
+    p = pat.lower()
+    if len(p) < 6 and re.fullmatch(r"[\w\s-]+", p):
+        return re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", hay) is not None
+    return p in hay
+
+
 def resolve_task(session: dict, aliases: list) -> tuple[str | None, str | None, bool]:
-    """Map 1 session -> (task hiển thị, tên-trong-sheet|None, known)."""
+    """Map 1 session -> (task hiển thị, tên-trong-sheet|None, known).
+
+    Scans EVERY alias and keeps the LONGEST matching pattern, i.e. the most specific one. First-hit
+    made the order of task_aliases.json load-bearing: the catch-all {"match":["openclaw"]} sat above
+    the specific entries, so any session merely mentioning openclaw was relabelled "Vận hành
+    OpenClaw server" and its real work vanished into that bucket."""
     hay = (session["name"] + " " + " ".join(session.get("intent", []))).lower()
+    best_len, best = -1, None
     for a in aliases:
         for pat in a.get("match", []):
-            if pat and pat.lower() in hay:
-                if a.get("ignore"):
-                    return (None, None, False)  # IGNORE
-                return (a.get("task") or session["name"], (a.get("sheet") or None), True)
-    return (session["name"], None, False)
+            if pat and len(pat) > best_len and _pattern_hit(pat, hay):
+                best_len, best = len(pat), a
+    if best is None:
+        return (session["name"], None, False)
+    if best.get("ignore"):
+        return (None, None, False)
+    return (best.get("task") or session["name"], (best.get("sheet") or None), True)
+
+
+HEX_NAME_RE = re.compile(r"^[0-9a-f]{6,}(-[0-9a-f]{4,})*$", re.I)
+MIN_INTENT_CHARS = 20
+
+
+def is_junk_group(g: dict) -> str | None:
+    """Reason this group must NOT reach the report, or None. A session whose title is just its
+    session-id (Claude writes one when no ai-title was generated) carries no meaning, and a group
+    with almost no intent text makes the LLM invent a task ("Công việc không xác định / 5%")."""
+    if g["known"]:
+        return None  # an alias vouched for it — never drop
+    text = " ".join(str(x) for x in g["intents"]).strip()
+    if HEX_NAME_RE.match(g["name"].strip()) and len(text) < MIN_INTENT_CHARS:
+        return "session-id name, no usable intent"
+    if len(text) < MIN_INTENT_CHARS:
+        return f"intent too thin ({len(text)} chars)"
+    return None
 
 
 def group_tasks(sessions: list, aliases: list) -> list:
     """Gộp session theo task (deterministic, alias-first — D5). Unknown groups from different
-    sources are kept SEPARATE (no label-merge: one project = many tasks); provenance in srcs."""
+    sources are kept SEPARATE (no label-merge: one project = many tasks); provenance in srcs.
+    Junk groups (session-id names / no usable intent) are dropped BEFORE the LLM so they can
+    never become a report item nor an appended sheet row."""
     groups: dict[str, dict] = {}
     order: list = []
     for s in sessions:
@@ -248,7 +313,14 @@ def group_tasks(sessions: list, aliases: list) -> list:
             g["sheet"] = sheet
         if known:
             g["known"] = True
-    return [groups[n] for n in order]
+    kept = []
+    for n in order:
+        reason = is_junk_group(groups[n])
+        if reason:
+            log(f"drop junk group '{n}': {reason}")
+            continue
+        kept.append(groups[n])
+    return kept
 
 
 def duplicate_candidates(groups: list) -> list:
@@ -269,11 +341,11 @@ def duplicate_candidates(groups: list) -> list:
 DESCRIBE_PROMPT = """Bạn viết chi tiết cho báo cáo công việc cuối ngày. Mỗi phần tử dưới đây là 1 TASK đã có tên; một số task kèm "sheet_pct" = % hiện tại trên sheet kế hoạch tuần.
 
 CHỈ trả về MỘT JSON array (không markdown, không giải thích, không gọi tool), mỗi phần tử:
-{"idx":<idx>,"name":"<xem quy tắc>","sheet_idx":<số hoặc null>,"detail":"<chi tiết ≤14 từ>","progress":"done|doing|blocked|new","percent":<0-100>,"uncertain":<true nếu bạn không chắc tên/%>}
+{"idx":<idx>,"name":"<xem quy tắc>","same_as":<idx hoặc null>,"detail":"<chi tiết ≤14 từ>","progress":"done|doing|blocked|new","percent":<0-100>,"uncertain":<true nếu bạn không chắc tên/%>}
 
 QUY TẮC BẮT BUỘC:
 - GIỮ NGUYÊN idx. Nếu "known"=true → name GIỮ NGUYÊN y hệt (tên chuẩn theo sheet — KHÔNG bịa tên mới). Nếu "known"=false → đổi name (slug kỹ thuật) thành tên công việc tiếng Việt đọc được, viết hoa đầu, KHÔNG gạch ngang.
-- "sheet_idx": nếu SHEET_TASKS được cung cấp bên dưới, CHỌN task sheet phù hợp nhất với task này (dùng sidx). PHẢI KHỚP CHỦ ĐỀ — "AI Training" ≠ "AI competitor monitor", "OpenClaw" ≠ "AI News". Nếu không có task nào CÙNG CHỦ ĐỀ → null. KHÔNG ép khớp chỉ vì cùng có chữ "AI".
+- "same_as": nếu task này VÀ một task khác trong danh sách thực chất là CÙNG MỘT công việc (cùng dự án, cùng mục tiêu — vd 2 phiên cùng làm công cụ điều phối hàng hoá), điền idx của task kia (idx NHỎ HƠN); ngược lại null. CHỈ gộp khi chắc chắn cùng một việc — khác mục tiêu/khác dự án thì để null dù tên na ná.
 - detail dựa trên "intents". TUYỆT ĐỐI KHÔNG nhắc tên file/đường dẫn/script (.py/.js/.sh/.mjs)/branch/hàm.
 - PHÂN LOẠI intent: intents chỉ là KIỂM TRA/check lại/verify/xem lại → task đã hoàn thành trước đó, giờ chỉ re-check → progress="done", percent giữ cao (≥ sheet_pct, thường 90-100). KHÔNG coi việc kiểm tra là việc mới.
 - % KHÔNG LÙI: nếu có sheet_pct thì percent PHẢI ≥ sheet_pct (tiến độ không đi lùi vì 1 phiên re-check).
@@ -282,10 +354,6 @@ QUY TẮC BẮT BUỘC:
 - Không chắc tên task hay % → "uncertain":true (sẽ hiển thị ⚠️ cho user sửa khi review).
 
 """
-
-SHEET_TASKS_PROMPT = """SHEET_TASKS (danh sách task trong sheet kế hoạch tuần — dùng sidx để map):
-"""
-
 
 def _describe_items(groups: list, by_idx: dict) -> list:
     items = []
@@ -301,7 +369,12 @@ def _describe_items(groups: list, by_idx: dict) -> list:
             "percent": it.get("percent"),
             "uncertain": bool(it.get("uncertain")),
             "sheet_name": g["sheet"],
-            "sheet_idx": it.get("sheet_idx"),
+            "same_as": it.get("same_as"),
+            # deterministic key (session/alias name, NOT the LLM's title, which is reworded every
+            # run) — what learned_bindings is keyed on
+            "group_key": g["name"],
+            # raw evidence kept for the binding adjudicator; stripped before report.json
+            "evidence": " | ".join(str(x) for x in g["intents"][:4])[:600],
         })
     return items
 
@@ -317,11 +390,9 @@ def llm_chat(messages: list) -> str:
     return http_post("/v1/chat/completions", payload, timeout=300)["choices"][0]["message"]["content"]
 
 
-def _describe_chunk(feed: list, sheet_feed: list | None = None) -> dict | None:
+def _describe_chunk(feed: list) -> dict | None:
     """One describe call -> {idx: item}. None on any failure (caller falls back)."""
     prompt = DESCRIBE_PROMPT + "TASKS:\n" + json.dumps(feed, ensure_ascii=False)
-    if sheet_feed:
-        prompt += "\n\n" + SHEET_TASKS_PROMPT + json.dumps(sheet_feed, ensure_ascii=False)
     messages = [{"role": "user", "content": prompt}]
     try:
         content = llm_chat(messages)
@@ -350,14 +421,11 @@ def _describe_chunk(feed: list, sheet_feed: list | None = None) -> dict | None:
 def llm_describe(groups: list, sheet_pct_by_name: dict | None = None,
                  sheet_tasks: list | None = None) -> list | None:
     """Chunked describe with per-chunk count validation. sheet_pct feeds the monotonic rule.
-    sheet_tasks feeds the LLM so it can map work → sheet rows via sheet_idx."""
+    Sheet ROWS are deliberately NOT in this prompt: binding is decided later by verify_bindings,
+    so keeping the 31-row list out of every describe chunk shrinks the slowest call in the run."""
     if not groups:
         return None
     sheet_pct_by_name = sheet_pct_by_name or {}
-    sheet_feed = None
-    if sheet_tasks:
-        sheet_feed = [{"sidx": i, "name": t["name"], "pct": t.get("pct"), "status": t.get("status", "")}
-                      for i, t in enumerate(sheet_tasks)]
     feed_all = []
     for i, g in enumerate(groups):
         entry = {"idx": i, "name": g["name"], "known": g["known"], "intents": g["intents"][:4]}
@@ -368,7 +436,7 @@ def llm_describe(groups: list, sheet_pct_by_name: dict | None = None,
     by_idx: dict = {}
     for start in range(0, len(feed_all), LLM_CHUNK):
         chunk = feed_all[start:start + LLM_CHUNK]
-        res = _describe_chunk(chunk, sheet_feed)
+        res = _describe_chunk(chunk)
         if res is None:
             return None
         by_idx.update(res)
@@ -380,66 +448,272 @@ def fallback_describe(groups: list) -> list:
     return _describe_items(groups, {})
 
 
+def merge_duplicate_items(items: list) -> list:
+    """Fold items that describe ONE task into one row.
+
+    group_tasks keys on the raw session title, so the same work opened in three sessions became
+    three tasks ("Công cụ điều phối hàng hóa" / "Điều phối hàng hóa nội vùng" / "Xây dựng công cụ
+    phân phối hàng"). The duplication is only visible AFTER the LLM names things in Vietnamese.
+
+    Pairing comes from the LLM's `same_as` field, NOT token overlap: Vietnamese titles are made of
+    short syllables, so a token heuristic merged "Kiểm tra lỗi kết nối trên hệ thống quét" with
+    "Kiểm tra mã nguồn nền tảng" (tested — a 5-way false merge that also hijacked a sheet binding).
+
+    Guard that survives an LLM mistake: two items bound to DIFFERENT sheet rows are different tasks
+    by definition and are never merged, so a bad `same_as` can only affect display, never a % write.
+    Merge keeps the sheet-bound member, the highest %, the most advanced progress, unions notes."""
+    order = {"new": 0, "blocked": 1, "doing": 2, "done": 3}
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def bound(i: int) -> str:
+        return _norm(items[i].get("sheet_match"))
+
+    for i, it in enumerate(items):
+        j = it.get("same_as")
+        if not isinstance(j, int) or not (0 <= j < len(items)) or j == i:
+            continue
+        if bound(i) and bound(j) and bound(i) != bound(j):
+            log(f"merge REJECT '{it.get('title')}' ~ '{items[j].get('title')}': "
+                f"bound to different sheet rows")
+            continue
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    clusters: dict = {}
+    for i, it in enumerate(items):
+        clusters.setdefault(find(i), []).append(it)
+
+    out = []
+    for root in sorted(clusters, key=lambda r: min(items.index(x) for x in clusters[r])):
+        members = clusters[root]
+        if len(members) == 1:
+            members[0].pop("same_as", None)
+            out.append(members[0])
+            continue
+        # prefer a sheet-bound member as the surviving row (keeps the % write-back target)
+        head = next((m for m in members if m.get("sheet_match")), members[0])
+        merged = dict(head)
+        notes, seen = [], set()
+        for m in members:
+            n = (m.get("note") or "").strip()
+            if n and _norm(n) not in seen:
+                seen.add(_norm(n))
+                notes.append(n)
+            if (m.get("percent") or 0) > (merged.get("percent") or 0):
+                merged["percent"] = m.get("percent")
+            if order.get(m.get("progress"), 0) > order.get(merged.get("progress"), 0):
+                merged["progress"] = m.get("progress")
+            merged["uncertain"] = merged.get("uncertain") or m.get("uncertain")
+        merged["note"] = "; ".join(notes)[:220]
+        merged.pop("same_as", None)
+        log(f"merge {len(members)} items -> '{merged.get('title')}': "
+            + " | ".join(m.get("title", "") for m in members))
+        out.append(merged)
+    return out
+
+
 def _norm(s: object) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
 
 
-def _fuzzy_score(a: str, b: str) -> float:
-    """Token-overlap ratio between two normalized strings. Returns 0.0-1.0.
-    Uses 3+ char tokens to avoid common short-word false positives (e.g. 'ai')."""
+def _dice_score(a: str, b: str) -> float:
+    """Symmetric token overlap, used ONLY as the LLM-down fallback in match_sheet.
+
+    The earlier score divided by the shorter side, so any short generic title scored 1.00 against
+    a longer row containing its words ("Cập nhật mã nguồn hệ thống" -> "Cập nhật mã nguồn hệ thống
+    tối ưu quảng cáo Meta", a different project). Dice penalises that (0.67)."""
     ta = set(re.findall(r"\w{3,}", _norm(a)))
     tb = set(re.findall(r"\w{3,}", _norm(b)))
     if not ta or not tb:
         return 0.0
-    overlap = len(ta & tb)
-    return overlap / min(len(ta), len(tb))
+    return 2 * len(ta & tb) / (len(ta) + len(tb))
 
 
-FUZZY_THRESHOLD = 0.5
+# Blind guessing with no agent opinion needs a high bar; whatever it matches is flagged uncertain
+# so the ⚠️ shows in the review text before any % is written back.
+FUZZY_BLIND_THRESHOLD = 0.7
+
+
+VERIFY_PROMPT = """Bạn đối chiếu công việc thực tế với DANH SÁCH TASK trong sheet kế hoạch tuần.
+
+Với mỗi CANDIDATE, quyết định nó có phải LÀ MỘT trong các task của sheet hay không.
+
+CHỈ trả về MỘT JSON array (không markdown, không giải thích ngoài field reason):
+[{"idx":<idx>,"sheet_idx":<sidx hoặc null>,"reason":"<≤12 từ>"}]
+
+QUY TẮC:
+- Căn cứ chính là "evidence" (nội dung phiên làm việc thật), KHÔNG phải độ giống của chữ.
+- Khác ngôn ngữ VẪN khớp nếu là cùng một việc: "Tính toán đặt hàng lại theo kích cỡ" = "AI Size Reorder Calculator". Tên viết tắt/khác cách gọi cũng vậy.
+- Giống chữ nhưng KHÁC việc thì phải null: "Điều phối hàng hoá" ≠ "AI Product Trending", "Cập nhật mã nguồn dự án Byteflow" ≠ "Cập nhật mã nguồn hệ thống tối ưu quảng cáo Meta" (khác dự án), "AI Training" ≠ "AI competitor monitor".
+- KHÔNG ép khớp chỉ vì cùng có chữ "AI"/"hệ thống"/"cập nhật".
+- "proposed_sidx" là phỏng đoán trước đó — được phép bác bỏ hoặc đổi sang sidx khác.
+- Không có dòng nào CÙNG một việc → sheet_idx = null (task mới, sẽ được đề xuất thêm vào sheet).
+- MỖI sidx dùng cho TỐI ĐA 1 candidate.
+
+"""
+
+
+def verify_bindings(cands: list, sheet_tasks: list, used: set) -> dict | None:
+    """Agent adjudicates task <-> sheet-row identity from session evidence. Returns
+    {item_index: sheet_idx|None}, or None when the LLM is unavailable.
+
+    This replaces lexical gating. Token overlap fails in both directions here: it accepted
+    "Điều phối sản phẩm" -> "AI Product Trending" (0.5, different work, wrote 100% to the wrong
+    row) and rejected "Tính toán đặt hàng lại theo kích cỡ" -> "AI Size Reorder Calculator" (0.0,
+    the same task named in another language). Only something that reads the session can tell
+    those apart, which is why the agent decides and the code only enforces uniqueness."""
+    if not cands or not sheet_tasks:
+        return {}
+    avail = [{"sidx": i, "name": t["name"], "pct": t.get("pct")}
+             for i, t in enumerate(sheet_tasks) if _norm(t["name"]) not in used]
+    if not avail:
+        return {}
+    feed = [{"idx": i, "title": c["title"], "evidence": c.get("evidence", ""),
+             "proposed_sidx": c.get("_proposed")} for i, c in enumerate(cands)]
+    prompt = (VERIFY_PROMPT + "SHEET_TASKS:\n" + json.dumps(avail, ensure_ascii=False)
+              + "\n\nCANDIDATES:\n" + json.dumps(feed, ensure_ascii=False))
+    try:
+        content = llm_chat([{"role": "user", "content": prompt}])
+    except Exception as exc:  # noqa: BLE001
+        log("verify bindings failed:", exc)
+        return None
+    m = re.search(r"\[.*\]", content, re.S)
+    if not m:
+        log("verify bindings: no JSON array in response")
+        return None
+    try:
+        arr = json.loads(m.group(0))
+    except Exception as exc:  # noqa: BLE001
+        log("verify bindings: JSON parse failed:", exc)
+        return None
+    out: dict = {}
+    taken: set = set()
+    for r in arr:
+        if not isinstance(r, dict):
+            continue
+        i, s = r.get("idx"), r.get("sheet_idx")
+        if not isinstance(i, int) or not (0 <= i < len(cands)):
+            continue
+        if not isinstance(s, int) or not (0 <= s < len(sheet_tasks)):
+            out[i] = None
+            continue
+        name = _norm(sheet_tasks[s]["name"])
+        if name in used or name in taken:   # code enforces one row per item
+            log(f"verify: sidx {s} already taken — '{cands[i]['title']}' -> new")
+            out[i] = None
+            continue
+        taken.add(name)
+        out[i] = s
+        log(f"verify BIND '{cands[i]['title']}' -> '{sheet_tasks[s]['name']}' "
+            f"({str(r.get('reason', ''))[:60]})")
+    for i, c in enumerate(cands):
+        if i not in out:
+            out[i] = None
+    return out
+
+
+LEARNED_PATH = f"{WORK}/learned_bindings.json"
+
+
+def load_learned() -> dict:
+    """{normalized group_key -> sheet row name} confirmed by a previous DUYỆT.
+
+    The agent decides binding from session evidence, but that decision is not stable run to run:
+    on back-to-back dry-runs it bound the Lazada scanner task correctly once and missed it the
+    next. Memoising what the user approved turns a recurring task into a deterministic match and
+    shrinks the candidate list the agent has to adjudicate.
+
+    Keyed on group_key (session/alias name), NOT the report title: the LLM rewords the title every
+    run ("Kiểm tra lỗi token Lazada…" / "Kiểm tra lỗi mã xác thực Lazada" / "Sửa lỗi token…"), so a
+    title-keyed memo almost never hits."""
+    try:
+        with open(LEARNED_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_learned(pairs: dict) -> None:
+    """Called at publish time (post-DUYỆT) — consent is what makes a binding trustworthy."""
+    cur = load_learned()
+    cur.update(pairs)
+    _write_json_atomic(LEARNED_PATH, cur)
 
 
 def match_sheet(items: list, sheet_tasks: list) -> None:
     """Gắn sheet_match (TÊN task sheet khớp) + is_new cho mỗi item.
-    Priority: (1) LLM sheet_idx, (2) alias sheet_name exact, (3) fuzzy token overlap."""
+
+    (1) exact name (alias `sheet` field or an identical title) -> bind, no LLM needed.
+    (2) everything else -> the AGENT adjudicates from session evidence (verify_bindings).
+    (3) LLM unreachable -> conservative lexical fallback (Dice >= FUZZY_BLIND_THRESHOLD), flagged
+        uncertain so ⚠️ shows in the review text.
+
+    Blind token overlap is no longer a primary tier: it is wrong in both directions on this data
+    (binds different projects that share generic Vietnamese words, misses the same task named in
+    another language)."""
     by_name = {_norm(t["name"]): t for t in sheet_tasks}
+    learned = load_learned()
     used_sheet_names: set = set()
+    pending: list = []
+
     for it in items:
         sname = it.pop("sheet_name", None)
         sidx = it.pop("sheet_idx", None)
-        matched = None
+        # tier 0: a binding the user already approved for this session/alias group
+        target = learned.get(_norm(it.get("group_key"))) or (sname if sname else it["title"])
+        matched = by_name.get(_norm(target))
+        if matched is not None and _norm(matched["name"]) not in used_sheet_names:
+            it["sheet_match"] = matched["name"]
+            it["is_new"] = False
+            used_sheet_names.add(_norm(matched["name"]))
+            log(f"match tier=exact '{it['title']}' -> '{matched['name']}'")
+            continue
+        it["_proposed"] = sidx if isinstance(sidx, int) else None
+        pending.append(it)
 
-        # (1) LLM sheet_idx — direct mapping from LLM, validated by fuzzy sanity check
-        if sidx is not None and isinstance(sidx, int) and 0 <= sidx < len(sheet_tasks):
-            candidate = sheet_tasks[sidx]
-            if _norm(candidate["name"]) not in used_sheet_names:
-                score = _fuzzy_score(it["title"], candidate["name"])
-                if score >= 0.3:
-                    matched = candidate
+    decided = verify_bindings(pending, sheet_tasks, used_sheet_names) if pending else {}
 
-        # (2) alias-based exact match
-        if matched is None:
-            target = sname if sname else it["title"]
-            matched = by_name.get(_norm(target))
-
-        # (3) fuzzy token-overlap fallback
-        if matched is None:
-            title = it["title"]
+    for i, it in enumerate(pending):
+        s = decided.get(i) if decided is not None else None
+        if decided is None:
+            # LLM down: lexical last resort so a day without the agent still writes back some %
             best_score, best_task = 0.0, None
             for t in sheet_tasks:
                 if _norm(t["name"]) in used_sheet_names:
                     continue
-                score = _fuzzy_score(title, t["name"])
+                score = _dice_score(it["title"], t["name"])
                 if score > best_score:
                     best_score, best_task = score, t
-            if best_score >= FUZZY_THRESHOLD and best_task is not None:
-                matched = best_task
-
-        if matched is not None:
-            it["sheet_match"] = matched["name"]
-            used_sheet_names.add(_norm(matched["name"]))
+            if best_score >= FUZZY_BLIND_THRESHOLD and best_task is not None:
+                it["sheet_match"] = best_task["name"]
+                it["uncertain"] = True
+                used_sheet_names.add(_norm(best_task["name"]))
+                log(f"match tier=fallback-fuzzy score={best_score:.2f} "
+                    f"'{it['title']}' -> '{best_task['name']}'")
+            else:
+                it["sheet_match"] = None
+                log(f"match NONE '{it['title']}' (LLM down, không đủ căn cứ)")
+        elif s is not None:
+            it["sheet_match"] = sheet_tasks[s]["name"]
+            used_sheet_names.add(_norm(sheet_tasks[s]["name"]))
+            # a FRESH agent binding gets ⚠️ so you can veto it during review; once approved it
+            # becomes a learned tier-0 match and stops being flagged
+            it["uncertain"] = True
         else:
             it["sheet_match"] = None
-        it["is_new"] = matched is None
+            log(f"match NONE '{it['title']}' (task mới — chờ duyệt trước khi ghi sheet)")
+        it["is_new"] = it["sheet_match"] is None
+
+    for it in items:
+        it.pop("_proposed", None)
+        it.pop("evidence", None)
 
 
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
@@ -504,7 +778,7 @@ def build_review_text(report: dict) -> str:
             lines.append("⚠️ % chưa refresh (LLM lỗi) — số liệu lấy theo sheet hiện có.")
         secs = report.get("sections", {})
         for key, label in (("done", "✅ Hoàn thành"), ("doing", "🔨 Đang làm"),
-                           ("blocked", "⛔ Blocked"), ("carry", "📌 Tồn đọng chuyển tuần sau")):
+                           ("blocked", "⛔ Blocked"), ("nopct", "❔ Chưa có %")):
             rows = secs.get(key, [])
             if not rows:
                 continue
@@ -514,6 +788,14 @@ def build_review_text(report: dict) -> str:
                 pct_s = f" — {pct}%" if pct is not None else ""
                 note = f" · {r['note']}" if r.get("note") else ""
                 lines.append(f"• {r.get('title', '')}{pct_s}{note}")
+        idle = int(secs.get("idle_count") or 0)
+        if idle:
+            lines.append(f"\n📌 **Tồn đọng**: {idle} task chưa động tới tuần này (xem sheet).")
+        prop = secs.get("proposed_new") or []
+        if prop:
+            lines.append(f"\n🆕 **Task mới phát hiện, CHƯA ghi sheet** ({len(prop)}): "
+                         + "; ".join(str(x) for x in prop[:10])
+                         + ("…" if len(prop) > 10 else ""))
     else:
         date_s = report.get("report_date", "")
         src = report.get("source", "")
@@ -525,10 +807,23 @@ def build_review_text(report: dict) -> str:
                 pct = DEFAULT_PCT.get(it.get("progress", "doing"), 50)
             label = PROGRESS_LABEL.get(it.get("progress", "doing"), "Đang làm")
             flag = " ⚠️" if it.get("uncertain") else ""
-            new = " (mới)" if it.get("is_new") else ""
+            if it.get("skip_sheet"):
+                new = " (mới — ĐÃ BỎ, không ghi sheet)"
+            elif it.get("is_new"):
+                new = " (mới)"
+            else:
+                new = ""
             lines.append(f"{i}. **{it.get('title', '')}** — {pct}% {label}{new}{flag}")
             if it.get("note"):
                 lines.append(f"   ↳ {it['note']}")
+        # New tasks are the ONLY items that add rows to the weekly sheet. Surfacing them as an
+        # explicit list turns DUYỆT into informed consent — they used to be appended silently,
+        # which is how the tab grew 23 -> 31 rows in three days.
+        proposed = [str(i) for i, it in enumerate(report.get("items", []), 1)
+                    if it.get("is_new") and not it.get("skip_sheet")]
+        if proposed:
+            lines.append(f"\n🆕 **Task MỚI sẽ được thêm vào sheet** (mục {', '.join(proposed)}). "
+                         f"Không muốn thêm mục nào → reply **'bỏ mới: <số>, <số>'**.")
     lines.append("\n➡️ Reply **DUYỆT** để render ảnh + đăng nhóm TEAM AI, hoặc **'sửa: <yêu cầu>'** "
                  "(daily) / **'sửa tuần: <yêu cầu>'** (weekly).")
     return "\n".join(lines)
@@ -635,8 +930,11 @@ def main():
     sessions, _order = flatten_sessions(digest["projects"])
 
     # Host digest (git + antigravity) — freshness/schema gated; absent -> sessions-only.
+    # `since` re-slices to the daily window: on Friday latest.json holds the WHOLE WEEK
+    # (run_daily_report.ps1 copies week.json over it), which used to leak into "today's work".
     host = load_host_digest()
-    host_sessions = synth_host_sessions(host, len(sessions))
+    host_sessions = synth_host_sessions(host, len(sessions),
+                                        since=datetime.now(TZ) - timedelta(hours=hours))
     if host_sessions:
         log(f"host digest: +{len(host_sessions)} pseudo-sessions "
             f"(git+antigravity, agdb={((host or {}).get('health') or {}).get('agdb_status')})")
@@ -676,6 +974,7 @@ def main():
         items = fallback_describe(groups)
         source = "fallback"
     match_sheet(items, sheet_tasks)
+    items = merge_duplicate_items(items)   # after match_sheet: bindings decide what may merge
     enforce_monotonic(items, sheet_tasks)
     log(f"analysis source: {source} | items: {len(items)}")
 

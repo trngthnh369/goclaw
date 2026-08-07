@@ -49,6 +49,14 @@ exec: python3 /app/workspace/_daily-report/daily_report_publish.py
 - `NO_ACTIVE` / `ALREADY_PUBLISHED` → trả lời "Không có báo cáo đang chờ duyệt."
 - `PARTIAL ...` → 1 trong 2 báo cáo lỗi (script đã báo chi tiết lên Discord); nói user reply DUYỆT lần nữa để thử lại phần lỗi.
 
+## TRIGGER B2 — BỎ TASK MỚI (Discord reply "bỏ mới: 2,3" từ OWNER)
+Bản review liệt kê các mục `(mới)` sẽ được THÊM DÒNG vào sheet tuần. User muốn bỏ mục nào:
+1. `exec: cat /app/workspace/_daily-report/report.json`
+2. Đặt `"skip_sheet": true` cho đúng các item theo SỐ THỨ TỰ trong bản review (1-based), giữ nguyên
+   mọi field khác, rồi `edit_repost.py --kind daily` như TRIGGER B.
+3. KHÔNG publish. Bản review đăng lại sẽ ghi "(mới — ĐÃ BỎ, không ghi sheet)". Chờ DUYỆT.
+Item có `skip_sheet` vẫn nằm trong báo cáo/ảnh, chỉ không tạo dòng mới trong sheet.
+
 ## TRIGGER B — EDIT (Discord reply "sửa: ..." → daily; "sửa tuần: ..." → weekly)
 1. Đọc JSON hiện tại:
    ```

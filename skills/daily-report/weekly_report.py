@@ -103,7 +103,8 @@ def build_items(sheet_tasks: list | None = None) -> list:
     sessions, _ = dr.flatten_sessions(list(merged.values()))
     # host collector week window (git + antigravity) — freshness-gated shared loader
     host = dr.load_host_digest(HOST_WEEK, max_age_h=3.0)
-    sessions += dr.synth_host_sessions(host, len(sessions))
+    sessions += dr.synth_host_sessions(
+        host, len(sessions), since=datetime(monday.year, monday.month, monday.day, tzinfo=TZ))
     if not sessions:
         raise SystemExit("NO_WORK_ACTIVITY this week")
 
@@ -130,6 +131,7 @@ def refresh_sheet() -> dict:
 
     items = build_items(sheet_tasks)
     dr.match_sheet(items, sheet_tasks)
+    items = dr.merge_duplicate_items(items)
     dr.enforce_monotonic(items, sheet_tasks)
 
     row_by_name = {drs._norm_name(t["name"]): t["row"] for t in sheet_tasks}
@@ -144,27 +146,64 @@ def refresh_sheet() -> dict:
         else:
             new_tasks.append({"name": it.get("title", ""), "percent": p,
                               "status": st, "note": it.get("note", "")})
-    res = drs.write_progress(tab, pct_col, updates, new_tasks)
+    # Weekly refresh UPDATES existing rows only. It used to append every unmatched item straight
+    # into the tab during generate — a second, ungated append path that ran BEFORE any DUYỆT and
+    # bypassed the review gate on the daily side. New tasks are surfaced as a proposal instead;
+    # they enter the sheet through the reviewed daily flow (skip_sheet / "bỏ mới").
+    res = drs.write_progress(tab, pct_col, updates, [])
+    if new_tasks:
+        dr.log(f"refresh: {len(new_tasks)} task mới KHÔNG ghi sheet (chờ duyệt qua báo cáo ngày): "
+               + ", ".join(t["name"] for t in new_tasks))
     dr.log(f"refresh: tab='{name}' updated={res['updated']} appended={res['appended']} items={len(items)}")
-    return {"tab": tab, "name": name, **res, "items": items}
+    return {"tab": tab, "name": name, **res, "items": items,
+            "proposed_new": [t["name"] for t in new_tasks]}
 
 
-def build_sections(tab_title: str) -> dict:
-    """Classify the tab rows (post-refresh; % = source of truth) into report sections."""
+def build_sections(tab_title: str, items: list | None = None) -> dict:
+    """Report sections = THIS WEEK'S ACTIVITY, not a dump of the tab.
+
+    The tab holds every task week_init carried forward, so classifying its rows produced a 31-line
+    report in which each unfinished task ALSO appeared under `carry` (carry ≡ doing + blocked).
+    And work that is new this week has no row yet, so reading the tab back drops it entirely —
+    measured on the live tab: 2 rows shown, 13 real tasks lost.
+
+    So sections come from `items` (merged, sheet-matched work items) and everything in the tab
+    with no activity collapses into one idle count. `items=None` (refresh failed) falls back to
+    classifying the tab, minus the duplicate carry section."""
     tasks = drs.read_tasks(tab_title)["tasks"]
-    sections: dict = {"done": [], "doing": [], "blocked": [], "carry": []}
-    for t in tasks:
-        row = {"title": t["name"], "percent": t["pct"], "note": t["note"]}
-        p = t["pct"]
-        status = (t["status"] or "").strip().lower()
-        if p is not None and p >= 100:
+    sections: dict = {"done": [], "doing": [], "blocked": [], "nopct": []}
+
+    def bucket(row: dict, pct_val: object, status: str) -> None:
+        if pct_val is None:
+            sections["nopct"].append(row)
+        elif pct_val >= 100:
             sections["done"].append(row)
         elif "block" in status:
             sections["blocked"].append(row)
         else:
             sections["doing"].append(row)
-        if p is None or p < 100:
-            sections["carry"].append({"title": t["name"], "percent": p})  # gọn — sẽ chuyển tuần sau
+
+    if items is None:
+        for t in tasks:
+            bucket({"title": t["name"], "percent": t["pct"], "note": t["note"]},
+                   t["pct"], (t["status"] or "").strip().lower())
+        sections["idle_count"] = 0
+        sections["idle_titles"] = []
+        return sections
+
+    touched: set = set()
+    for it in items:
+        # a bound item reports under its canonical sheet name so the weekly matches the plan sheet
+        title = it.get("sheet_match") or it.get("title", "")
+        touched.add(drs._norm_name(title))
+        note = ((it.get("note") or "") + (" ⚠️" if it.get("uncertain") else "")).strip()
+        bucket({"title": title, "percent": it.get("percent"), "note": note},
+               it.get("percent"), str(it.get("progress", "doing")))
+
+    idle = [t for t in tasks
+            if drs._norm_name(t["name"]) not in touched and (t["pct"] is None or t["pct"] < 100)]
+    sections["idle_count"] = len(idle)
+    sections["idle_titles"] = [t["name"] for t in idle]
     return sections
 
 
@@ -173,8 +212,14 @@ def report_mode() -> None:
     today = datetime.now(TZ).date()
     name = drs.tab_name(*drs.week_bounds(today))
     refreshed = True
+    week_items: list | None = None
+    proposed_new: list = []
     try:
-        refresh_sheet()
+        res = refresh_sheet()
+        proposed_new = res.get("proposed_new", [])
+        # the week's real activity -> the report's main content; everything else in the tab is
+        # week_init carry-over (backlog), collapsed into one line.
+        week_items = res.get("items", [])
     except SystemExit as exc:
         refreshed = False
         dr.log(f"refresh SKIPPED ({exc}) — render từ % sheet hiện có")
@@ -184,7 +229,8 @@ def report_mode() -> None:
 
     # sheet unreadable = hard abort (không có gì để báo cáo)
     tab, _created = ensure_week_tab(name)
-    sections = build_sections(tab["title"])
+    sections = build_sections(tab["title"], week_items)
+    sections["proposed_new"] = proposed_new
 
     now = datetime.now(TZ)
     report = {
@@ -205,7 +251,7 @@ def report_mode() -> None:
         "created_at": now.isoformat(),
         "published_at": "",
     })
-    n = {k: len(v) for k, v in sections.items()}
+    n = {k: (len(v) if isinstance(v, list) else v) for k, v in sections.items() if k != "idle_titles"}
     print(f"OK weekly tab='{name}' refreshed={refreshed} sections={json.dumps(n)}")
 
 
