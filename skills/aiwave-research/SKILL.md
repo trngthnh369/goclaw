@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.1.0"
-  bundle_revision: "2026-08-07-003"
+  bundle_revision: "2026-08-07-005"
   runtime: python3
   forked_from: fintech-research
 ---
@@ -121,11 +121,13 @@ never fires — a cron retry would double-run the collector.
 
 Exit contract:
 - `{"status":"committed", ...}` — success.
-- `{"status":"skipped","reason":"occurrence already claimed"}` — **also success**; the slot is already
-  collected and the data is ready. Never re-run.
+- `{"status":"skipped","artifacts_ready":true,"retry":false,...}` — **also success**; the slot is already
+  collected. The payload carries `run_path` so the caller can go straight to the artifacts. Never re-run:
+  agents read a bare "skipped" as failure and retry until the loop detector kills the run, which is why
+  the payload states `retry:false` and names the next step outright.
 - exit **1** with a stderr JSON — `manifest_status` is `failed` or zero items. Treat as an abort signal.
 
-Tests (59 cases): `python3 -m unittest discover -s <skill dir>/tests`.
+Tests (62 cases): `python3 -m unittest discover -s <skill dir>/tests`.
 
 ## Artifacts
 
@@ -138,16 +140,24 @@ shortlist — the agent-facing input), `clusters.json`, `source-health.json`, `n
 Beat tags live in each cluster's `reasons[]`, which **also** carries dedup reasons such as
 `canonical_url` — consumers must filter by the `beat:` prefix.
 
-## Sources (17 enabled)
+## Sources (24 enabled)
 
-Framing: `thecomingwave-youtube` (channel_id `UCCoUJTzD-gV_otqzFU85-MQ`).
+Framing: `thecomingwave-youtube` (channel_id `UCCoUJTzD-gV_otqzFU85-MQ`), `stratechery`.
 Compute/supply chain: `semianalysis`, `trendforce`, `datacenterdynamics`, `ieee-semiconductors`,
-`tomshardware`, `theregister`, `nikkei-asia`. Energy: `utilitydive`. Labs: `openai-news`,
-`deepmind-blog`, `nvidia-blog`. Capital/tech business: `cnbc-tech`, `techcrunch`, `theverge`,
-`arstechnica`. Vietnam: `cafef-kinh-te-so`, `vnexpress-so-hoa`.
+`tomshardware`, `theregister`, `nikkei-asia`, `semiwiki`, `digitimes`.
+Energy: `utilitydive`, `latitudemedia`, `powermag`. Labs: `openai-news`, `deepmind-blog`,
+`nvidia-blog`. Capital/tech business: `cnbc-tech`, `techcrunch`, `theverge`, `arstechnica`.
+Vietnam: `cafef-kinh-te-so`, `vnexpress-so-hoa`, `vietnamnet-cntt`.
 
-Disabled with verified reasons: `reuters-tech` (401 paywall), `anthropic-news` (404),
-`vneconomy-cong-nghe` (200 but zero entries), `x-twitter`/`reddit` (credentials).
+Every source carries a `note` or a `disabled_reason` recording what a live probe actually returned,
+so nobody re-tests a dead URL. Disabled: `reuters-tech` (401 paywall), `anthropic-news` (404 on both
+`/news/rss.xml` and `/rss.xml` — no public feed), `vneconomy-cong-nghe` (200, zero entries — replaced
+by `vietnamnet-cntt`), `datacenterfrontier` (403, blocks the collector UA), `heatmap` (404),
+`rtoinsider` (malformed XML, and there is no HTML adapter), `x-twitter`/`reddit` (credentials).
+
+Two feeds parse fine but are deliberately **off**: `canarymedia` and `eetimes`. Both are healthy, and
+both would spend a fetch on items that `has_ai_anchor()` sends to `beat:offbeat` (consumer clean-energy
+news; vendor product announcements). A working feed is not automatically a useful one.
 
 ## Two upstream defects fixed here (both silent)
 

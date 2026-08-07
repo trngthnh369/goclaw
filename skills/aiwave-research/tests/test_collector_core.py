@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(ROOT))
 
+import collector
 from research_core.adapters.base import CollectedItem, SourceHealth
 from research_core.db import CollectorStore
 from research_core.dedup import build_clusters
@@ -135,3 +136,26 @@ class CollectorCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkipPayloadTests(unittest.TestCase):
+    """A claimed occurrence is success; the payload must not read as failure."""
+
+    def test_latest_pointer_returns_run_path_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "latest.json").write_text(
+                json.dumps({"run_id": "r1", "run_path": "/runs/r1", "config_hash": "x"}),
+                encoding="utf-8",
+            )
+            self.assertEqual(collector.latest_pointer(ws), {"run_id": "r1", "run_path": "/runs/r1"})
+
+    def test_latest_pointer_is_silent_when_the_pointer_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(collector.latest_pointer(Path(tmp)), {})
+
+    def test_latest_pointer_is_silent_on_corrupt_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "latest.json").write_text("{not json", encoding="utf-8")
+            self.assertEqual(collector.latest_pointer(ws), {})

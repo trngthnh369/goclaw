@@ -38,7 +38,10 @@ class BriefLimits:
 
     max_items: int = 3
     max_item_bytes: int = 320
-    max_angle_bytes: int = 560
+    # The angle is the part that is actually this beat's product, and it is
+    # never dropped — so it gets the slack left by three max-size items rather
+    # than a tight cap that clipped it mid-sentence while the budget went unused.
+    max_angle_bytes: int = 760
     budget_bytes: int = DEFAULT_BUDGET_BYTES
 
 
