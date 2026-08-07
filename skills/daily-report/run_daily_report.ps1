@@ -1,4 +1,17 @@
-# run_daily_report.ps1 — daily report GENERATE wrapper (Windows Task Scheduler, 17:10 Mon-Fri).
+# run_daily_report.ps1 — daily report host-side job (Windows Task Scheduler, Mon-Fri).
+#
+# MODES
+#   -CollectOnly  (current production mode, task GoClaw-DailyReport-Gen at 17:00)
+#       Ensure Docker is up -> run the HOST collector -> sync scripts into the container. The
+#       GENERATE step is then triggered by the GoClaw cron `daily-report` (agent zip-crazy) at
+#       17:10, so the report is produced in exactly one place.
+#       This half cannot move into GoClaw: the collector reads D:\Projects\work git repos and the
+#       Antigravity SQLite DB, and neither is mounted into the container (verified).
+#   -IfMissing    (task GoClaw-DailyReport-Safety at 17:25) Safety net: generate ONLY if the cron
+#       produced nothing for today. Moving GENERATE into GoClaw made the report depend on the
+#       gateway being alive at 17:10 with a working agent turn; this restores a fallback without
+#       reintroducing the duplicate run (it exits as soon as it sees today's posted draft).
+#   (no flag)     Full pipeline (collector + generate + Friday weekly), for manual runs.
 #
 # Replaces the dead GoClaw cron. Self-heals the common failure mode:
 #   - Docker engine down at fire time (the docker-desktop WSL distro can stop) -> start Docker
@@ -16,6 +29,8 @@
 # Robustness: native commands (docker/bash) returning non-zero must NOT abort the script silently
 # (the old `$ErrorActionPreference=Stop` + PS7 native-error behavior killed it right after the
 # "start" log line, producing empty failures). We log every outcome instead.
+param([switch]$CollectOnly, [switch]$IfMissing)
+
 $ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false  # non-zero exit codes don't throw; we check $LASTEXITCODE
 $PYTHON  = "C:\Program Files\Python313\python.exe"
@@ -93,10 +108,10 @@ function Invoke-Generate([bool]$RequireLlm, [bool]$NoPost = $false) {
   return $code
 }
 
-Log "=== daily-report generate start ==="
+Log ("=== daily-report {0} start ===" -f $(if ($CollectOnly) { "collect" } else { "generate" }))
 $rc = 1
 try {
-  if (-not (Ensure-Docker)) { Log "=== generate ABORTED: docker unavailable ==="; exit 1 }
+  if (-not (Ensure-Docker)) { Log "=== ABORTED: docker unavailable ==="; exit 1 }
   if (-not (Wait-Healthy))  { Log "WARN: goclaw container not healthy yet, trying anyway" }
 
   $isFriday   = ((Get-Date).DayOfWeek -eq 'Friday')
@@ -114,6 +129,22 @@ try {
   }
 
   Sync-Scripts
+
+  if ($CollectOnly) {
+    # Fresh digest + scripts are in place; the GoClaw cron runs the generate at 17:10.
+    Log "=== collect OK (generate se do cron GoClaw chay) ==="
+    exit 0
+  }
+
+  if ($IfMissing) {
+    $today = (Get-Date -Format "yyyy-MM-dd")
+    $state = & $DOCKER exec -u goclaw $GOCLAW sh -c "cat /app/workspace/_daily-report/active.json 2>/dev/null" 2>$null
+    if ($state -match '"report_date":\s*"' + $today + '"' -and $state -match '"posted":\s*true') {
+      Log "=== skip: cron GoClaw da tao bao cao hom nay ==="
+      exit 0
+    }
+    Log "WARN: chua co bao cao cho $today (cron GoClaw khong chay?) -> tu generate"
+  }
 
   # --- daily generate ---
   # LLM down (exit 3): retry once (Gemini via gateway — transient), then post the deterministic

@@ -32,11 +32,13 @@ Toàn bộ pipeline đóng gói trong **script deterministic**. Việc của b�
 
 ---
 
-## TRIGGER A — GENERATE (cron "daily-report" hoặc user "báo cáo ngay")
+## TRIGGER A — GENERATE (cron "daily-report" 17:10 T2-T6, hoặc user "báo cáo ngay")
 Chạy đúng 1 lệnh:
 ```
-exec: python3 /app/workspace/_daily-report/daily_report_run.py --hours 24
+exec: python3 /app/workspace/_daily-report/daily_report_run.py --hours 24 --auto-weekly
 ```
+`--auto-weekly`: thứ Sáu script tự làm thêm báo cáo TUẦN và đăng cả 2 bản trong 1 batch (1 DUYỆT
+đăng cả hai). Ngày thường cờ này không có tác dụng.
 - In `OK source=... posted=true` → đã đăng TEXT review vào Discord. Báo user 1 dòng: "Đã đăng bản nháp text lên Discord, chờ bạn DUYỆT."
 - In lỗi (`mount_status=...` / `no work activity` / `DISCORD_POST_FAIL`) → script đã tự báo Discord; chỉ báo lại lỗi ngắn gọn. KHÔNG tự sửa.
 
@@ -77,7 +79,16 @@ Item có `skip_sheet` vẫn nằm trong báo cáo/ảnh, chỉ không tạo dòn
 "báo cáo ngay" / "daily report now" → TRIGGER A. "báo cáo tuần ngay" → `exec: python3 /app/workspace/_daily-report/weekly_report.py --report` rồi `exec: python3 /app/workspace/_daily-report/daily_report_run.py --post-pending`.
 
 ## Ghi chú vận hành
-- Thứ Sáu: wrapper tự generate daily + weekly rồi post CẢ 2 bản text trong 1 batch — 1 DUYỆT đăng cả hai.
+- **Ai chạy cái gì** (chốt 2026-08-07): Windows Task `GoClaw-DailyReport-Gen` 17:00 chạy
+  `run_daily_report.ps1 -CollectOnly` — bật Docker nếu tắt, thu thập git + Antigravity từ máy host
+  (container KHÔNG mount `D:\Projects\work` nên phần này bắt buộc ở host), sync script vào
+  container. Cron GoClaw `daily-report` 17:10 mới GENERATE. Trước đó cả hai cùng generate → mỗi
+  ngày 2 bản nháp + 2 tiến trình cùng ghi `report.json`.
+- Timeout exec của agent đã nâng 60s → 600s (`builtin_tools.settings.timeout_seconds`); script chạy
+  ~90-150s, ngày thứ Sáu lâu hơn. Ở 60s Zip luôn bị cắt giữa chừng.
+- Thứ Sáu: script tự generate daily + weekly rồi post CẢ 2 bản text trong 1 batch — 1 DUYỆT đăng cả hai.
+- `learned_bindings.json` (trong workspace container, KHÔNG nằm trong repo): bind task ↔ dòng sheet
+  mà user đã DUYỆT, khoá theo tên nhóm phiên. Lần sau khớp tất định, không hỏi lại agent.
 - PNG render ở `/app/workspace/_daily-report/render/` (chỉ tồn tại SAU DUYỆT). KHÔNG dùng `/tmp`.
 - LLM = Gemini ag-pro qua gateway (`agent:zip-crazy`); fail → daily fallback deterministic (luôn ra báo cáo), weekly render từ % sheet + cảnh báo.
 - Script tự log STDERR `[daily_report_run]` / `[publish]` / `[week_init]` để debug.

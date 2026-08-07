@@ -900,6 +900,14 @@ def main():
     require_llm = "--require-llm" in sys.argv
     dry_run = "--dry-run" in sys.argv
     no_post = "--no-post" in sys.argv
+    # --auto-weekly: on Friday also produce the weekly report and post both drafts as one batch.
+    # The PowerShell wrapper used to orchestrate this; the GoClaw cron drives the run now and the
+    # agent is only allowed ONE exec, so the sequencing has to live in the script.
+    auto_weekly = ("--auto-weekly" in sys.argv
+                   and datetime.now(TZ).weekday() == 4
+                   and os.environ.get("GOCLAW_WEEKLY", "") != "off")
+    if auto_weekly:
+        no_post = True   # hold the daily draft; both are posted together at the end
     if not TOKEN and not dry_run:
         raise SystemExit("FATAL: GOCLAW_GATEWAY_TOKEN not set")
     if "--post-pending" in sys.argv:
@@ -993,7 +1001,20 @@ def main():
 
     write_review_state(report)
     if no_post:
-        print(f"OK source={source} kind=daily posted=false (state written; batch post later)")
+        if not auto_weekly:
+            print(f"OK source={source} kind=daily posted=false (state written; batch post later)")
+            return
+        # Friday: build the weekly draft too, then post both. A weekly failure must never swallow
+        # the daily draft, so it is best-effort and post_pending() runs either way.
+        try:
+            import weekly_report as wr  # lazy: weekly_report imports this module
+            wr.report_mode()
+        except SystemExit as exc:
+            log(f"weekly SKIPPED ({exc}) — vẫn đăng daily")
+        except Exception as exc:  # noqa: BLE001
+            log(f"weekly FAILED ({exc}) — vẫn đăng daily")
+        posted = post_pending()
+        print(f"OK source={source} kind=daily+weekly posted={posted} items={len(items)}")
         return
     post_text_chunked(build_review_text(report), "daily-report review text")
     with open(ACTIVE, encoding="utf-8") as fh:
