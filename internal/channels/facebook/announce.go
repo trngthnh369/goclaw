@@ -20,7 +20,22 @@ import (
 //
 // Best-effort by design: a publish that succeeded must never be reported as
 // failed because the notice could not be delivered.
-func (ch *Channel) announcePublished(ctx context.Context, msg bus.OutboundMessage, postID string) {
+// afterPublish runs the two things that must happen once a feed post lands:
+// record it so its performance can be read later, and tell the approver.
+//
+// The permalink is fetched once here and shared. It must be fetched, never
+// assembled: Graph addresses page posts under the page's own numeric id, which
+// differs from the page_id used to publish, so a hand-built URL 404s.
+func (ch *Channel) afterPublish(ctx context.Context, msg bus.OutboundMessage, postID string) {
+	link, err := ch.graphClient.GetPostPermalink(ctx, postID)
+	if err != nil {
+		slog.Warn("facebook: permalink lookup failed", "post_id", postID, "error", err)
+	}
+	ch.recordPublication(msg, postID, link)
+	ch.announcePublished(msg, postID, link)
+}
+
+func (ch *Channel) announcePublished(msg bus.OutboundMessage, postID, link string) {
 	notifyCh := strings.TrimSpace(msg.Metadata["notify_channel"])
 	notifyChat := strings.TrimSpace(msg.Metadata["notify_chat"])
 	if notifyCh == "" || notifyChat == "" {
@@ -30,15 +45,6 @@ func (ch *Channel) announcePublished(ctx context.Context, msg bus.OutboundMessag
 	if msgBus == nil {
 		slog.Warn("facebook: cannot announce publish, no message bus", "post_id", postID)
 		return
-	}
-
-	// Ask Graph for the permalink instead of building one. Page posts are
-	// addressed by the page's own numeric id, which differs from the page_id
-	// used to publish, so an assembled URL points at nothing.
-	link, err := ch.graphClient.GetPostPermalink(ctx, postID)
-	if err != nil {
-		slog.Warn("facebook: permalink lookup failed, announcing without link",
-			"post_id", postID, "error", err)
 	}
 
 	text := fmt.Sprintf("✅ Đã đăng lên fanpage.\npost_id: %s", postID)

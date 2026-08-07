@@ -44,7 +44,7 @@ func TestAnnouncePublished_SilentWithoutNotifyTarget(t *testing.T) {
 		t.Error("Graph must not be called when there is nowhere to announce to")
 	})
 
-	ch.announcePublished(context.Background(), feedMsg(nil), "1_2")
+	ch.announcePublished(feedMsg(nil), "1_2", "")
 
 	if msg, ok := nextOutbound(t, b); ok {
 		t.Fatalf("published %+v, want nothing", msg)
@@ -58,7 +58,7 @@ func TestAnnouncePublished_IncludesPostIDAndPermalink(t *testing.T) {
 	})
 	meta := map[string]string{"notify_channel": "cf-discord", "notify_chat": "1530127001602625677"}
 
-	ch.announcePublished(context.Background(), feedMsg(meta), "1193343723865442_122104618611290721")
+	ch.announcePublished(feedMsg(meta), "1193343723865442_122104618611290721", "https://www.facebook.com/999/posts/123")
 
 	m, ok := nextOutbound(t, b)
 	if !ok {
@@ -92,7 +92,7 @@ func TestAnnouncePublished_StillAnnouncesWhenPermalinkFails(t *testing.T) {
 	})
 	meta := map[string]string{"notify_channel": "cf-discord", "notify_chat": "chat-1"}
 
-	ch.announcePublished(context.Background(), feedMsg(meta), "1_2")
+	ch.announcePublished(feedMsg(meta), "1_2", "")
 
 	m, ok := nextOutbound(t, b)
 	if !ok {
