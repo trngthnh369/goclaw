@@ -500,6 +500,10 @@ func runGateway() {
 	channelMgr := channels.NewManager(msgBus)
 	deps.channelMgr = channelMgr
 
+	// Webhooks mount here, not in wireHTTPHandlersOnServer: POST /v1/webhooks/message
+	// is gated on deps.channelMgr, which does not exist until the line above.
+	deps.wireWebhookHandlers()
+
 	// Wire channel member resolver into permission grant paths (WS + HTTP) so
 	// file_writer grants coming from the Web UI auto-enrich their metadata.
 	cfgPermsMethods.SetMemberResolver(channelMgr)
