@@ -245,3 +245,7 @@ skills/tech-ai-research/runs/
 .goclaw-rollback
 .goclaw-new
 .goclaw-old
+
+# Python bytecode inside bundled skills
+skills/**/__pycache__/
+skills/**/*.pyc

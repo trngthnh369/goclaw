@@ -15,3 +15,24 @@ RUN apk add --no-cache nodejs npm jq bash coreutils \
     && npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@^2.1.91 \
     && rm -rf /tmp/npm-cache /root/.cache /var/cache/apk/* \
     && claude --version && jq --version && bash --version | head -1
+
+# Add the fintech-research skill to the bundled dir.
+#
+# Scoped to this one slug on purpose: copying the whole skills/ tree fails because the base
+# image holds paths the repo now differs on (e.g. bundled-skills/docx/scripts/office is a
+# directory in the image, a file in the repo), and overwriting every baked skill is a far
+# wider change than this feature needs.
+#
+# The seeder reads ONLY the bundled dir (internal/skills/seeder.go: os.ReadDir(s.bundledDir))
+# and copies each slug into /app/data/skills-store/<slug>/<version>/. The `./skills` bind
+# mount at /app/data/skills does NOT feed it, and the exec tool denies /app/data except for
+# the skills-store/ and tenants/ exemptions (cmd/gateway_setup.go), so an agent can only run
+# a skill script from skills-store. A skill added to the repo is therefore invisible to
+# agents until it lands in the bundled dir.
+#
+# The base image bakes skills at ITS build time (Dockerfile:121), and a from-source rebuild
+# crashes Docker Desktop at buildkit layer export on this host — see the note in
+# docker-compose.claude-cli.local.yml. Re-copying here keeps the thin image the single
+# deployable artifact without touching the base.
+COPY --chown=goclaw:goclaw skills/fintech-research/ /app/bundled-skills/fintech-research/
+COPY --chown=goclaw:goclaw skills/aiwave-research/ /app/bundled-skills/aiwave-research/

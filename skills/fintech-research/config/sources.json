@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "vneconomy-taichinh",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://vneconomy.vn/tai-chinh.rss",
+      "authority": 0.85,
+      "limit": 30,
+      "topics": ["policy", "vietnam"]
+    },
+    {
+      "id": "cafef-tai-chinh-ngan-hang",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://cafef.vn/tai-chinh-ngan-hang.rss",
+      "authority": 0.8,
+      "limit": 30,
+      "topics": ["policy", "company", "vietnam"]
+    },
+    {
+      "id": "vnexpress-kinh-doanh",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://vnexpress.net/rss/kinh-doanh.rss",
+      "authority": 0.75,
+      "limit": 30,
+      "topics": ["vietnam"]
+    },
+    {
+      "id": "bis-cbspeeches",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.bis.org/doclist/cbspeeches.rss",
+      "authority": 0.95,
+      "limit": 20,
+      "topics": ["policy", "global"]
+    },
+    {
+      "id": "ecb-press",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.ecb.europa.eu/rss/press.html",
+      "authority": 0.9,
+      "limit": 20,
+      "topics": ["policy", "global"]
+    },
+    {
+      "id": "finextra-headlines",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.finextra.com/rss/headlines.aspx",
+      "authority": 0.75,
+      "limit": 30,
+      "topics": ["company", "global"]
+    },
+    {
+      "id": "fintechnews-sg",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://fintechnews.sg/feed/",
+      "authority": 0.7,
+      "limit": 20,
+      "topics": ["company", "asean"]
+    },
+    {
+      "id": "pymnts",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.pymnts.com/feed/",
+      "authority": 0.7,
+      "limit": 20,
+      "topics": ["company", "payments", "global"]
+    },
+    {
+      "id": "e27",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://e27.co/feed/",
+      "authority": 0.65,
+      "limit": 20,
+      "disabled_reason": "verified 2026-08-06: HTTP 403 to the collector (curl with the same UA succeeds, so the block is on TLS/header fingerprint, not the agent string). Company/funding beat is covered by fintechnews-sg + pymnts + finextra.",
+      "topics": ["company", "funding", "asean"]
+    },
+
+    {
+      "id": "sbv-portal",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.sbv.gov.vn/webcenter/portal/vi/menu/rm/apph/tbnh",
+      "authority": 1.0,
+      "disabled_reason": "verified 2026-08-06: serves HTML, no feed. Blocked by the rss.py doctype guard. SBV policy is covered indirectly via vneconomy/cafef reporting.",
+      "topics": ["policy", "vietnam"]
+    },
+    {
+      "id": "vir-banking",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://vir.com.vn/rss/banking-finance.rss",
+      "authority": 0.8,
+      "disabled_reason": "verified 2026-08-06: HTTP 404.",
+      "topics": ["policy", "vietnam"]
+    },
+    {
+      "id": "mas-newsroom",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.mas.gov.sg/news/rss",
+      "authority": 0.9,
+      "disabled_reason": "verified 2026-08-06: serves HTML, blocked by the doctype guard.",
+      "topics": ["policy", "asean"]
+    },
+    {
+      "id": "the-paypers",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://thepaypers.com/rss",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-06: serves HTML, blocked by the doctype guard.",
+      "topics": ["company", "global"]
+    },
+    {
+      "id": "fintech-futures",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.fintechfutures.com/feed/",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-06: HTTP 404 on /feed/, /feed and /rss.",
+      "topics": ["company", "global"]
+    },
+    {
+      "id": "techinasia",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.techinasia.com/feed",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-06: HTTP 403 (paywall/bot block).",
+      "topics": ["company", "asean"]
+    },
+    {
+      "id": "x-twitter",
+      "type": "x_api",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.6,
+      "topics": ["deferred"]
+    },
+    {
+      "id": "reddit",
+      "type": "reddit_oauth",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.55,
+      "topics": ["deferred"]
+    }
+  ],
+  "allowed_hosts": [
+    "vneconomy.vn",
+    "cafef.vn",
+    "vnexpress.net",
+    "www.bis.org",
+    "www.ecb.europa.eu",
+    "www.finextra.com",
+    "fintechnews.sg",
+    "www.pymnts.com",
+    "e27.co"
+  ],
+  "retention": {
+    "raw_runs_days": 14,
+    "source_health_days": 90,
+    "digests_days": 30
+  },
+  "scoring": {
+    "candidate_limit": 24
+  },
+  "scheduler": {
+    "minute": 30,
+    "hour_interval": 24,
+    "catch_up_lateness_minutes": 150
+  }
+}
