@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.1.0"
-  bundle_revision: "2026-08-07-005"
+  bundle_revision: "2026-08-11-006"
   runtime: python3
   forked_from: fintech-research
 ---
@@ -127,7 +127,7 @@ Exit contract:
   the payload states `retry:false` and names the next step outright.
 - exit **1** with a stderr JSON — `manifest_status` is `failed` or zero items. Treat as an abort signal.
 
-Tests (62 cases): `python3 -m unittest discover -s <skill dir>/tests`.
+Tests (66 cases): `python3 -m unittest discover -s <skill dir>/tests`.
 
 ## Artifacts
 

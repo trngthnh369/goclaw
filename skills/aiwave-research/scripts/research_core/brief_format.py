@@ -41,7 +41,10 @@ class BriefLimits:
     # The angle is the part that is actually this beat's product, and it is
     # never dropped — so it gets the slack left by three max-size items rather
     # than a tight cap that clipped it mid-sentence while the budget went unused.
-    max_angle_bytes: int = 760
+    # Sized above what the contract asks for (~480 chars): the ceiling is a
+    # backstop against a runaway angle, not the working target, and clipping a
+    # real angle by a dozen bytes cost a whole word for nothing.
+    max_angle_bytes: int = 900
     budget_bytes: int = DEFAULT_BUDGET_BYTES
 
 
@@ -150,12 +153,18 @@ def truncate_bytes(text: str, max_bytes: int) -> str:
     """Cut `text` to at most `max_bytes` UTF-8 bytes, never mid-character.
 
     Vietnamese is multi-byte, so slicing the encoded form directly can leave a
-    partial rune; `errors="ignore"` on decode drops that fragment.
+    partial rune; `errors="ignore"` on decode drops that fragment. The cut then
+    backs up to the last word boundary, because stopping mid-word reads like a
+    bug to anyone looking at the published brief. A cut with no space to fall
+    back to (one very long token) keeps the hard cut rather than returning
+    nothing.
     """
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    cut = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    head, sep, _ = cut.rpartition(" ")
+    return head if sep and head else cut
 
 
 def _clamp_item(item: dict[str, Any], max_item_bytes: int) -> dict[str, Any] | None:

@@ -191,3 +191,32 @@ class AnalyzeLegacyOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TruncateBytesTests(unittest.TestCase):
+    def test_short_text_is_untouched(self) -> None:
+        from research_core.brief_format import truncate_bytes
+
+        self.assertEqual(truncate_bytes("ngắn", 100), "ngắn")
+
+    def test_cut_lands_on_a_word_boundary(self) -> None:
+        from research_core.brief_format import truncate_bytes
+
+        out = truncate_bytes("một hai ba bốn năm", 14)
+        self.assertFalse(out.endswith(" "))
+        self.assertTrue("một hai ba bốn năm".startswith(out))
+        self.assertNotIn("\ufffd", out)
+
+    def test_multibyte_is_never_split_mid_character(self) -> None:
+        from research_core.brief_format import byte_len, truncate_bytes
+
+        for limit in range(1, 40):
+            out = truncate_bytes("nút thắt điện lưới", limit)
+            self.assertLessEqual(byte_len(out), limit)
+            out.encode("utf-8").decode("utf-8")  # raises if a rune was split
+
+    def test_a_single_long_token_still_gets_cut(self) -> None:
+        from research_core.brief_format import byte_len, truncate_bytes
+
+        out = truncate_bytes("a" * 100, 10)
+        self.assertEqual(byte_len(out), 10)
