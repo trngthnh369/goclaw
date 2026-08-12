@@ -38,6 +38,7 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 
 			// Skip internal channels
 			if IsInternalChannel(msg.Channel) {
+				msg.Deliver(nil) // intentionally not sent — not a failure
 				continue
 			}
 
@@ -47,6 +48,7 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 
 			if !exists {
 				slog.Warn("unknown channel for outbound message", "channel", msg.Channel)
+				msg.Deliver(fmt.Errorf("unknown channel %q", msg.Channel))
 				continue
 			}
 
@@ -66,6 +68,7 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				msg.Media = filtered
 				// If only media was in this message and all files are gone, skip entirely.
 				if len(msg.Media) == 0 && msg.Content == "" {
+					msg.Deliver(nil) // already delivered by an earlier dispatch
 					continue
 				}
 			}
@@ -84,7 +87,9 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				})
 			}
 
-			if err := channel.Send(sendCtx, msg); err != nil {
+			sendErr := channel.Send(sendCtx, msg)
+			msg.Deliver(sendErr)
+			if err := sendErr; err != nil {
 				slog.Error("error sending message to channel",
 					"channel", msg.Channel,
 					"chat_id", msg.ChatID,

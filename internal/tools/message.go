@@ -25,6 +25,11 @@ import (
 // maxReviewMessageBytes mirrors the Discord single-message content limit
 // enforced in channels/discord.sendMediaMessage. Duplicated to avoid a
 // tools→channels import cycle; keep the two in sync.
+// mediaSendTimeout bounds how long a media send waits for the channel worker's verdict. Generous
+// because it covers an upload to the platform (Zalo image upload over a slow link), but finite so
+// a wedged channel surfaces as "not confirmed" instead of hanging the caller.
+const mediaSendTimeout = 90 * time.Second
+
 const maxReviewMessageBytes = 2000
 
 // reviewTextBytesWithMedia returns the byte length of the text that would be
@@ -990,12 +995,32 @@ func (t *MessageTool) sendMedia(ctx context.Context, channel, target, filePath s
 		meta = map[string]string{"group_id": target}
 	}
 
+	// Wait for the real delivery outcome. Publishing alone is fire-and-forget, so this used to
+	// answer "sent" even when the upload failed — the daily report then marked itself published
+	// against a Zalo group that received nothing. Media is the case worth waiting for: it is the
+	// payload users verify by eye, and an upload can fail long after the queue accepts it.
+	result := make(chan error, 1)
 	t.msgBus.PublishOutbound(bus.OutboundMessage{
 		Channel:  channel,
 		ChatID:   target,
 		Media:    []bus.MediaAttachment{{URL: filePath, ContentType: mimeFromPath(filePath)}},
 		Metadata: meta,
+		Result:   result,
 	})
+
+	select {
+	case err := <-result:
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("send failed on channel %s: %v", channel, err))
+		}
+	case <-time.After(mediaSendTimeout):
+		return ErrorResult(fmt.Sprintf(
+			"send to %s not confirmed within %s — check the destination before treating it as sent",
+			channel, mediaSendTimeout))
+	case <-ctx.Done():
+		return ErrorResult(fmt.Sprintf("send to %s cancelled: %v", channel, ctx.Err()))
+	}
+
 	// Mark delivered so subsequent send_file or message(MEDIA:) calls detect the duplicate.
 	if dm := DeliveredMediaFromCtx(ctx); dm != nil {
 		dm.Mark(filePath)
