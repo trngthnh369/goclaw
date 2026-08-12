@@ -7,8 +7,8 @@
 #   schtasks /create /tn "GoClaw-Deadman" /tr "`"$ps`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\Projects\personal\goclaw\scripts\goclaw-deadman.ps1" /sc minute /mo 30 /f
 #
 # False-positive guards (verified plan-review agy-r2-f03): heartbeat CHI assert 09:00-23:00 ICT
-# (active_hours 07-23 + 2h margin); digest CHI assert sau 06:30 ICT voi cua so rolling 26h;
-# chua deploy (0 row config) -> skip im lang.
+# (active_hours 07-23 + 2h margin); cron CHI alert 07:00-23:00 ICT (tracking van chay 24/24
+# de dong ho 90p bat dau dung luc, khong doi toi sang moi tinh); chua co job -> skip im lang.
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -57,13 +57,50 @@ try {
     if ($rows) { Send-Alert 'heartbeat' "GoClaw heartbeat overdue/error: $($rows -join ', ') - ticker chet, agent stuck, hoac provider loi (stack fail-silent, khong tu bao)." }
   }
 
-  # Check B - daily-ops-digest vang mat. CHI sau 06:30 ICT; rolling 26h; cron chua ton tai/disabled -> skip.
-  if ($hm -ge 390) {
-    $cfg = Invoke-Psql "SELECT id FROM cron_jobs WHERE name = 'daily-ops-digest' AND enabled LIMIT 1"
-    if ($cfg) {
-      $ok = Invoke-Psql "SELECT count(*) FROM cron_run_logs WHERE job_id = '$cfg' AND error IS NULL AND ran_at > now() - interval '26 hours'"
-      if ([int]$ok -eq 0) { Send-Alert 'digest' "Daily Ops Digest KHONG chay thanh cong trong 26h (cron fail-silent - kiem tra gateway/provider/cron_run_logs)." }
-    }
+  # Check B - cron job im lang. Thay cho check 'daily-ops-digest' cu: job do khong ton tai
+  # trong cron_jobs nen nhanh do la code chet, trong khi 6 job that dang chay khong ai canh.
+  #
+  # KHONG alert theo tung loi le: 100% loi 7 ngay qua la HTTP 429 model_cooldown (ag-pro) va
+  # timeout cliproxy:8317 - transient, co success hai ben -> alert moi loi = spam den muc bi tat.
+  # Tin hieu dung la VANG MAT SUCCESS trong cua so mong doi.
+  #
+  # B1 stale: period tu suy ra tu (next_run_at - last_run_at) thay vi hardcode cadence.
+  # finishRun (pg/cron_scheduler.go:344) advance next_run_at BAT KE status, nen period van
+  # dung ca khi job fail; job T2-T6 cuoi tuan tu ra period 72h ma khong can biet cron expr.
+  # B2 stuck claim: claimDueJob (pg/cron_scheduler.go:364) set next_run_at=NULL de claim.
+  # Gateway chet giua chung -> ket NULL vinh vien, job KHONG BAO GIO chay lai, khong log,
+  # khong loi. now() > next_run_at + grace miss sach case nay vi so sanh voi NULL ra NULL.
+  $stale = @(Invoke-Psql @"
+SELECT j.name || ' (' || round(extract(epoch FROM now() - s.last_ok) / 3600) || 'h khong success)'
+FROM cron_jobs j
+JOIN LATERAL (SELECT max(ran_at) AS last_ok FROM cron_run_logs l WHERE l.job_id = j.id AND l.error IS NULL) s ON true
+WHERE j.enabled AND j.schedule_kind IN ('cron','every')
+  AND j.next_run_at IS NOT NULL AND j.last_run_at IS NOT NULL
+  AND j.next_run_at > j.last_run_at AND s.last_ok IS NOT NULL
+  AND now() - s.last_ok > (j.next_run_at - j.last_run_at) + interval '90 minutes'
+"@ | Where-Object { $_ })
+
+  # Tracking claim chay 24/24 (khong gate theo gio) - grace 90p = 3 chu ky poll, trong khi run
+  # dai nhat tung do la 37p (max duration_ms 2219397, polymarket p95 2181s) -> 2.4x headroom.
+  # KHONG dung 'last_run_at < now() - 90p': job 4h dang chay co last_run_at cach 4h -> bao nham.
+  $claimed = @(Invoke-Psql "SELECT name FROM cron_jobs WHERE enabled AND schedule_kind IN ('cron','every') AND next_run_at IS NULL" | Where-Object { $_ })
+  foreach ($k in @($state.Keys | Where-Object { $_ -like 'claim:*' })) {
+    if ($claimed -notcontains $k.Substring(6)) { $state.Remove($k) }   # da chay lai -> reset dong ho
+  }
+  $stuck = @()
+  foreach ($n in $claimed) {
+    $ck = "claim:$n"
+    if (-not $state[$ck]) { $state[$ck] = (Get-Date).ToString('o'); continue }
+    $since = $null
+    try { $since = [datetime]$state[$ck] } catch {}
+    if ($since -and ((Get-Date) - $since).TotalMinutes -ge 90) { $stuck += $n }
+  }
+
+  $msgs = @()
+  if ($stale) { $msgs += "khong co run thanh cong trong cua so mong doi: " + ($stale -join ', ') }
+  if ($stuck) { $msgs += "KET CLAIM (next_run_at NULL >90p - se khong bao gio chay lai cho toi khi restart): " + ($stuck -join ', ') }
+  if ($msgs -and $hm -ge 420 -and $hm -le 1380) {
+    Send-Alert 'cron' ("GoClaw cron im lang - " + ($msgs -join ' | ') + ".")
   }
 
   if ($state['db-unreachable']) { $state.Remove('db-unreachable') }  # recovery - reset de lan sau alert lai
