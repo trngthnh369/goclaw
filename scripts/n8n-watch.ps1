@@ -45,7 +45,7 @@ try {
 } catch {
   # n8n khong tra loi = SU KIEN DANG BAO, khong duoc coi la "0 loi" (bai hoc plan-review agent-r1-f11).
   $msg = "[N8N-WATCH] Khong query duoc n8n (n8nctl loi hoac instance down) - KHONG PHAI 'khong co loi'. Kiem tra n8n."
-  try { Invoke-RestMethod -Uri $webhook -Method Post -ContentType 'application/json' -Body (@{content=$msg} | ConvertTo-Json) | Out-Null } catch {}
+  try { Invoke-RestMethod -Uri $webhook -Method Post -ContentType 'application/json' -TimeoutSec 20 -Body (@{content=$msg} | ConvertTo-Json) | Out-Null } catch {}
   Write-Log "query failed: $($_.Exception.Message)"
   exit 1
 }
@@ -83,7 +83,9 @@ $body = "[N8N-WATCH] $($new.Count) execution LOI moi tren n8n production:`n" + (
 if ($new.Count -gt 10) { $body += "`n... va $($new.Count - 10) loi khac" }
 
 try {
-  Invoke-RestMethod -Uri $webhook -Method Post -ContentType 'application/json' -Body (@{content=$body} | ConvertTo-Json) | Out-Null
+  # -TimeoutSec bat buoc: POST treo thi task chay den khi bi ExecutionTimeLimit giet, state khong
+  # duoc ghi va khong co alert nao - nhin vao khong phan biet duoc voi "khong co loi moi".
+  Invoke-RestMethod -Uri $webhook -Method Post -ContentType 'application/json' -TimeoutSec 20 -Body (@{content=$body} | ConvertTo-Json) | Out-Null
   $state.lastMaxId = $maxId
   $state.lastAlertAt = (Get-Date).ToString('o')
   Write-Log "alerted $($new.Count) new errors, advance lastMaxId=$maxId"
