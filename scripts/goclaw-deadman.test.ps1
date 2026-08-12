@@ -63,4 +63,33 @@ $stuck = Invoke-ClaimTracking $back @('daily-report')
 Check "state doc lai van tinh duoc stuck" ($stuck -contains 'daily-report')
 Remove-Item $tmp -Force
 
+"T7 - Invoke-Psql phai BUNG theo timeout, khong treo (can docker; khong co thi skip)"
+$dockerUp = $false
+try { $null = docker ps --format "{{.Names}}" 2>$null; $dockerUp = ($LASTEXITCODE -eq 0) } catch {}
+if (-not $dockerUp) {
+  "  SKIP  khong co docker"
+} else {
+  $PsqlTimeoutSec = 3   # ep ngan de test; ban that dung 45
+  $NullIn = Join-Path $env:TEMP 'goclaw-deadman-stdin.null'
+  function Invoke-PsqlUnderTest([string]$sql) {
+    if (-not (Test-Path $NullIn)) { New-Item -ItemType File -Path $NullIn -Force | Out-Null }
+    $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
+    try {
+      $p = Start-Process -FilePath 'docker' -PassThru -NoNewWindow `
+        -ArgumentList ('exec goclaw-postgres-1 psql -U goclaw -d goclaw -Atc "' + $sql + '"') `
+        -RedirectStandardInput $NullIn -RedirectStandardOutput $o -RedirectStandardError $e
+      if (-not $p.WaitForExit($PsqlTimeoutSec * 1000)) { try { $p.Kill($true) } catch {}; throw "psql timeout ${PsqlTimeoutSec}s" }
+      if ($p.ExitCode -ne 0) { throw "psql exit $($p.ExitCode)" }
+      return @(Get-Content $o | Where-Object { $_ -ne '' })
+    } finally { Remove-Item $o, $e -Force -ErrorAction SilentlyContinue }
+  }
+  $dockerBefore = @(Get-Process docker -ErrorAction SilentlyContinue).Count
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $threw = $false
+  try { Invoke-PsqlUnderTest "SELECT pg_sleep(30)" } catch { $threw = $true }
+  $el = [int]$sw.Elapsed.TotalSeconds
+  Start-Sleep -Seconds 2
+  Check "throw dung han (${el}s)" ($threw -and $el -le 10)
+  Check "khong bo lai tien trinh docker" (@(Get-Process docker -ErrorAction SilentlyContinue).Count -le $dockerBefore)
+}
+
 if ($fail -eq 0) { "`nALL PASS" } else { "`n$fail FAILED" }

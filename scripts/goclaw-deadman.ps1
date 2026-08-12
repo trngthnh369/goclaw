@@ -41,20 +41,52 @@ function Send-Alert([string]$key, [string]$msg) {
   } catch {}
 }
 
+# docker CLI CO THE KET VINH VIEN, khong phai gia thuyet: 2026-08-12 quan sat 3 tien trinh
+# `docker exec goclaw-postgres-1` treo 124-220s (toi khi kill) TRONG KHI `docker ps` va mot
+# `docker exec` goi tay van tra loi trong 1s. Khong co timeout thi deadman treo den luc bi
+# ExecutionTimeLimit giet -> khong ghi state, khong alert: dung kieu fail-silent no sinh ra de chong.
+# Timeout -> throw -> catch ngoai -> alert 'db-unreachable'. stdin lay tu file rong de docker
+# thay EOF ngay (chay duoi console an, stdin handle co the khong hop le).
+$PsqlTimeoutSec = 45
+$NullIn = Join-Path $env:TEMP 'goclaw-deadman-stdin.null'
+
 function Invoke-Psql([string]$sql) {
-  $out = docker exec goclaw-postgres-1 psql -U goclaw -d goclaw -Atc $sql 2>$null
-  if ($LASTEXITCODE -ne 0) { throw "psql failed" }
-  return $out
+  if (-not (Test-Path $script:NullIn)) { New-Item -ItemType File -Path $script:NullIn -Force | Out-Null }
+  $o = [System.IO.Path]::GetTempFileName()
+  $e = [System.IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath 'docker' -PassThru -NoNewWindow `
+      -ArgumentList ('exec goclaw-postgres-1 psql -U goclaw -d goclaw -Atc "' + $sql + '"') `
+      -RedirectStandardInput $script:NullIn -RedirectStandardOutput $o -RedirectStandardError $e
+    if (-not $p.WaitForExit($script:PsqlTimeoutSec * 1000)) {
+      try { $p.Kill($true) } catch {}
+      throw "psql timeout $($script:PsqlTimeoutSec)s"
+    }
+    if ($p.ExitCode -ne 0) { throw "psql exit $($p.ExitCode)" }
+    return @(Get-Content $o | Where-Object { $_ -ne '' })
+  } finally {
+    Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+  }
 }
 
 $ict = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date).ToUniversalTime(), 'SE Asia Standard Time')
 $hm = $ict.Hour * 60 + $ict.Minute
 
 try {
-  # Check A - heartbeat overdue/error. CHI trong 09:00-23:00 ICT. 0 heartbeat enabled -> skip tu nhien.
-  if ($hm -ge 540 -and $hm -le 1380) {
-    $rows = Invoke-Psql "SELECT a.agent_key || ':' || COALESCE(h.last_status,'never') FROM agent_heartbeats h JOIN agents a ON a.id = h.agent_id WHERE h.enabled AND (now() > h.next_run_at + (h.interval_sec * interval '1 second') OR h.last_status = 'error')"
-    if ($rows) { Send-Alert 'heartbeat' "GoClaw heartbeat overdue/error: $($rows -join ', ') - ticker chet, agent stuck, hoac provider loi (stack fail-silent, khong tu bao)." }
+  # MOT lan docker exec cho ca 3 check, khong phai ba: moi lan goi la mot tien trinh docker CLI
+  # rieng va CLI nay co the ket (xem chu thich Invoke-Psql) -> ba lan goi = nhan ba be mat rui ro.
+  # Query luon chay day du; viec gate theo gio nam o cho ALERT, khong o cho query.
+  $rows = Invoke-Psql ("SELECT 'hb|' || a.agent_key || ':' || COALESCE(h.last_status,'never') FROM agent_heartbeats h JOIN agents a ON a.id = h.agent_id WHERE h.enabled AND (now() > h.next_run_at + (h.interval_sec * interval '1 second') OR h.last_status = 'error')" +
+    " UNION ALL SELECT 'stale|' || j.name || ' (' || round(extract(epoch FROM now() - s.last_ok) / 3600) || 'h khong success)' FROM cron_jobs j JOIN LATERAL (SELECT max(ran_at) AS last_ok FROM cron_run_logs l WHERE l.job_id = j.id AND l.error IS NULL) s ON true WHERE j.enabled AND j.schedule_kind IN ('cron','every') AND j.next_run_at IS NOT NULL AND j.last_run_at IS NOT NULL AND j.next_run_at > j.last_run_at AND s.last_ok IS NOT NULL AND now() - s.last_ok > (j.next_run_at - j.last_run_at) + interval '90 minutes'" +
+    " UNION ALL SELECT 'claim|' || name FROM cron_jobs WHERE enabled AND schedule_kind IN ('cron','every') AND next_run_at IS NULL")
+
+  $hb = @($rows | Where-Object { $_ -like 'hb|*' }    | ForEach-Object { $_.Substring(3) })
+  $stale = @($rows | Where-Object { $_ -like 'stale|*' } | ForEach-Object { $_.Substring(6) })
+  $claimed = @($rows | Where-Object { $_ -like 'claim|*' } | ForEach-Object { $_.Substring(6) })
+
+  # Check A - heartbeat overdue/error. CHI alert trong 09:00-23:00 ICT. 0 heartbeat enabled -> rong.
+  if ($hb -and $hm -ge 540 -and $hm -le 1380) {
+    Send-Alert 'heartbeat' "GoClaw heartbeat overdue/error: $($hb -join ', ') - ticker chet, agent stuck, hoac provider loi (stack fail-silent, khong tu bao)."
   }
 
   # Check B - cron job im lang. Thay cho check 'daily-ops-digest' cu: job do khong ton tai
@@ -70,20 +102,9 @@ try {
   # B2 stuck claim: claimDueJob (pg/cron_scheduler.go:364) set next_run_at=NULL de claim.
   # Gateway chet giua chung -> ket NULL vinh vien, job KHONG BAO GIO chay lai, khong log,
   # khong loi. now() > next_run_at + grace miss sach case nay vi so sanh voi NULL ra NULL.
-  $stale = @(Invoke-Psql @"
-SELECT j.name || ' (' || round(extract(epoch FROM now() - s.last_ok) / 3600) || 'h khong success)'
-FROM cron_jobs j
-JOIN LATERAL (SELECT max(ran_at) AS last_ok FROM cron_run_logs l WHERE l.job_id = j.id AND l.error IS NULL) s ON true
-WHERE j.enabled AND j.schedule_kind IN ('cron','every')
-  AND j.next_run_at IS NOT NULL AND j.last_run_at IS NOT NULL
-  AND j.next_run_at > j.last_run_at AND s.last_ok IS NOT NULL
-  AND now() - s.last_ok > (j.next_run_at - j.last_run_at) + interval '90 minutes'
-"@ | Where-Object { $_ })
-
   # Tracking claim chay 24/24 (khong gate theo gio) - grace 90p = 3 chu ky poll, trong khi run
   # dai nhat tung do la 37p (max duration_ms 2219397, polymarket p95 2181s) -> 2.4x headroom.
   # KHONG dung 'last_run_at < now() - 90p': job 4h dang chay co last_run_at cach 4h -> bao nham.
-  $claimed = @(Invoke-Psql "SELECT name FROM cron_jobs WHERE enabled AND schedule_kind IN ('cron','every') AND next_run_at IS NULL" | Where-Object { $_ })
   foreach ($k in @($state.Keys | Where-Object { $_ -like 'claim:*' })) {
     if ($claimed -notcontains $k.Substring(6)) { $state.Remove($k) }   # da chay lai -> reset dong ho
   }
