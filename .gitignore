@@ -226,7 +226,8 @@ cliproxy/
 .handoff/
 
 # daily-report runtime artifacts
-skills/daily-report/_daily-report.log
+# _*.log thay vi liet ke tung file: _week-init.log da lot luoi va bi track, churn moi tuan
+skills/daily-report/_*.log
 skills/daily-report/_preview/
 skills/daily-report/__pycache__/
 
