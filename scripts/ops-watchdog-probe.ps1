@@ -12,10 +12,21 @@
 #
 # Setup:
 #   1. Create cliproxy/probe.env:  DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
-#   2. Register task:
-#        $ps = (Get-Command pwsh).Source
-#        $arg = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\Projects\personal\goclaw\scripts\ops-watchdog-probe.ps1"
-#        schtasks /create /tn "GoClaw-OpsWatchdog" /tr "`"$ps`" $arg" /sc minute /mo 15 /ru SYSTEM /rl HIGHEST /f
+#   2. Register task (KHONG dung schtasks - xem canh bao Priority ben duoi):
+#        $vbs = 'D:\Projects\personal\goclaw\scripts\run-hidden.vbs'
+#        $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" `
+#          -Argument "//nologo `"$vbs`" pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\Projects\personal\goclaw\scripts\ops-watchdog-probe.ps1"
+#        $trg = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
+#        $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
+#        $set.Priority = 5
+#        Register-ScheduledTask -TaskName 'GoClaw-OpsWatchdog' -Action $act -Trigger $trg -Settings $set -Force
+#
+# ⚠ Priority = 5, KHONG de mac dinh 7 (= BELOW_NORMAL + background I/O): probe nay goi docker CLI
+# 3 lan, o Priority 7 no bi bo doi I/O den muc khong chay xong - do la ly do _watchdog.state.json
+# dung im tu 2026-07-21 den 2026-08-12 trong khi Task Scheduler van bao thanh cong.
+# ⚠ Task thuc te chay Interactive/<user>, KHONG phai /ru SYSTEM: docker context nam trong profile
+# nguoi dung, chay duoi SYSTEM se khong thay Docker Desktop engine.
+# Chay ~30s/lan (phan lon la 1-token probe len Antigravity) - dung nham la treo.
 
 $ErrorActionPreference = 'Continue'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -113,7 +124,11 @@ BODY=$(curl -s -m 60 -o /tmp/probe_body -w "%{http_code}" -X POST \
 
     $out = ''
     try {
-        $out = & $Docker exec -T -e "PK=$proxyKey" $GoclawContainer sh -c $inner 2>&1 | Out-String
+        # KHONG dung -T: do la co cua `docker compose exec`, `docker exec` khong co no va tra
+        # "unknown shorthand flag: 'T' in -T" -> check nay chua bao gio chay duoc (state file
+        # ghi consecutive_fail=50, antigravity=UNREACHABLE trong khi 3 check kia deu OK).
+        # `docker exec` mac dinh da khong cap TTY nen bo han la dung, khong can thay bang -i.
+        $out = & $Docker exec -e "PK=$proxyKey" $GoclawContainer sh -c $inner 2>&1 | Out-String
     } catch {
         return 'ERROR'
     }

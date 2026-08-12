@@ -2,9 +2,22 @@
 # Companion cua cliproxy/probe-antigravity.ps1 (KHONG sua probe - script rieng, dung chung probe.env).
 # ASCII-only: chay duoi pwsh/powershell scheduled task - khong emoji/unicode trong string.
 #
-# Dang ky:
-#   $ps = (Get-Command pwsh).Source
-#   schtasks /create /tn "GoClaw-Deadman" /tr "`"$ps`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\Projects\personal\goclaw\scripts\goclaw-deadman.ps1" /sc minute /mo 30 /f
+# Dang ky (KHONG dung schtasks - xem canh bao Priority ben duoi):
+#   $vbs = 'D:\Projects\personal\goclaw\scripts\run-hidden.vbs'
+#   $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" `
+#     -Argument "//nologo `"$vbs`" pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\Projects\personal\goclaw\scripts\goclaw-deadman.ps1"
+#   $trg = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
+#   $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+#   $set.Priority = 5    # BAT BUOC - xem duoi
+#   $set.DisallowStartIfOnBatteries = $false; $set.StopIfGoingOnBatteries = $false   # laptop rut sac = ngung giam sat
+#   Register-ScheduledTask -TaskName 'GoClaw-Deadman' -Action $act -Trigger $trg -Settings $set -Force
+#
+# ⚠ Priority = 5, KHONG de mac dinh: schtasks va Register-ScheduledTask deu mac dinh Priority=7,
+# Windows map sang BELOW_NORMAL + background I/O va bop chet docker CLI. Do 2026-08-12 cung mot
+# phut: duoi scheduler `docker version` (lenh thuan client, khong cham daemon) TIMEOUT >30s va
+# `docker ps` mat 27s, trong khi shell interactive chay ca hai duoi 1s; doi moi Priority=5 thi
+# cung probe do xong trong 8s. Day la ly do ops-watchdog khong ghi noi state file suot 3 tuan.
+# run-hidden.vbs de khong bung console moi 30 phut (S4U can quyen admin nen khong dung duoc).
 #
 # False-positive guards (verified plan-review agy-r2-f03): heartbeat CHI assert 09:00-23:00 ICT
 # (active_hours 07-23 + 2h margin); cron CHI alert 07:00-23:00 ICT (tracking van chay 24/24
@@ -35,7 +48,9 @@ function Send-Alert([string]$key, [string]$msg) {
   if ($state[$key]) { try { $last = [datetime]$state[$key] } catch {} }
   if ($last -and ($now - $last).TotalHours -lt $script:ReAlertHours) { return }
   try {
-    Invoke-RestMethod -Uri $script:webhook -Method Post -ContentType 'application/json' `
+    # -TimeoutSec bat buoc: treo o day thi state khong duoc ghi va task chay den khi bi
+    # ExecutionTimeLimit giet - fail-silent y het truong hop docker CLI ket.
+    Invoke-RestMethod -Uri $script:webhook -Method Post -ContentType 'application/json' -TimeoutSec 20 `
       -Body (@{content = "[DEADMAN] $msg"} | ConvertTo-Json) | Out-Null
     $state[$key] = $now.ToString('o')
   } catch {}
