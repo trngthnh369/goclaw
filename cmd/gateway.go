@@ -730,6 +730,7 @@ func runGateway() {
 		webFetchTool:      webFetchTool,
 		ttsTool:           ttsTool,
 		sandboxMgr:        sandboxMgr,
+		execApprovalMgr:   execApprovalMgr,
 		postTurn:          postTurn,
 		subagentMgr:       subagentMgr,
 		consumerTeamStore: consumerTeamStore,

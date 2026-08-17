@@ -29,6 +29,7 @@ type lifecycleDeps struct {
 	webFetchTool      *tools.WebFetchTool
 	ttsTool           *tools.TtsTool
 	sandboxMgr        sandbox.Manager
+	execApprovalMgr   *tools.ExecApprovalManager
 	postTurn          tools.PostTurnProcessor
 	subagentMgr       *tools.SubagentManager
 	consumerTeamStore store.TeamStore
@@ -219,6 +220,14 @@ func (d *gatewayDeps) runLifecycle(
 			deps.sandboxMgr.Stop()
 			slog.Info("releasing sandbox containers...")
 			deps.sandboxMgr.ReleaseAll(context.Background())
+		}
+
+		// Deny everything parked on a human decision BEFORE draining the
+		// scheduler. A parked approval holds a lane token for its full timeout,
+		// so if this ran after sched.Stop() the lane's wg.Wait() would block
+		// until every outstanding approval expired instead of shutting down.
+		if deps.execApprovalMgr != nil {
+			deps.execApprovalMgr.Shutdown()
 		}
 
 		if deps.sched != nil {
