@@ -146,3 +146,8 @@ func (t *VaultSearchTool) Execute(ctx context.Context, args map[string]any) *Res
 	}
 	return NewResult(sb.String())
 }
+
+// Capabilities marks vault_search read-only: it queries the vault search service and returns matches.
+func (t *VaultSearchTool) Capabilities() []ToolCapability {
+	return []ToolCapability{CapReadOnly}
+}

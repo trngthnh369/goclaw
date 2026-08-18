@@ -81,10 +81,17 @@ func (r *Registry) SetScrubbing(enabled bool) {
 }
 
 // Register adds a tool to the registry.
+//
+// A tool implementing CapabilityAware has its capabilities recorded here;
+// everything else falls back to inferMetadata at lookup time.
 func (r *Registry) Register(tool Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tools[tool.Name()] = tool
+	name := tool.Name()
+	r.tools[name] = tool
+	if ca, ok := tool.(CapabilityAware); ok {
+		r.metadata[name] = ToolMetadata{Name: name, Capabilities: ca.Capabilities()}
+	}
 }
 
 // RegisterWithMetadata adds a tool with explicit capability metadata.

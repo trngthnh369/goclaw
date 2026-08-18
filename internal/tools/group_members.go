@@ -95,3 +95,8 @@ func (t *ListGroupMembersTool) Execute(ctx context.Context, args map[string]any)
 	})
 	return NewResult(string(data))
 }
+
+// Capabilities marks list_group_members read-only: it lists the members of a chat through the channel adapter.
+func (t *ListGroupMembersTool) Capabilities() []ToolCapability {
+	return []ToolCapability{CapReadOnly}
+}
