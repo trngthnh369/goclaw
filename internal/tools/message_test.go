@@ -381,7 +381,9 @@ func TestSelfSendGuard(t *testing.T) {
 
 	tool := NewMessageTool(workspaceCanonical, true)
 	// Wire message bus so MEDIA sends can proceed past self-send guard.
-	tool.SetMessageBus(bus.New())
+	msgBus := bus.New()
+	recordOutbound(t, msgBus)
+	tool.SetMessageBus(msgBus)
 
 	// Build context with self-send channel/chatID.
 	mkCtx := func() context.Context {
@@ -698,6 +700,7 @@ func TestMessageToolCrossTargetGuard(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			tool := NewMessageTool(sharedTmp, false)
 			mb := bus.New()
+			rec := recordOutbound(t, mb)
 			tool.SetMessageBus(mb)
 
 			ctx := context.Background()
@@ -712,7 +715,7 @@ func TestMessageToolCrossTargetGuard(t *testing.T) {
 					t.Fatalf("expected error result, got: %+v", res)
 				}
 				// Guard must not publish when blocked.
-				got := drainBusNow(mb)
+				got := rec.take(0)
 				if len(got) != 0 {
 					t.Fatalf("expected 0 outbound on block, got %d: %+v", len(got), got)
 				}
@@ -721,7 +724,7 @@ func TestMessageToolCrossTargetGuard(t *testing.T) {
 			if res != nil && res.IsError {
 				t.Fatalf("unexpected error: %s", res.ForLLM)
 			}
-			got := drainBusNow(mb)
+			got := rec.take(sc.wantOutbound)
 			if len(got) != sc.wantOutbound {
 				t.Fatalf("outbound count: got %d want %d (%+v)", len(got), sc.wantOutbound, got)
 			}
