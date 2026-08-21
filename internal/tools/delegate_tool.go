@@ -114,7 +114,7 @@ func (t *DelegateTool) Parameters() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in seconds for sync mode (default: 300)",
+				"description": "Timeout in seconds. sync: default 300, capped at 600. async: default 600, honored up to 3600 for long background pipelines.",
 			},
 		},
 		"required": []string{"agent_key", "task"},
@@ -128,13 +128,7 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 	if mode == "" {
 		mode = "async"
 	}
-	timeoutSec := 300
-	if ts, ok := args["timeout"].(float64); ok && int(ts) > 0 {
-		timeoutSec = int(ts)
-	}
-	if timeoutSec > 600 {
-		timeoutSec = 600 // hard cap to prevent resource exhaustion
-	}
+	timeoutSec := resolveDelegateTimeoutSec(mode, args)
 
 	if agentKey == "" || task == "" {
 		return ErrorResult("agent_key and task are required")
@@ -261,7 +255,33 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 	if mode == "sync" {
 		return t.executeSyncMode(ctx, req, timeoutSec, isContentFactoryDesignerDelegation)
 	}
-	return t.executeAsyncMode(ctx, req)
+	return t.executeAsyncMode(ctx, req, timeoutSec)
+}
+
+// resolveDelegateTimeoutSec resolves the run deadline (seconds) from the caller's args,
+// mode-aware:
+//   sync : default 300, hard cap 600 (unchanged).
+//   async: default 600 when `timeout` is OMITTED (preserves the historical hardcoded
+//          10-minute background budget — do NOT fall to the 300 parse default, which would
+//          silently halve every existing async delegation); an explicit value is honored up
+//          to 3600 so a long inter-agent pipeline can finish instead of dying at 10 minutes.
+func resolveDelegateTimeoutSec(mode string, args map[string]any) int {
+	explicit, hasTimeout := 0, false
+	if ts, ok := args["timeout"].(float64); ok && int(ts) > 0 {
+		explicit, hasTimeout = int(ts), true
+	}
+	def, capSec := 300, 600
+	if mode == "async" {
+		def, capSec = 600, 3600
+	}
+	timeoutSec := def
+	if hasTimeout {
+		timeoutSec = explicit
+	}
+	if timeoutSec > capSec {
+		timeoutSec = capSec
+	}
+	return timeoutSec
 }
 
 // executeSyncMode blocks until the delegatee completes or timeout.
@@ -387,10 +407,16 @@ func copyDelegateMediaFile(src, dst string) error {
 	return out.Close()
 }
 
-// executeAsyncMode spawns a goroutine and returns immediately.
-func (t *DelegateTool) executeAsyncMode(ctx context.Context, req DelegateRequest) *Result {
+// executeAsyncMode spawns a goroutine and returns immediately. timeoutSec bounds the
+// detached run (default 600s; up to 3600s when the caller passes an explicit timeout) so a
+// long inter-agent pipeline can complete instead of being killed at a fixed 10 minutes.
+func (t *DelegateTool) executeAsyncMode(ctx context.Context, req DelegateRequest, timeoutSec int) *Result {
 	// Detach from parent cancel but add a deadline to prevent goroutine leaks.
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(timeoutSec)*time.Second)
+
+	// A long detached async run has no cron run-log; leave a start marker so a silently
+	// failing daily chain is diagnosable from logs (paired with EventDelegateFailed below).
+	slog.Info("delegate.async.start", "to", req.ToAgentKey, "from", req.FromAgentKey, "timeout_sec", timeoutSec)
 
 	go func() {
 		defer cancel()
