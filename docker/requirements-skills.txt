@@ -19,3 +19,8 @@ lxml~=6.0.2
 
 # AI SDK — relaxed to allow minor updates (fast-moving SDK)
 anthropic>=0.88.0,<2.0.0
+
+# Media ingest (skill: comingwave-study) — exact pin: a rebuild must yield the
+# downloader that was actually gate-tested, and the recovery path for a YouTube
+# player change is "bump this pin + rebuild" (agents cannot pip install).
+yt-dlp==2026.8.19

@@ -177,6 +177,7 @@ func (h *ChatCompletionsHandler) handleNonStream(w http.ResponseWriter, r *http.
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
+		Surface:    tools.SurfaceHTTP,
 		SessionKey: sessionKey,
 		Message:    message,
 		Channel:    "http",
@@ -238,6 +239,7 @@ func (h *ChatCompletionsHandler) handleStream(w http.ResponseWriter, r *http.Req
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
+		Surface:    tools.SurfaceHTTP,
 		SessionKey: sessionKey,
 		Message:    message,
 		Channel:    "http",

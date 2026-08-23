@@ -438,6 +438,7 @@ func wireExtras(
 			delegateCtx := tracing.WithDelegateParentTraceID(ctx, tracing.TraceIDFromContext(ctx))
 
 			runReq := agent.RunRequest{
+				Surface:       tools.SurfaceSubagent,
 				RunID:         uuid.New().String(),
 				SessionKey:    sessionKey,
 				Message:       req.Task,

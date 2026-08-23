@@ -197,3 +197,13 @@ func (p *ApprovalPolicy) requireApproval(ctx context.Context, req ToolAuthzReque
 // The real approval manager must satisfy the policy's requirement; if the two
 // drift apart, this fails at compile time rather than at wiring time.
 var _ ApprovalRequester = (*ExecApprovalManager)(nil)
+
+// SurfaceForPeerKind maps a channel peer kind onto a surface. Both are
+// interactive; they are kept apart because who may approve differs — a group
+// has many members, a DM has one.
+func SurfaceForPeerKind(peerKind string) Surface {
+	if peerKind == "group" {
+		return SurfaceChannelGroup
+	}
+	return SurfaceChannelDM
+}

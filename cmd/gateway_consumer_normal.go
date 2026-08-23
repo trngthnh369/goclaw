@@ -443,6 +443,7 @@ func processNormalMessage(
 
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
+		Surface:               tools.SurfaceForPeerKind(peerKind),
 		SessionKey:            sessionKey,
 		Message:               msg.Content,
 		CurrentMessage:        msg.Metadata["current_message"],

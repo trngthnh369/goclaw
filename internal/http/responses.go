@@ -121,6 +121,7 @@ func (h *ResponsesHandler) handleNonStream(w http.ResponseWriter, r *http.Reques
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
+		Surface:    tools.SurfaceHTTP,
 		SessionKey: sessionKey,
 		Message:    message,
 		Channel:    "http",
@@ -183,6 +184,7 @@ func (h *ResponsesHandler) handleStream(w http.ResponseWriter, r *http.Request, 
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
+		Surface:    tools.SurfaceHTTP,
 		SessionKey: sessionKey,
 		Message:    message,
 		Channel:    "http",

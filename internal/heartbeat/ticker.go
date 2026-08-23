@@ -19,6 +19,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 const (
@@ -67,8 +68,8 @@ func NewTicker(cfg TickerConfig) *Ticker {
 		msgBus:        cfg.MsgBus,
 		sched:         cfg.Sched,
 		runAgent:      cfg.RunAgent,
-		wakeCh:   make(chan uuid.UUID, 16),
-		stopCh:   make(chan struct{}),
+		wakeCh:        make(chan uuid.UUID, 16),
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -269,6 +270,7 @@ func (t *Ticker) runOne(ctx context.Context, hb store.AgentHeartbeat) {
 
 	for attempt := range maxAttempts {
 		outCh := t.runAgent(ctx, agent.RunRequest{
+			Surface:           tools.SurfaceHeartbeat,
 			SessionKey:        sessionKey,
 			Message:           prompt,
 			Channel:           channel,

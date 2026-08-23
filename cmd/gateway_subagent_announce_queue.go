@@ -169,6 +169,7 @@ func processSubagentAnnounceLoop(
 		}
 
 		req := agent.RunRequest{
+			Surface:          tools.SurfaceSubagent,
 			SessionKey:       r.SessionKey,
 			Message:          content,
 			ForwardMedia:     fwdMedia,

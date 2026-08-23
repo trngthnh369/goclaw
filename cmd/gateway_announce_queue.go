@@ -83,6 +83,7 @@ func processAnnounceLoop(
 		content := buildMergedAnnounceContent(entries, snapshot, r.TeamWorkspace)
 
 		req := agent.RunRequest{
+			Surface:          tools.SurfaceSubagent,
 			SessionKey:       r.LeadSessionKey,
 			Message:          content,
 			Channel:          r.OrigChannel,

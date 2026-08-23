@@ -241,6 +241,7 @@ func handleTeammateMessage(
 	schedCtx := tools.WithTaskActionFlags(ctx, taskActionFlags)
 
 	outCh := deps.Sched.Schedule(schedCtx, scheduler.LaneTeam, agent.RunRequest{
+		Surface:         tools.SurfaceForPeerKind(origPeerKind),
 		SessionKey:      sessionKey,
 		Message:         msg.Content,
 		Channel:         origChannel,

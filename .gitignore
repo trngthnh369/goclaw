@@ -250,3 +250,9 @@ skills/tech-ai-research/runs/
 # Python bytecode inside bundled skills
 skills/**/__pycache__/
 skills/**/*.pyc
+
+# Local deployment dir: the bind-mounted gateway binary (74 MB each, several
+# rollback copies) plus DB dumps taken before risky config changes. Nothing in
+# here belongs in git, and one `git add -A` would commit 300 MB and a provider
+# table export.
+.deploy/

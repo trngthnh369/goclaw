@@ -201,3 +201,44 @@ func (r *recordingRequester) RequestApproval(_ context.Context, command, _ strin
 	r.onCommand(command)
 	return r.decision, nil
 }
+
+func TestSurfaceForPeerKind(t *testing.T) {
+	if got := SurfaceForPeerKind("group"); got != SurfaceChannelGroup {
+		t.Errorf(`SurfaceForPeerKind("group") = %q, want %q`, got, SurfaceChannelGroup)
+	}
+	// Anything that is not explicitly a group is treated as a direct message.
+	for _, pk := range []string{"direct", "", "dm", "unexpected"} {
+		if got := SurfaceForPeerKind(pk); got != SurfaceChannelDM {
+			t.Errorf("SurfaceForPeerKind(%q) = %q, want %q", pk, got, SurfaceChannelDM)
+		}
+	}
+}
+
+func TestSurface_knownAndInteractive(t *testing.T) {
+	// Every surface a run can be tagged with must be known, or the policy will
+	// refuse every mutating call from that entry point.
+	for _, s := range []Surface{
+		SurfaceChannelDM, SurfaceChannelGroup, SurfaceWS,
+		SurfaceHTTP, SurfaceCron, SurfaceHeartbeat, SurfaceSubagent,
+	} {
+		if !s.Known() {
+			t.Errorf("%q is used by a run entry point but is not a known surface", s)
+		}
+	}
+
+	if SurfaceUnknown.Known() {
+		t.Error("the zero value must not count as a known surface")
+	}
+
+	// Only surfaces with a person attached may be asked to approve.
+	for _, s := range []Surface{SurfaceHTTP, SurfaceCron, SurfaceHeartbeat, SurfaceSubagent, SurfaceUnknown} {
+		if s.Interactive() {
+			t.Errorf("%q must not be treated as interactive", s)
+		}
+	}
+	for _, s := range []Surface{SurfaceChannelDM, SurfaceChannelGroup, SurfaceWS} {
+		if !s.Interactive() {
+			t.Errorf("%q should be interactive", s)
+		}
+	}
+}

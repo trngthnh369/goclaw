@@ -427,6 +427,11 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		TenantAllowedPaths:    l.tenantAllowedPaths,
 	}
 	ctx = store.WithRunContext(ctx, rc)
+	// Carry where this run came from, so the tool policy can tell an interactive
+	// session (someone can be asked to approve) from cron, heartbeat or a
+	// subagent (nobody is watching). An unset surface stays unknown and the
+	// policy refuses rather than guessing.
+	ctx = tools.WithSurface(ctx, req.Surface)
 
 	return contextSetupResult{
 		ctx:                  ctx,

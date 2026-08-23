@@ -324,6 +324,7 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 		}
 
 		result, err := loop.Run(runCtx, agent.RunRequest{
+			Surface:         tools.SurfaceWS,
 			SessionKey:      sessionKey,
 			Message:         message,
 			Media:           mediaFiles,

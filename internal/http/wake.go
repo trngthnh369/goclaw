@@ -45,8 +45,8 @@ type wakeRequest struct {
 }
 
 type wakeResponse struct {
-	Content string   `json:"content"`
-	RunID   string   `json:"run_id"`
+	Content string     `json:"content"`
+	RunID   string     `json:"run_id"`
 	Usage   *wakeUsage `json:"usage,omitempty"`
 }
 
@@ -127,6 +127,7 @@ func (h *WakeHandler) handleWake(w http.ResponseWriter, r *http.Request) {
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
+		Surface:    tools.SurfaceHTTP,
 		SessionKey: sessionKey,
 		Message:    req.Message,
 		Channel:    "wake",

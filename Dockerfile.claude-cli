@@ -16,6 +16,23 @@ RUN apk add --no-cache nodejs npm jq bash coreutils \
     && rm -rf /tmp/npm-cache /root/.cache /var/cache/apk/* \
     && claude --version && jq --version && bash --version | head -1
 
+# Media ingest for the comingwave-study skill: yt-dlp fetches YouTube auto-captions,
+# ffmpeg is the fallback path's splitter.
+#
+# Added HERE rather than in the base Dockerfile (where the same pin also lives, for
+# CI and anyone building from source) because a from-source rebuild crashes Docker
+# Desktop on this host - the same reason the skill COPYs below exist. Keep the two
+# pins in step: docker/requirements-skills.txt is the source of truth for the version.
+#
+# The exact pin matters more than usual: agents cannot install yt-dlp themselves
+# (`pip install` matches the package_install deny group, and the only way past it is
+# an interactive admin approval a cron run cannot obtain), so when YouTube changes
+# its player the recovery is bump-this-pin, rebuild, redeploy.
+RUN apk add --no-cache ffmpeg \
+    && pip3 install --no-cache-dir --break-system-packages "yt-dlp==2026.8.19" \
+    && rm -rf /root/.cache /var/cache/apk/* \
+    && yt-dlp --version && ffmpeg -version | head -1
+
 # Add the fintech-research skill to the bundled dir.
 #
 # Scoped to this one slug on purpose: copying the whole skills/ tree fails because the base
@@ -36,3 +53,4 @@ RUN apk add --no-cache nodejs npm jq bash coreutils \
 # deployable artifact without touching the base.
 COPY --chown=goclaw:goclaw skills/fintech-research/ /app/bundled-skills/fintech-research/
 COPY --chown=goclaw:goclaw skills/aiwave-research/ /app/bundled-skills/aiwave-research/
+COPY --chown=goclaw:goclaw skills/comingwave-study/ /app/bundled-skills/comingwave-study/
