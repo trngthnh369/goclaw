@@ -61,7 +61,7 @@ không phải nơi bạn đang chat.
 
 **1. Draft vào Discord** (channel study) để anh Thịnh tự đăng:
 ```
-message(action="send", channel="fin-discord", target="1540931491117404170",
+message(action="send", channel="cw-discord", target="1540931491117404170",
         message=<nội dung essay-fb.md>)
 ```
 
@@ -71,8 +71,8 @@ message(action="send", channel="cf-discord", target="1530127001602625677",
         message=<nội dung essay-fb.md>,
         idempotency_key="contentfactory-terminal")
 ```
-- `channel` là **tên instance**: `cf-discord` cho cổng duyệt, `fin-discord` cho
-  channel study. `"discord"` và `"ws"` đều SAI và đều làm mất latch.
+- `channel` là **tên instance**: `cw-discord` cho channel study (bot riêng của team
+  này), `cf-discord` cho cổng duyệt ContentFactory. `"discord"` và `"ws"` đều SAI và đều làm mất latch.
 - `idempotency_key` **chính xác chuỗi `contentfactory-terminal`**; key khác bị từ
   chối thẳng. Mỗi lần chạy chỉ gửi review **một lần**.
 - nội dung là bài sạch, không kèm JSON nội bộ hay log lỗi.

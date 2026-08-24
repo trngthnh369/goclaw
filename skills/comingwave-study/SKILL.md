@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.1.0"
-  bundle_revision: "2026-08-23-006"
+  bundle_revision: "2026-08-23-007"
   runtime: python3
   forked_from: aiwave-research
   channel_id: UCCoUJTzD-gV_otqzFU85-MQ
