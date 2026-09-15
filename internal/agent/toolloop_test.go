@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -131,7 +132,7 @@ func TestReadOnlyStreak_StuckMode_Kill(t *testing.T) {
 	for range 12 {
 		s.recordMutation("read_file", map[string]any{"path": "/same-file.txt"})
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	if level != "critical" {
 		t.Fatalf("12 reads of same file should trigger critical, got %q", level)
 	}
@@ -144,7 +145,7 @@ func TestReadOnlyStreak_LowUniqueness_Kill(t *testing.T) {
 	for i := range 12 {
 		s.recordMutation("read_file", map[string]any{"path": files[i%3]})
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	if level != "critical" {
 		t.Fatalf("low uniqueness (3/12) should trigger critical, got %q", level)
 	}
@@ -167,7 +168,7 @@ func TestReadOnlyStreak_BoundaryRatio_Stuck(t *testing.T) {
 	if s.readOnlyUnique != 7 {
 		t.Fatalf("expected unique=7, got %d", s.readOnlyUnique)
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	if level != "critical" {
 		t.Fatalf("7/12 unique (0.583) should be stuck mode → critical, got %q", level)
 	}
@@ -214,9 +215,81 @@ func TestReadOnlyStreak_ExplorationKill(t *testing.T) {
 	for i := range 36 {
 		s.recordMutation("read_file", map[string]any{"path": fmt.Sprintf("/file%d.txt", i)})
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	if level != "critical" {
 		t.Fatalf("36 unique reads should trigger exploration critical, got %q", level)
+	}
+}
+
+// detectPastWarning checks a streak that is already past critical twice: the
+// first check only warns, the second one stops the run.
+func detectPastWarning(t *testing.T, s *toolLoopState) string {
+	t.Helper()
+	if level, _ := s.detectReadOnlyStreak(); level != "warning" {
+		t.Fatalf("first check past critical should warn, got %q", level)
+	}
+	level, _ := s.detectReadOnlyStreak()
+	return level
+}
+
+func TestReadOnlyStreak_BatchJumpPastWarning_WarnsBeforeKill(t *testing.T) {
+	// Replays the news-briefer cron trace: 3 setup reads, a batch of 20 fetches
+	// (streak 23, below the exploration warning), then a batch of 15 fetches
+	// that lands at 38. The check runs once per batch, so the model never saw a
+	// warning; it must get one before the run is stopped.
+	var s toolLoopState
+	fetch := func(n, offset int) {
+		for i := range n {
+			s.recordMutation("web_fetch", map[string]any{"url": fmt.Sprintf("https://example.com/%d", offset+i)})
+		}
+	}
+	fetch(3, 0)
+	if level, _ := s.detectReadOnlyStreak(); level != "" {
+		t.Fatalf("streak 3: expected no detection, got %q", level)
+	}
+	fetch(20, 100)
+	if level, _ := s.detectReadOnlyStreak(); level != "" {
+		t.Fatalf("streak 23: expected no detection, got %q", level)
+	}
+	fetch(15, 200)
+	level, msg := s.detectReadOnlyStreak()
+	if level != "warning" {
+		t.Fatalf("streak 38 without a prior warning should warn, got %q", level)
+	}
+	if !strings.Contains(msg, "stop this run") {
+		t.Fatalf("warning past critical should say the next read stops the run, got %q", msg)
+	}
+	fetch(1, 300)
+	if level, _ := s.detectReadOnlyStreak(); level != "critical" {
+		t.Fatalf("read after the final warning should be critical, got %q", level)
+	}
+}
+
+func TestReadOnlyStreak_MutationClearsWarning(t *testing.T) {
+	var s toolLoopState
+	for i := range 36 {
+		s.recordMutation("read_file", map[string]any{"path": fmt.Sprintf("/a%d.txt", i)})
+	}
+	if level, _ := s.detectReadOnlyStreak(); level != "warning" {
+		t.Fatalf("expected warning, got %q", level)
+	}
+	s.recordMutation("write_file", nil)
+	for i := range 36 {
+		s.recordMutation("read_file", map[string]any{"path": fmt.Sprintf("/b%d.txt", i)})
+	}
+	if level, _ := s.detectReadOnlyStreak(); level != "warning" {
+		t.Fatalf("a new streak after a mutation should warn again before killing, got %q", level)
+	}
+}
+
+func TestReadOnlyStreak_DelegateResetsStreak(t *testing.T) {
+	var s toolLoopState
+	for i := range 10 {
+		s.recordMutation("web_fetch", map[string]any{"url": fmt.Sprintf("https://example.com/%d", i)})
+	}
+	s.recordMutation("delegate", map[string]any{"agent_key": "cf-director"})
+	if s.readOnlyStreak != 0 {
+		t.Fatalf("delegate should reset the streak, got %d", s.readOnlyStreak)
 	}
 }
 
@@ -470,7 +543,7 @@ func TestReadOnlyStreak_TraceReplay_StuckLoop(t *testing.T) {
 	if s.readOnlyUnique != 2 {
 		t.Fatalf("expected unique=2, got %d", s.readOnlyUnique)
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	if level != "critical" {
 		t.Fatalf("stuck loop (2 files alternating) should trigger critical at 12, got %q", level)
 	}
@@ -518,7 +591,7 @@ func TestReadOnlyStreak_Critical(t *testing.T) {
 	for range readOnlyStreakCritical {
 		s.recordMutation("list_files", nil)
 	}
-	level, _ := s.detectReadOnlyStreak()
+	level := detectPastWarning(t, &s)
 	// nil args → unique=1 → ratio=1/12=0.083 → stuck mode → critical
 	if level != "critical" {
 		t.Fatalf("expected critical after %d read-only calls, got %q", readOnlyStreakCritical, level)

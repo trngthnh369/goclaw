@@ -41,7 +41,7 @@ var mutatingTools = map[string]bool{
 	"spawn": true, "message": true,
 	"create_image": true, "create_video": true, "create_audio": true,
 	"tts": true, "cron": true, "publish_skill": true,
-	"sessions_send": true,
+	"sessions_send": true, "delegate": true,
 }
 
 // teamTasksReadOnlyActions are team_tasks actions that don't indicate real progress.
@@ -63,6 +63,7 @@ type toolLoopState struct {
 	readOnlyStreak int             // consecutive non-mutating, non-exec tool calls
 	readOnlyUnique int             // unique args hashes in current streak
 	seenReadArgs   map[string]bool // tracks unique read arg hashes for uniqueness ratio
+	readOnlyWarned bool            // a warning was already issued for the current streak
 }
 
 type toolCallRecord struct {
@@ -182,6 +183,7 @@ func (s *toolLoopState) resetStreak() {
 	s.readOnlyStreak = 0
 	s.readOnlyUnique = 0
 	s.seenReadArgs = nil
+	s.readOnlyWarned = false
 }
 
 // incrementReadOnly increments the read-only streak and tracks uniqueness.
@@ -203,7 +205,31 @@ func (s *toolLoopState) incrementReadOnly(toolName string, args map[string]any) 
 //
 // Stuck mode (ratio ≤ 0.6): warn at 8, kill at 12.
 // Exploration mode (ratio > 0.6): warn at 24, kill at 36.
+//
+// The check runs once per iteration, after the whole tool batch, so one
+// parallel batch can carry the streak from below the warning threshold straight
+// past critical. A kill is only issued once the model has seen a warning for
+// the current streak; otherwise the first check past critical warns instead,
+// giving the model one turn to answer or save its findings.
 func (s *toolLoopState) detectReadOnlyStreak() (level, message string) {
+	level, message = s.readOnlyStreakLevel()
+	switch {
+	case level == "critical" && !s.readOnlyWarned:
+		s.readOnlyWarned = true
+		return "warning", fmt.Sprintf(
+			"[System: WARNING — You have made %d consecutive read-only tool calls (%d unique). "+
+				"The read-only limit is reached: one more read-only tool call will stop this run. "+
+				"Respond now with what you have, or save your findings with write_file first.]",
+			s.readOnlyStreak, s.readOnlyUnique)
+	case level == "warning":
+		s.readOnlyWarned = true
+	}
+	return level, message
+}
+
+// readOnlyStreakLevel maps the current streak to a detection level without
+// considering whether a warning was already issued.
+func (s *toolLoopState) readOnlyStreakLevel() (level, message string) {
 	if s.readOnlyStreak < readOnlyStreakWarning {
 		return "", ""
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/cron"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -127,6 +128,15 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		}
 
 		result := outcome.Result
+
+		// A run the loop detector stopped carries the detector's diagnostic as its
+		// content, not the job's output. Delivering it would post that diagnostic to
+		// the chat and record the run as ok; retrying would repeat its side effects.
+		if result.LoopKilled {
+			slog.Warn("cron: run stopped by loop detector, output not delivered",
+				"job_id", job.ID, "job_name", job.Name, "agent", agentID)
+			return nil, cron.Permanent(fmt.Errorf("agent run stopped by loop detector: %s", result.Content))
+		}
 
 		// If job wants delivery to a channel, send the agent response to the target chat.
 		if job.Deliver && job.DeliverChannel != "" && job.DeliverTo != "" {
