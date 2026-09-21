@@ -4,7 +4,9 @@ description: Daily morning news briefing. Use when asked for morning briefing, d
 license: Internal
 metadata:
   author: trngthnh369
-  version: "1.0.0"
+  version: "1.1.0"
+  bundle_revision: "2026-09-21-001"
+  runtime: python3
 ---
 
 # Morning Briefing
@@ -68,6 +70,37 @@ Compile and deliver a daily news briefing covering key topics. Designed to run v
    ```
    message(channel="zalo-personal-bot", to="367617605136702044", content=formatted_briefing)
    ```
+
+## Cross-day dedup — `scripts/dedup.py`
+
+The cron run is stateless and the sources (HN front page, GitHub trending, section pages) keep the same
+stories up for days, so without a ledger the briefing repeats itself: replaying 2026-09-01..21, 98 of
+351 bullets (28%) had already run in the previous 7 days. `dedup.py` is that ledger.
+
+Run it once, after picking stories and BEFORE writing the briefing or seeding cf-director:
+
+```bash
+SKILLDIR=$(ls -d /app/data/skills-store/morning-briefing/*/ | sort -V | tail -1)
+python3 "$SKILLDIR/scripts/dedup.py" check --workspace /app/workspace/news-briefer <<'JSON'
+[{"title":"<tiêu đề tiếng Việt sẽ viết>","url":"https://<link bài gốc>"}]
+JSON
+```
+
+- `drop` = same canonical URL or same title within the window: never brief it.
+- `similar` = shares 2+ distinctive tokens (names, product codes, figures) with a recent item: skip,
+  unless today's source has a concrete new development, then prefix `[Cập nhật]` and say what changed.
+- `keep` = new. SEED_TOPICS for cf-director come only from here.
+- Recording happens inside `check`, so there is no second call to forget. The window (7 days) runs on
+  `last_seen`: a story a source keeps offering stays blocked for as long as it is offered.
+- Listing URLs (`/category/...`, homepages) are never used as a key; tokens that recur in 3+ ledger
+  titles (`anthropic`, `gpt-6`, `hugging face`) are ignored for `similar`.
+- Ledger: `/app/workspace/news-briefer/memory/briefed.ndjson`, 30-day retention.
+- Seed or backfill from past briefs: `dedup.py import --date YYYY-MM-DD` with the briefing text on stdin.
+
+Tests: `python3 -m unittest discover -s <skill dir>/tests`.
+
+⚠️ The live agent reads its workflow from `SOUL.md` and the cron payload, not from this file
+(`use_skill` does not inject SKILL.md). Changing the command here means changing it there too.
 
 ## On-Demand Usage
 

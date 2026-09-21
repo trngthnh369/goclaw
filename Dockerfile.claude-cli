@@ -54,3 +54,4 @@ RUN apk add --no-cache ffmpeg \
 COPY --chown=goclaw:goclaw skills/fintech-research/ /app/bundled-skills/fintech-research/
 COPY --chown=goclaw:goclaw skills/aiwave-research/ /app/bundled-skills/aiwave-research/
 COPY --chown=goclaw:goclaw skills/comingwave-study/ /app/bundled-skills/comingwave-study/
+COPY --chown=goclaw:goclaw skills/morning-briefing/ /app/bundled-skills/morning-briefing/
