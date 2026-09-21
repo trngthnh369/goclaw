@@ -23,6 +23,53 @@ import daily_report_run as dr  # noqa: E402  (build_review_text, post_text_chunk
 
 TZ = timezone(timedelta(hours=7))
 
+# Fields the pipeline owns. The agent edits title/note/percent/progress/sub/remaining and toggles
+# add_sheet; everything else is restored from the report on disk BY ID, so a dropped or reordered
+# item can never carry another item's sheet row, group bindings or consent.
+STRUCTURAL = ("plan", "sheet_match", "is_new", "group_key", "group_keys", "uids", "goal_hash",
+              "prev_pct", "units", "fresh_bind")
+PLANS = ("planned", "ongoing", "unplanned")
+
+
+def merge_daily(edited: dict, current: dict) -> dict:
+    """Validate an agent-edited plan-centric daily report against the one on disk.
+
+    - every edited item must carry an id that exists on disk (new ids -> refused: the agent must
+      not invent sheet rows; unplanned work is added with "thêm", not by editing);
+    - structural fields are copied back from disk by id;
+    - add_sheet is only meaningful on unplanned items;
+    - a % the user set by hand may be lower than the baseline (the user is the authority), and is
+      marked user_override so it is visible in the log."""
+    if not any("plan" in it for it in current.get("items", [])):
+        return edited  # legacy report shape: nothing to merge
+    by_id = {it.get("id"): it for it in current.get("items", []) if it.get("id")}
+    out = []
+    for it in edited.get("items", []):
+        iid = it.get("id")
+        if iid not in by_id:
+            raise SystemExit(f"BAD_ITEM id={iid!r} không có trong báo cáo hiện tại — chỉ sửa item có sẵn")
+        base = by_id[iid]
+        merged = dict(it)
+        for k in STRUCTURAL:
+            if k in base:
+                merged[k] = base[k]
+            else:
+                merged.pop(k, None)
+        if merged.get("plan") not in PLANS:
+            raise SystemExit(f"BAD_ITEM id={iid} plan={merged.get('plan')!r}")
+        if merged["plan"] != "unplanned":
+            merged.pop("add_sheet", None)
+        if merged["plan"] == "ongoing":
+            merged["percent"], merged["progress"] = None, "ongoing"
+        elif merged.get("percent") != base.get("percent"):
+            merged["user_override"] = True
+        out.append(merged)
+    edited["items"] = out
+    for k in ("sheet_tab", "report_date", "source"):
+        if k in current:
+            edited[k] = current[k]
+    return edited
+
 
 def main() -> None:
     kind = "daily"
@@ -48,6 +95,9 @@ def main() -> None:
 
     if not os.path.exists(active_path):
         raise SystemExit("NO_ACTIVE: không có báo cáo đang chờ duyệt để sửa")
+    if kind == "daily" and os.path.exists(report_path):
+        with open(report_path, encoding="utf-8") as fh:
+            report = merge_daily(report, json.load(fh))
     with open(active_path, encoding="utf-8") as fh:
         active = json.load(fh)
     if active.get("stage") == "published":

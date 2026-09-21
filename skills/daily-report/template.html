@@ -10,6 +10,7 @@
     --brand1:#4f46e5; --brand2:#7c3aed;
     --done:#16a34a; --doing:#d97706; --blocked:#dc2626; --new:#2563eb;
     --done-bg:#dcfce7; --doing-bg:#fef3c7; --blocked-bg:#fee2e2; --new-bg:#dbeafe;
+    --ongoing:#475569; --ongoing-bg:#e2e8f0;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans',sans-serif;
@@ -33,13 +34,14 @@
   .bar-fill.doing{background:var(--doing)}
   .bar-fill.blocked{background:var(--blocked)}
   .bar-fill.new{background:var(--new)}
-  .meta{display:flex;flex-direction:column;align-items:flex-end;gap:7px;white-space:nowrap;min-width:78px}
+  .meta{display:flex;flex-direction:column;align-items:flex-end;gap:7px;white-space:nowrap;width:108px;flex:none}
   .pct{font-size:15px;font-weight:800;color:var(--ink)}
   .badge{white-space:nowrap;font-size:11.5px;font-weight:700;padding:4px 10px;border-radius:8px}
   .badge.done{color:var(--done);background:var(--done-bg)}
   .badge.doing{color:var(--doing);background:var(--doing-bg)}
   .badge.blocked{color:var(--blocked);background:var(--blocked-bg)}
   .badge.new{color:var(--new);background:var(--new-bg)}
+  .badge.ongoing{color:var(--ongoing);background:var(--ongoing-bg)}
   .badge::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;
                  background:currentColor;margin-right:6px;vertical-align:middle}
 </style>

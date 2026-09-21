@@ -31,6 +31,7 @@ BADGE = {
     "doing": ("doing", "Đang làm"),
     "blocked": ("blocked", "Blocked"),
     "new": ("new", "Mới"),
+    "ongoing": ("ongoing", "Vận hành"),
 }
 
 # "carry" is gone on purpose: it re-listed every unfinished task already shown in doing/blocked.
@@ -39,6 +40,7 @@ SECTIONS = (
     ("done", "done", "Hoàn thành"),
     ("doing", "doing", "Đang làm"),
     ("blocked", "blocked", "Blocked"),
+    ("ongoing", "ongoing", "Vận hành"),
     ("nopct", "carry", "Chưa có %"),
 )
 
@@ -51,7 +53,7 @@ DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
 
 
 def compute_summary(items: list) -> dict:
-    counts = {"done": 0, "doing": 0, "blocked": 0, "new": 0}
+    counts = {"done": 0, "doing": 0, "blocked": 0, "new": 0, "ongoing": 0}
     for it in items:
         p = it.get("progress", "doing")
         if p in counts:
@@ -79,26 +81,44 @@ def build_header(d: dict) -> str:
     summary = compute_summary(d.get("items", []))
     chips = []
     for key, label in (("done", "hoàn thành"), ("doing", "đang làm"),
-                       ("blocked", "blocked"), ("new", "mới")):
+                       ("blocked", "blocked"), ("new", "mới"), ("ongoing", "vận hành")):
         val = summary.get(key, 0)
         if val:
             chips.append(f'<span class="chip">{esc(val)} {label}</span>')
     return f'<h1>{title}</h1>\n<div class="summary">{"".join(chips)}</div>'
 
 
+PLAN_HEADINGS = {"planned": "Kế hoạch tuần", "ongoing": "Vận hành", "unplanned": "Ngoài kế hoạch"}
+
+
 def build_items(items: list) -> str:
     rows = []
+    shown_plan = None
     for it in items:
+        plan = it.get("plan")
+        if plan and plan != shown_plan and plan in PLAN_HEADINGS:
+            shown_plan = plan
+            rows.append('<div style="margin-top:14px;font-size:12px;font-weight:800;'
+                        'letter-spacing:.8px;text-transform:uppercase;color:var(--muted)">'
+                        f'{esc(PLAN_HEADINGS[plan])}</div>')
         progress = it.get("progress", "doing")
         cls, label = BADGE.get(progress, ("doing", "Đang làm"))
-        pct = clamp_pct(it.get("percent"), progress)
         note = it.get("note", "")
+        subs = [s for s in (it.get("sub") or []) if s]
+        if subs:
+            note = (note + " — " if note else "") + "; ".join(subs)
         note_html = f'<div class="note">{esc(note)}</div>' if note else ""
+        if progress == "ongoing" or (plan and it.get("percent") is None):
+            # ongoing work has no finish line, and an unknown % must not be drawn as a default 50%
+            bar_html, pct_html = "", ""
+        else:
+            pct = clamp_pct(it.get("percent"), progress)
+            bar_html = f'<div class="bar"><div class="bar-fill {cls}" style="width:{pct}%"></div></div>'
+            pct_html = f'<span class="pct">{pct}%</span>'
         rows.append(
             '<div class="item"><div class="main">'
-            f'<div class="title">{esc(it.get("title", ""))}</div>{note_html}'
-            f'<div class="bar"><div class="bar-fill {cls}" style="width:{pct}%"></div></div>'
-            f'</div><div class="meta"><span class="pct">{pct}%</span>'
+            f'<div class="title">{esc(it.get("title", ""))}</div>{note_html}{bar_html}'
+            f'</div><div class="meta">{pct_html}'
             f'<span class="badge {cls}">{label}</span></div></div>'
         )
     return "\n".join(rows)
@@ -130,11 +150,14 @@ def build_weekly_sections(d: dict) -> str:
             pct_s = f"{pct_i}%" if pct is not None else "—"
             note = r.get("note", "")
             note_html = f'<div class="note">{esc(note)}</div>' if note else ""
+            ongoing = key == "ongoing"
+            bar_html = ("" if ongoing else
+                        f'<div class="bar"><div class="bar-fill {cls}" style="width:{pct_i}%"></div></div>')
+            meta_html = "" if ongoing else f'<span class="pct">{pct_s}</span>'
             items_html.append(
                 '<div class="item"><div class="main">'
-                f'<div class="title">{esc(r.get("title", ""))}</div>{note_html}'
-                f'<div class="bar"><div class="bar-fill {cls}" style="width:{pct_i}%"></div></div>'
-                f'</div><div class="meta"><span class="pct">{pct_s}</span></div></div>'
+                f'<div class="title">{esc(r.get("title", ""))}</div>{note_html}{bar_html}'
+                f'</div><div class="meta">{meta_html}</div></div>'
             )
         blocks.append(f'<div class="section"><span class="section-title {cls}">{esc(label)}</span>\n'
                       + "\n".join(items_html) + "</div>")

@@ -9,9 +9,15 @@
 # _week_bounds year inference fixed for Dec↔Jan cross-year tabs; read_tasks returns pct + note
 # (note column resolved by header, not hardcoded); ensure_current_week_tab() guards every sheet
 # WRITE against the past-week-tab fallback of find_week_tab.
+#
+# 2026-09-21: every column is resolved BY HEADER, never by position. The user rearranges weekly
+# tabs by hand ("STT | Tên | Mô tả | Trạng thái | % Tiến độ | Ghi chú" became "STT | Tên | Trạng
+# thái | Người dùng | % Tiến độ | Mô tả"); the old hardcoded column D wrote every status into
+# "Người dùng" and appended rows dumped bot notes into the user's "Mô tả" goals.
 import re
 import sys
 import os
+import unicodedata
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -19,8 +25,23 @@ import sheets_client as sc  # noqa: E402
 
 SPREADSHEET_ID = os.environ.get("DAILY_REPORT_SHEET_ID", "10Ei5DQIpbLgNQX__VV6bQr72t-tZUWrtBftJ3IDI_xI")
 PCT_HEADER = "% Tiến độ"
-NOTE_HEADER = "Ghi chú"
-STATUS_COL_INDEX = 3  # "Trạng thái" is column D (0-based 3); % column inserted at index 4 (E).
+ONGOING_STATUS = "vận hành"
+
+# logical column -> accepted header spellings (compared after _norm_name). "goal" (Mô tả) is written
+# by the user and is read-only for the bot.
+HEADER_ALIASES = {
+    "stt": ("stt",),
+    "name": ("tên", "tên task", "task"),
+    "status": ("trạng thái",),
+    "pct": ("% tiến độ", "%", "tiến độ"),
+    "goal": ("mô tả",),
+    "note": ("ghi chú",),
+    "owner": ("người dùng", "người phụ trách"),
+}
+# a duplicate of these would make a write ambiguous -> refuse rather than guess
+UNIQUE_COLS = ("name", "status", "pct")
+# a weekly tab is exactly "(DD-DD/MM)"; anything else ("BAK ...", "_init (...)", "Copy of ...") is not
+WEEK_TAB_RE = re.compile(r"^\((\d{1,2})-(\d{1,2})/(\d{1,2})\)$")
 
 
 def _col_letter(idx0: int) -> str:
@@ -52,7 +73,9 @@ def _week_bounds(title: str, year: int, ref: date | None = None):
     case — e.g. "(29-04/01)" evaluated in late December must resolve to Jan of NEXT year, and a
     "(22-28/12)" tab read in early January must resolve to Dec of the PREVIOUS year.
     """
-    m = re.search(r"\((\d{1,2})-(\d{1,2})/(\d{1,2})\)", title)
+    # anchored: an unanchored search also accepted backup/staging copies such as
+    # "_bak (21-27/09)", which could then be picked as the current week's tab
+    m = WEEK_TAB_RE.match(str(title).strip())
     if not m:
         return None
     sd, ed, em = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -150,61 +173,117 @@ def parse_pct(raw: object):
     return max(0, min(100, int(round(v))))
 
 
+def _norm_name(s: object) -> str:
+    """NFC + collapsed whitespace + lowercase. NFC matters: the same Vietnamese header typed on two
+    keyboards can arrive as composed or decomposed code points."""
+    return " ".join(unicodedata.normalize("NFC", str(s or "")).split()).strip().lower()
+
+
+def resolve_columns(header: list) -> dict:
+    """{logical_key: 0-based index} from the header row. Unknown headers are ignored; a repeated
+    name/status/% header raises (a write would have to guess). Repeated "Ghi chú" keeps the first,
+    older tabs had multi-column notes."""
+    cols: dict = {}
+    for i, h in enumerate(header):
+        n = _norm_name(h)
+        if not n:
+            continue
+        for key, spellings in HEADER_ALIASES.items():
+            if n not in spellings:
+                continue
+            if key in cols:
+                if key in UNIQUE_COLS:
+                    raise SystemExit(f"SHEET_DUP_HEADER '{h}' (cột {_col_letter(cols[key])} và "
+                                     f"{_col_letter(i)})")
+                break
+            cols[key] = i
+            break
+    cols.setdefault("stt", 0)
+    cols.setdefault("name", 1)
+    return cols
+
+
+def _cell(r: list, idx: object) -> str:
+    if idx is None or idx >= len(r):
+        return ""
+    return str(r[idx]).strip()
+
+
 def read_tasks(tab_title: str) -> dict:
-    """Read the tab. Returns {'header': [...], 'pct_col': 'E'|None, 'note_col_idx': int|None,
-    'tasks': [{row,stt,name,status,pct,note}]}. pct = parsed int|None; note resolved by header."""
+    """Read the tab. Returns {'header', 'cols', 'pct_col': 'E'|None, 'note_col_idx': int|None,
+    'tasks': [{row,stt,name,status,pct,note,goal,owner,ongoing}]}. Every field is located by
+    header (resolve_columns); pct = parsed int|None."""
     rows = sc.read_range(SPREADSHEET_ID, f"{_quoted(tab_title)}!A1:Z200")
     header = rows[0] if rows else []
-    pct_col = None
-    pct_idx = None
-    note_idx = None
-    for i, h in enumerate(header):
-        hs = str(h).strip()
-        if hs == PCT_HEADER:
-            pct_col = _col_letter(i)
-            pct_idx = i
-        elif hs == NOTE_HEADER and note_idx is None:
-            note_idx = i
+    cols = resolve_columns(header)
+    pct_idx = cols.get("pct")
     tasks = []
     for ridx, r in enumerate(rows[1:], start=2):  # row numbers are 1-based; data starts row 2
-        name = (r[1] if len(r) > 1 else "").strip()
+        name = _cell(r, cols["name"])
         if not name:
             continue
+        status = _cell(r, cols.get("status"))
         tasks.append({
             "row": ridx,
-            "stt": (r[0] if len(r) > 0 else "").strip(),
+            "stt": _cell(r, cols["stt"]),
             "name": name,
-            "status": (r[STATUS_COL_INDEX] if len(r) > STATUS_COL_INDEX else "").strip(),
-            "pct": parse_pct(r[pct_idx]) if pct_idx is not None and len(r) > pct_idx else None,
-            "note": (r[note_idx] if note_idx is not None and len(r) > note_idx else "").strip(),
+            "status": status,
+            "pct": parse_pct(r[pct_idx]) if pct_idx is not None and pct_idx < len(r) else None,
+            "note": _cell(r, cols.get("note")),
+            "goal": _cell(r, cols.get("goal")),
+            "owner": _cell(r, cols.get("owner")),
+            "ongoing": _norm_name(status) == ONGOING_STATUS,
         })
-    return {"header": header, "pct_col": pct_col, "note_col_idx": note_idx, "tasks": tasks}
+    return {"header": header, "cols": cols,
+            "pct_col": _col_letter(pct_idx) if pct_idx is not None else None,
+            "note_col_idx": cols.get("note"), "tasks": tasks}
 
 
 def ensure_pct_column(tab: dict) -> str:
-    """Make sure a "% Tiến độ" column exists right after "Trạng thái". Idempotent. Returns letter."""
+    """Make sure a "% Tiến độ" column exists right after "Trạng thái" (found by header; end of the
+    header row if there is no status column). Idempotent. Returns the column letter."""
     data = read_tasks(tab["title"])
     if data["pct_col"]:
         return data["pct_col"]
-    # insert blank column at index 4 (column E), then set its header
-    sc.insert_column(SPREADSHEET_ID, tab["sheetId"], STATUS_COL_INDEX + 1)
-    col = _col_letter(STATUS_COL_INDEX + 1)
+    status_idx = data["cols"].get("status")
+    at = status_idx + 1 if status_idx is not None else len(data["header"])
+    sc.insert_column(SPREADSHEET_ID, tab["sheetId"], at)
+    col = _col_letter(at)
     sc.update_range(SPREADSHEET_ID, f"{_quoted(tab['title'])}!{col}1", [[PCT_HEADER]])
-    return col
+    return read_tasks(tab["title"])["pct_col"] or col  # re-resolve after the insert
 
 
-def _norm_name(s: object) -> str:
-    return " ".join(str(s or "").split()).strip().lower()
+def build_row(cols: dict, width: int, values: dict) -> list:
+    """One sheet row from {logical_key: value}, placed by header. Keys without a column are dropped
+    (never shifted into a neighbour). "goal" is not accepted: Mô tả belongs to the user."""
+    width = max([width] + [i + 1 for i in cols.values()])
+    row = [""] * width
+    for key, val in values.items():
+        if key == "goal" or val is None or key not in cols:
+            continue
+        row[cols[key]] = val
+    return row
+
+
+def fmt_pct(p: object) -> str | None:
+    return None if p is None else f"{int(p)}%"
 
 
 def write_progress(tab: dict, pct_col: str, updates: list, new_tasks: list) -> dict:
-    """updates: [{'row':int,'percent':int,'status':str}]. new_tasks: [{'name','percent','status','note'}].
-    Writes % (and status) for existing rows; appends new task rows. IDEMPOTENT: a "new" task whose
-    name already exists in the sheet is updated in place instead of appended (no duplicates)."""
+    """updates: [{'row':int,'percent':int|None,'status':str}]. new_tasks: [{'name','percent',
+    'status','note'}]. Writes % (and status) for existing rows; appends new task rows.
+
+    Every cell is placed by header (resolve_columns): status goes to "Trạng thái" (skipped when the
+    tab has none, never guessed), a bot note goes to "Ghi chú" (dropped when absent), and "Mô tả"
+    is never written. percent=None (ongoing task) leaves the % cell untouched.
+    IDEMPOTENT: a "new" task whose name already exists is updated in place, not appended."""
     result = {"updated": 0, "appended": 0}
     title = _quoted(tab["title"])
 
-    existing = read_tasks(tab["title"])["tasks"]
+    data = read_tasks(tab["title"])
+    cols, existing = data["cols"], data["tasks"]
+    pct_col = data["pct_col"] or pct_col
+    status_col = _col_letter(cols["status"]) if "status" in cols else None
     row_by_name = {_norm_name(t["name"]): t["row"] for t in existing}
 
     upd = list(updates)
@@ -212,27 +291,35 @@ def write_progress(tab: dict, pct_col: str, updates: list, new_tasks: list) -> d
     for nt in new_tasks:
         row = row_by_name.get(_norm_name(nt["name"]))
         if row:  # tên đã có trong sheet → update, KHÔNG append trùng
-            upd.append({"row": row, "percent": nt.get("percent", 0), "status": nt.get("status", "WIP")})
+            upd.append({"row": row, "percent": nt.get("percent"), "status": nt.get("status", "WIP")})
         else:
             to_append.append(nt)
 
     for u in upd:
-        sc.update_range(SPREADSHEET_ID, f"{title}!{pct_col}{u['row']}", [[f"{u['percent']}%"]])
-        if u.get("status"):
-            sc.update_range(SPREADSHEET_ID, f"{title}!D{u['row']}", [[u["status"]]])
-        result["updated"] += 1
+        wrote = False
+        if u.get("percent") is not None and pct_col:
+            sc.update_range(SPREADSHEET_ID, f"{title}!{pct_col}{u['row']}", [[fmt_pct(u["percent"])]])
+            wrote = True
+        if u.get("status") and status_col:
+            sc.update_range(SPREADSHEET_ID, f"{title}!{status_col}{u['row']}", [[u["status"]]])
+            wrote = True
+        result["updated"] += int(wrote)
 
     if to_append:
         # continue numbering from the MAX existing STT (not row count) so appended rows never
         # collide with non-contiguous STT values already in the sheet.
         max_stt = max((int(t["stt"]) for t in existing
                        if str(t.get("stt", "")).strip().isdigit()), default=len(existing))
-        rows = [[str(max_stt + 1 + i), nt["name"], "", nt.get("status", "WIP"),
-                 f"{nt.get('percent', 0)}%", nt.get("note", "")]
+        rows = [build_row(cols, len(data["header"]), {
+                    "stt": str(max_stt + 1 + i), "name": nt["name"],
+                    "status": nt.get("status", "WIP"), "pct": fmt_pct(nt.get("percent")),
+                    "note": nt.get("note") or None})
                 for i, nt in enumerate(to_append)]
         sc.append_rows(SPREADSHEET_ID, f"{title}!A1", rows)
         result["appended"] = len(rows)
 
+    if not pct_col:
+        return result
     # Force the % column to render as percent. USER_ENTERED parses "50%" -> the number 0.5; freshly
     # appended rows lack the percent cell-format, so they'd show "0.5" instead of "50%". Re-applying
     # percent format to the whole column keeps every row (updated + appended) consistent.

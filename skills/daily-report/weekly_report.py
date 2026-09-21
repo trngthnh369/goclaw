@@ -24,13 +24,15 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import daily_report_run as dr   # noqa: E402  reuse pipeline fns (flatten/group/describe/match)
 import daily_report_sheet as drs  # noqa: E402
+import plan_pipeline as pp  # noqa: E402
 import sheets_client as sc  # noqa: E402
 
 TZ = timezone(timedelta(hours=7))
 DIGEST = f"{dr.WORK}/digest_sessions.py"
 HOST_WEEK = "/app/.claude-host/host-digest/week.json"
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
-STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP"}
+STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP",
+                "ongoing": "Vận hành"}
 
 
 def run_digest(from_iso: str, to_iso: str) -> dict:
@@ -71,7 +73,9 @@ def ensure_week_tab(name: str) -> tuple[dict, bool]:
     return {"title": name, "sheetId": new_id}, True
 
 
-def pct(item: dict) -> int:
+def pct(item: dict) -> int | None:
+    if item.get("progress") == "ongoing":
+        return None
     try:
         return max(0, min(100, int(round(float(item.get("percent"))))))
     except (TypeError, ValueError):
@@ -119,14 +123,18 @@ def build_items(sheet_tasks: list | None = None) -> list:
     return items
 
 
-def refresh_sheet() -> dict:
-    """Digest full-week -> LLM -> write_progress vào tab tuần. Trả {'tab':..., 'updated', 'appended'}."""
+def refresh_sheet(write: bool = False) -> dict:
+    """Digest full-week -> LLM -> match against the week tab. Trả {'tab':..., 'updated', 'appended'}.
+
+    READ-ONLY by default: the Friday --report path runs at GENERATE time, before any DUYỆT, and its
+    % writes used to reach the sheet unreviewed (and the sheet % is the floor every later run keeps).
+    Only the manual `weekly_report.py` (no flag) run passes write=True."""
     today = datetime.now(TZ).date()
     name = drs.tab_name(*drs.week_bounds(today))
     tab, created = ensure_week_tab(name)
     dr.log(f"tab {'created' if created else 'reused'}: {name}")
 
-    pct_col = drs.ensure_pct_column(tab)
+    pct_col = drs.ensure_pct_column(tab) if write else None
     sheet_tasks = drs.read_tasks(tab["title"])["tasks"]
 
     items = build_items(sheet_tasks)
@@ -150,7 +158,8 @@ def refresh_sheet() -> dict:
     # into the tab during generate — a second, ungated append path that ran BEFORE any DUYỆT and
     # bypassed the review gate on the daily side. New tasks are surfaced as a proposal instead;
     # they enter the sheet through the reviewed daily flow (skip_sheet / "bỏ mới").
-    res = drs.write_progress(tab, pct_col, updates, [])
+    res = (drs.write_progress(tab, pct_col, updates, []) if write
+           else {"updated": 0, "appended": 0})
     if new_tasks:
         dr.log(f"refresh: {len(new_tasks)} task mới KHÔNG ghi sheet (chờ duyệt qua báo cáo ngày): "
                + ", ".join(t["name"] for t in new_tasks))
@@ -171,10 +180,12 @@ def build_sections(tab_title: str, items: list | None = None) -> dict:
     with no activity collapses into one idle count. `items=None` (refresh failed) falls back to
     classifying the tab, minus the duplicate carry section."""
     tasks = drs.read_tasks(tab_title)["tasks"]
-    sections: dict = {"done": [], "doing": [], "blocked": [], "nopct": []}
+    sections: dict = {"done": [], "doing": [], "blocked": [], "ongoing": [], "nopct": []}
 
     def bucket(row: dict, pct_val: object, status: str) -> None:
-        if pct_val is None:
+        if status in ("ongoing", drs.ONGOING_STATUS):
+            sections["ongoing"].append(row)
+        elif pct_val is None:
             sections["nopct"].append(row)
         elif pct_val >= 100:
             sections["done"].append(row)
@@ -201,10 +212,45 @@ def build_sections(tab_title: str, items: list | None = None) -> dict:
                it.get("percent"), str(it.get("progress", "doing")))
 
     idle = [t for t in tasks
-            if drs._norm_name(t["name"]) not in touched and (t["pct"] is None or t["pct"] < 100)]
+            if drs._norm_name(t["name"]) not in touched and not t.get("ongoing")
+            and (t["pct"] is None or t["pct"] < 100)]
     sections["idle_count"] = len(idle)
     sections["idle_titles"] = [t["name"] for t in idle]
     return sections
+
+
+def week_items_from_history(today) -> list | None:
+    """The week's items rebuilt from APPROVED daily reports (Mon..yesterday) + today's daily draft.
+
+    Returns None when any weekday before today has no approved report: a gap would silently drop
+    that day's work, so the caller falls back to re-digesting the whole week. Each row/title keeps
+    its LATEST state, so a task reported on 3 days appears once with its final %."""
+    monday = drs.week_bounds(today)[0]
+    by_day: dict = {}
+    for rec in pp.load_history(today, days=(today - monday).days):
+        by_day[rec.get("report_date")] = rec
+    day = monday
+    while day < today:
+        if day.isoformat() not in by_day:
+            dr.log(f"weekly: no approved daily for {day} — falling back to week digest")
+            return None
+        day += timedelta(days=1)
+    records = [by_day[d] for d in sorted(by_day)]
+    try:
+        with open(dr.REPORT, encoding="utf-8") as fh:
+            cur = json.load(fh)
+        if cur.get("report_date") == today.isoformat() and cur.get("kind", "daily") == "daily":
+            records.append(cur)
+    except (OSError, ValueError):
+        pass
+    latest: dict = {}
+    for rec in records:
+        for it in rec.get("items", []):
+            if "plan" not in it:
+                continue
+            key = drs._norm_name(it.get("sheet_match") or it.get("title"))
+            latest[key] = it
+    return list(latest.values())
 
 
 def report_mode() -> None:
@@ -215,11 +261,17 @@ def report_mode() -> None:
     week_items: list | None = None
     proposed_new: list = []
     try:
-        res = refresh_sheet()
-        proposed_new = res.get("proposed_new", [])
-        # the week's real activity -> the report's main content; everything else in the tab is
-        # week_init carry-over (backlog), collapsed into one line.
-        week_items = res.get("items", [])
+        week_items = week_items_from_history(today)
+        if week_items is not None:
+            proposed_new = [it.get("title", "") for it in week_items
+                            if it.get("plan") == "unplanned" and not it.get("add_sheet")]
+            dr.log(f"weekly: built from approved daily history ({len(week_items)} items)")
+        else:
+            res = refresh_sheet()
+            proposed_new = res.get("proposed_new", [])
+            # the week's real activity -> the report's main content; everything else in the tab is
+            # week_init carry-over (backlog), collapsed into one line.
+            week_items = res.get("items", [])
     except SystemExit as exc:
         refreshed = False
         dr.log(f"refresh SKIPPED ({exc}) — render từ % sheet hiện có")
@@ -273,7 +325,7 @@ def main() -> None:
                   f"| sheet={it.get('sheet_name')} | note={it.get('note')}")
         return
 
-    res = refresh_sheet()
+    res = refresh_sheet(write=True)
     print(f"OK tab='{res['name']}' updated={res['updated']} appended={res['appended']}")
 
 

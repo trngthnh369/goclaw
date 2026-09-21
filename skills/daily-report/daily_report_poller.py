@@ -36,7 +36,6 @@ CHANNEL = "1512686472334147735"                            # review channel
 USER_ID = "896694335670726676"                             # the approver (Discord uid)
 ACTIVE_PATH = "/app/workspace/_daily-report/active.json"
 PUBLISH_PATH = "/app/workspace/_daily-report/daily_report_publish.py"
-EDIT_PATH = "/app/workspace/_daily-report/daily_report_edit.py"
 APPROVE_WORDS = ("duyet", "duyệt", "ok dang", "approve")
 
 
@@ -137,8 +136,14 @@ def is_approval(content: str) -> bool:
     return any(w in n for w in (norm(w) for w in APPROVE_WORDS))
 
 
+# Replies that edit the draft ("sửa:", "thêm: U2", "bỏ thêm: U2") belong to agent Zip (SKILL.md
+# TRIGGER B/B2 -> edit_repost.py). The poller must recognise them only to NOT treat them as an
+# approval: is_approval matches substrings, so "thêm: U2, chưa duyệt" would otherwise publish.
+EDIT_PREFIXES = ("sua:", "sua tuan:", "them:", "bo them:")
+
+
 def is_edit(content: str) -> bool:
-    return norm(content).startswith("sua:")
+    return norm(content).startswith(EDIT_PREFIXES)
 
 
 def load_marker() -> dict:
@@ -158,14 +163,6 @@ def publish() -> tuple[int, str]:
     proc = subprocess.run(
         ["docker", "exec", "-u", "goclaw", GOCLAW, "python3", PUBLISH_PATH],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
-
-
-def edit(instruction: str) -> tuple[int, str]:
-    # argv form (no shell) so the Vietnamese instruction can't be mangled or injected.
-    proc = subprocess.run(
-        ["docker", "exec", "-u", "goclaw", GOCLAW, "python3", EDIT_PATH, instruction],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -202,20 +199,9 @@ def main():
         if m["id"] == last_acted:
             continue  # already handled this exact message
         if is_edit(content):
-            instruction = content.split(":", 1)[1].strip() if ":" in content else ""
-            if not instruction:
-                log(f"edit msg {m['id']} has no instruction after 'sửa:' — skipping")
-                marker["last_msg_id"] = m["id"]
-                save_marker(marker)
-                return
-            log(f"edit detected (msg {m['id']}): {instruction[:60]!r} -> applying")
-            rc, out = edit(instruction)
-            marker["last_msg_id"] = m["id"]  # don't re-apply this same instruction
+            log(f"edit/thêm msg {m['id']} — handled by agent Zip (edit_repost.py), not the poller")
+            marker["last_msg_id"] = m["id"]
             save_marker(marker)
-            if rc == 0:
-                log("EDIT OK:", out[-300:])
-            else:
-                log(f"EDIT FAILED rc={rc}:", out[-300:])
             return
         if is_approval(content):
             log(f"approval detected (msg {m['id']}): {content[:40]!r} -> publishing")

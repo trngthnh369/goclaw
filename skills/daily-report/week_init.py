@@ -40,6 +40,26 @@ def _with_carry_marker(note: object) -> str:
     return (text + " " if text else "") + CARRY_MARKER
 
 
+def carry_rows(src_data: dict, carried: list) -> list:
+    """Carried rows placed BY HEADER of the source tab (the staging tab is a duplicate of it, so it
+    has the same header). Goal (Mô tả) and owner are copied verbatim; the carry marker only goes
+    into "Ghi chú" — the old positional row wrote status into "Người dùng" and the marker over the
+    user's goal once the tab layout changed. Marker added ONCE (it used to pile up weekly)."""
+    cols = src_data["cols"]
+    width = len(src_data["header"])
+    rows = []
+    for i, t in enumerate(carried):
+        row = drs.build_row(cols, width, {
+            "stt": str(i + 1), "name": t["name"], "status": t["status"] or "WIP",
+            "pct": drs.fmt_pct(t["pct"]), "owner": t.get("owner") or None,
+            "note": _with_carry_marker(t["note"]) if "note" in cols else None,
+        })
+        if "goal" in cols and t.get("goal"):  # user-owned text, copied as-is (build_row never writes goal)
+            row[cols["goal"]] = t["goal"]
+        rows.append(row)
+    return rows
+
+
 def _weekly_tabs(today: date) -> list:
     """[(start, end, tab)] for every weekly-named tab (staging tabs excluded)."""
     out = []
@@ -97,7 +117,9 @@ def main() -> None:
         prev = [(e, t) for s, e, t in tabs]
     src_end, src_tab = max(prev, key=lambda x: x[0])
     src_data = drs.read_tasks(src_tab["title"])
-    carried = [t for t in src_data["tasks"] if (t["pct"] is None or t["pct"] < 100)]
+    # ongoing ("Vận hành") rows have no finish line: always carried, whatever % a legacy run left
+    carried = [t for t in src_data["tasks"]
+               if t.get("ongoing") or t["pct"] is None or t["pct"] < 100]
     none_pct = sum(1 for t in carried if t["pct"] is None)
     log(f"source tab '{src_tab['title']}' (end {src_end}): {len(src_data['tasks'])} tasks, "
         f"carry {len(carried)} (<100%), blank-pct treated as unfinished: {none_pct}")
@@ -123,12 +145,7 @@ def main() -> None:
     _clear_data_rows(staging)
 
     if carried:
-        # Append the marker ONCE: it used to be added unconditionally every week, so a task carried
-        # 3 weeks read "... (chuyển từ tuần trước) (chuyển từ tuần trước) (chuyển từ tuần trước)".
-        rows = [[str(i + 1), t["name"], "", t["status"] or "WIP",
-                 f"{t['pct']}%" if t["pct"] is not None else "",
-                 _with_carry_marker(t["note"])]
-                for i, t in enumerate(carried)]
+        rows = carry_rows(src_data, carried)
         sc.append_rows(drs.SPREADSHEET_ID, f"'{staging_name}'!A1", rows)
 
     # verify before commit-rename

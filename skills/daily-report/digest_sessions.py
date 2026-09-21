@@ -37,8 +37,14 @@ DEFAULT_MAX_SESSIONS = 40
 DEFAULT_TZ_OFFSET_H = 7             # Asia/Ho_Chi_Minh (UTC+7), no tzdata needed
 PROMPT_SNIPPET_CHARS = 280
 ASSISTANT_SNIPPET_CHARS = 200
-MAX_PROMPTS_PER_SESSION = 12
 MAX_FILES_PER_SESSION = 25
+# Outcome = what the session ended up DOING. The first prompts only say what was ASKED, which is
+# why reports read "Đọc packet X và báo sẵn sàng". Keep the last few assistant texts (by timestamp,
+# across files) and pick the most recent one that reads like a result, not a question.
+OUTCOME_CHARS = 400
+OUTCOME_KEEP = 6
+OUTCOME_MIN_CHARS = 40
+EDGE_PROMPTS = 3  # first N + last N prompts by timestamp
 
 # Files we must never read even if they slip under the glob (defensive).
 SECRET_NAME_PATTERNS = (
@@ -117,6 +123,27 @@ def extract_user_text(message) -> str | None:
     if any(text.startswith(pfx) for pfx in NOISE_PREFIXES):
         return None
     return text
+
+
+def edge_prompts(prompts: list) -> list:
+    """First EDGE_PROMPTS + last EDGE_PROMPTS prompt texts by timestamp (deduplicated, in order)."""
+    ordered = [t for _ts, t in sorted(prompts, key=lambda x: x[0])]
+    if len(ordered) <= 2 * EDGE_PROMPTS:
+        picked = ordered
+    else:
+        picked = ordered[:EDGE_PROMPTS] + ordered[-EDGE_PROMPTS:]
+    return [redact(t) for t in picked]
+
+
+def pick_outcome(texts: list) -> str:
+    """Most recent assistant text that reads like a result: skip questions ("Bạn muốn...?") and
+    one-liners. Falls back to the newest text of any kind."""
+    ordered = sorted(texts, key=lambda x: x[0], reverse=True)
+    for _ts, t in ordered:
+        s = t.strip()
+        if len(s) >= OUTCOME_MIN_CHARS and not s.rstrip("*_` ").endswith("?"):
+            return redact(s[:OUTCOME_CHARS])
+    return redact(ordered[0][1].strip()[:OUTCOME_CHARS]) if ordered else ""
 
 
 def summarize(args):
@@ -218,7 +245,7 @@ def summarize(args):
                     "first_ts": ts, "last_ts": ts,
                     "user_turns": 0, "assistant_turns": 0,
                     "prompts": [], "tool_counts": {}, "files_touched": set(),
-                    "assistant_snippets": [],
+                    "assistant_snippets": [], "assistant_texts": [],
                 }
                 sessions[key] = sess
             sess["last_ts"] = max(sess["last_ts"], ts)
@@ -233,8 +260,9 @@ def summarize(args):
                 txt = extract_user_text(msg)
                 if txt:
                     sess["user_turns"] += 1
-                    if len(sess["prompts"]) < MAX_PROMPTS_PER_SESSION:
-                        sess["prompts"].append(redact(txt[:PROMPT_SNIPPET_CHARS]))
+                    # (ts, text): files are walked in arbitrary order, so "first"/"last" must come
+                    # from timestamps, not from append order
+                    sess["prompts"].append((ts, txt[:PROMPT_SNIPPET_CHARS]))
             elif t == "assistant" and isinstance(msg, dict):
                 sess["assistant_turns"] += 1
                 content = msg.get("content")
@@ -251,10 +279,17 @@ def summarize(args):
                                 fp = inp.get("file_path") or inp.get("path")
                                 if fp and len(sess["files_touched"]) < MAX_FILES_PER_SESSION:
                                     sess["files_touched"].add(fp)
-                        elif it_t == "text" and len(sess["assistant_snippets"]) < 3:
+                        elif it_t == "text":
                             snip = (it.get("text") or "").strip()
-                            if snip:
+                            if not snip:
+                                continue
+                            if len(sess["assistant_snippets"]) < 3:
                                 sess["assistant_snippets"].append(redact(snip[:ASSISTANT_SNIPPET_CHARS]))
+                            texts = sess["assistant_texts"]
+                            texts.append((ts, snip[:OUTCOME_CHARS * 2]))
+                            if len(texts) > OUTCOME_KEEP * 4:  # bounded: keep the newest only
+                                texts.sort(key=lambda x: x[0])
+                                del texts[:-OUTCOME_KEEP]
 
         if file_had_window_event:
             health["files_in_window"] += 1
@@ -283,7 +318,8 @@ def summarize(args):
             "assistant_turns": s["assistant_turns"],
             "tool_counts": s["tool_counts"],
             "files_touched": sorted(s["files_touched"]),
-            "prompts": s["prompts"],
+            "prompts": edge_prompts(s["prompts"]),
+            "outcome": pick_outcome(s["assistant_texts"]),
             "assistant_snippets": s["assistant_snippets"],
         })
 
@@ -302,7 +338,9 @@ def summarize(args):
         "health": health,
     }
 
-    # deterministic budget truncation: drop assistant_snippets, then prompts, then sessions
+    # deterministic budget truncation, least useful first: opening assistant snippets, then middle
+    # prompts, then file lists, then whole projects. `outcome` is kept to the end — it is the only
+    # record of what the session actually achieved.
     def size(obj):
         return len(json.dumps(obj, ensure_ascii=False))
 
@@ -313,7 +351,12 @@ def summarize(args):
     if size(result) > args.max_bytes:
         for p in result["projects"]:
             for s in p["sessions"]:
-                s["prompts"] = s["prompts"][:4]
+                if len(s["prompts"]) > 3:
+                    s["prompts"] = s["prompts"][:1] + s["prompts"][-2:]
+    if size(result) > args.max_bytes:
+        for p in result["projects"]:
+            for s in p["sessions"]:
+                s["files_touched"] = []
     while size(result) > args.max_bytes and result["projects"]:
         # drop the project with the oldest activity (last in sorted list)
         result["projects"].pop()

@@ -7,7 +7,10 @@
 #   1. render PNG from report[_weekly].json (build_and_render.py --render-only)
 #   2. send PNG to the Zalo TEAM AI group (threadType=Group via X-GoClaw-User-Id: group:<id>)
 #   3. mark published IMMEDIATELY (atomic os.replace) — crash-window against double-send
-#   4. daily only: write % back to the weekly sheet (best-effort; never into a past-week tab)
+#   4. daily only: write % back to the weekly sheet (best-effort; never into a past-week tab), then
+#      approved history + learned bindings. Each post-send step is recorded in active.json
+#      ("steps"); a re-DUYỆT after a partial failure finishes the missing steps WITHOUT resending
+#      Zalo.
 #   5. post the PNG back to the Discord review channel as a receipt
 #
 # Render failure -> state STAYS review + error posted to Discord; re-DUYỆT retries.
@@ -53,14 +56,18 @@ DISCORD_TARGET = "1512686472334147735"
 TZ = timezone(timedelta(hours=7))
 
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
-STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP"}
+STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP",
+                "ongoing": "Vận hành"}
 
 
 def log(*a: object) -> None:
     print("[publish]", *a, file=sys.stderr)
 
 
-def _pct(item: dict) -> int:
+def _pct(item: dict) -> int | None:
+    """None for ongoing work (no finish line) so no % cell is written for it."""
+    if item.get("progress") == "ongoing":
+        return None
     try:
         return max(0, min(100, int(round(float(item.get("percent"))))))
     except (TypeError, ValueError):
@@ -131,10 +138,23 @@ def post_discord(message: str, reason: str) -> None:
         log("discord post failed:", exc)
 
 
+def _plan_of(it: dict) -> str:
+    """Items from reports generated before the plan-centric pipeline carry no "plan" field."""
+    if it.get("plan"):
+        return it["plan"]
+    return "planned" if it.get("sheet_match") and not it.get("is_new") else "unplanned"
+
+
+def _wants_append(it: dict) -> bool:
+    if it.get("plan"):
+        return bool(it.get("add_sheet"))  # new pipeline: only an explicit "thêm: U<n>"
+    return not it.get("skip_sheet")       # legacy draft: the old opt-out semantics still apply
+
+
 def write_sheet_daily(report: dict) -> str:
-    """Daily % write-back. Guard: ensure_current_week_tab — NEVER write into a past-week tab
-    (find_week_tab falls back to last week when the current tab is missing). Monotonic: an
-    update never lowers an existing sheet %."""
+    """Daily % write-back, into the tab the user REVIEWED and only while it is still this week's
+    tab (a Friday draft approved on Monday must not land in the new week). Monotonic: an update
+    never lowers an existing sheet %. Ongoing rows get status "Vận hành" (if blank), never a %."""
     items = report.get("items", [])
     if not items:
         return "no items"
@@ -142,6 +162,11 @@ def write_sheet_daily(report: dict) -> str:
     import daily_report_sheet as drs  # lazily — Zalo publish must work even if sheet libs fail
 
     today = datetime.now(TZ).date()
+    current = drs.tab_name(*drs.week_bounds(today))
+    reviewed = report.get("sheet_tab")
+    if reviewed and reviewed != current:
+        raise RuntimeError(f"STALE_TAB bản nháp thuộc tab '{reviewed}', tuần này là '{current}' — "
+                           "tạo lại báo cáo, không ghi sheet")
     tab = drs.ensure_current_week_tab(today)
     pct_col = drs.ensure_pct_column(tab)
     tasks = drs.read_tasks(tab["title"])["tasks"]
@@ -149,36 +174,76 @@ def write_sheet_daily(report: dict) -> str:
 
     updates, new_tasks = [], []
     for it in items:
+        plan = _plan_of(it)
         p = _pct(it)
         status = STATUS_LABEL.get(it.get("progress", "doing"), "WIP")
         sm = it.get("sheet_match")
         t = row_by_name.get(drs._norm_name(sm)) if sm else None
-        if t and not it.get("is_new"):
-            if t.get("pct") is not None and p < t["pct"]:
-                p = t["pct"]  # % không lùi (re-check session must not regress a done task)
+        if plan == "ongoing":
+            if t and not t.get("status"):
+                updates.append({"row": t["row"], "percent": None, "status": STATUS_LABEL["ongoing"]})
+        elif plan == "planned" and t:
+            if (p is not None and t.get("pct") is not None and p < t["pct"]
+                    and not it.get("user_override")):
+                p = t["pct"]  # % không lùi, trừ khi chính bạn hạ % lúc sửa bản nháp
             updates.append({"row": t["row"], "percent": p, "status": status})
-        elif it.get("skip_sheet"):
-            # user replied "bỏ mới: N" during review -> report keeps the item, sheet does not
-            log(f"skip sheet append (user rejected): {it.get('title', '')}")
-        else:
+        elif plan == "planned":
+            log(f"row '{sm}' không còn trong tab — bỏ qua: {it.get('title', '')}")
+        elif plan == "unplanned" and _wants_append(it):
             new_tasks.append({"name": it.get("title", ""), "percent": p,
                               "status": status, "note": it.get("note", "")})
+        elif plan == "unplanned":
+            log(f"not appended (no 'thêm'): {it.get('title', '')}")
     res = drs.write_progress(tab, pct_col, updates, new_tasks)
-
-    # Remember the bindings the user just approved so tomorrow's run matches them deterministically
-    # instead of re-asking the agent (whose answer varies between runs).
-    import daily_report_run as dr
-    learned = {dr._norm(it["group_key"]): it["sheet_match"]
-               for it in items
-               if it.get("sheet_match") and not it.get("is_new") and it.get("group_key")}
-    if learned:
-        try:
-            dr.save_learned(learned)
-            log(f"learned {len(learned)} binding(s)")
-        except Exception as exc:  # noqa: BLE001
-            log(f"save learned bindings failed: {exc}")
-
     return f"tab='{tab['title']}' updated={res['updated']} appended={res['appended']}"
+
+
+def learn_bindings(report: dict) -> int:
+    """Remember approved group -> row bindings (every group rolled into a row, not just the first)
+    so tomorrow's run matches them deterministically instead of re-asking the agent."""
+    import daily_report_run as dr
+    import plan_pipeline as pp
+    learned: dict = {}
+    for it in report.get("items", []):
+        row = it.get("sheet_match")
+        if not row or _plan_of(it) == "unplanned":
+            continue
+        for key in it.get("group_keys") or [it.get("group_key")]:
+            if key:
+                learned[pp.norm(key)] = row  # same normaliser bind_groups reads with
+    if learned:
+        dr.save_learned(learned)
+    return len(learned)
+
+
+def post_send_steps(kind: str, report: dict, active: dict, active_path: str) -> str:
+    """Sheet, history, learned — each recorded in active["steps"] once done, so a retry only runs
+    what is missing. Returns a short status line."""
+    if kind != "daily":
+        return ""
+    steps = active.setdefault("steps", {})
+    msgs = []
+    for name, fn in (("sheet", lambda: write_sheet_daily(report)),
+                     ("history", lambda: _write_history(report)),
+                     ("learned", lambda: f"learned={learn_bindings(report)}")):
+        if steps.get(name):
+            continue
+        try:
+            msgs.append(f"{name}: {fn()}")
+            steps[name] = True
+        except Exception as exc:  # noqa: BLE001
+            msgs.append(f"{name} FAIL {exc}")
+            log(f"{kind}: {name} failed: {exc}")
+            if name == "sheet":
+                break  # history/learned describe what reached the sheet — not without it
+        _write_json_atomic(active_path, active)
+    return " | ".join(msgs)
+
+
+def _write_history(report: dict) -> str:
+    sys.path.insert(0, WORK)
+    import plan_pipeline as pp
+    return pp.write_history(report, report.get("report_date") or datetime.now(TZ).date().isoformat())
 
 
 def publish_one(kind: str, active_path: str, report_path: str, no_send: bool) -> str:
@@ -188,6 +253,19 @@ def publish_one(kind: str, active_path: str, report_path: str, no_send: bool) ->
     with open(active_path, encoding="utf-8") as fh:
         active = json.load(fh)
     if active.get("stage") == "published":
+        steps = active.get("steps")
+        if kind == "daily" and steps is not None and not all(
+                steps.get(k) for k in ("sheet", "history", "learned")):
+            # Zalo already went out; finish only what failed last time
+            with open(report_path, encoding="utf-8") as fh:
+                report = json.load(fh)
+            msg = post_send_steps(kind, report, active, active_path)
+            log(f"{kind}: resumed post-send steps: {msg}")
+            if not all(active["steps"].get(k) for k in ("sheet", "history", "learned")):
+                post_discord(f"[{kind}-report] Ghi sheet/lịch sử vẫn lỗi: {msg[:300]}",
+                             f"{kind}-report post-send error")
+                return "fail:post-send"
+            return "resumed"
         return "already"
     if active.get("stage") != "review":
         return "none"
@@ -221,15 +299,15 @@ def publish_one(kind: str, active_path: str, report_path: str, no_send: bool) ->
     active["stage"] = "published"
     active["png_path"] = png
     active["published_at"] = datetime.now(TZ).isoformat()
+    if kind == "daily":
+        active["steps"] = {"sheet": False, "history": False, "learned": False}
     _write_json_atomic(active_path, active)
 
-    sheet_msg = ""
-    if kind == "daily":
-        try:
-            sheet_msg = write_sheet_daily(report)
-        except Exception as exc:  # noqa: BLE001
-            sheet_msg = f"SHEET_WRITE_FAIL {exc}"
-            log(sheet_msg)
+    sheet_msg = post_send_steps(kind, report, active, active_path)
+    if kind == "daily" and not all(active["steps"].values()):
+        post_discord(f"[{kind}-report] Đã gửi Zalo nhưng ghi sheet/lịch sử lỗi: {sheet_msg[:300]} — "
+                     "reply DUYỆT lần nữa để chạy lại phần lỗi (không gửi Zalo lại).",
+                     f"{kind}-report post-send error")
 
     # receipt back to the review channel (image the group actually received)
     post_discord(f"MEDIA:{png}", f"{kind}-report published receipt")

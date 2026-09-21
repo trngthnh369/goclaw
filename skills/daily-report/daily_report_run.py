@@ -15,8 +15,13 @@
 #   5. write report.json + active.json (stage=review) + post TEXT review to Discord
 #   -> user replies DUYỆT  -> daily_report_publish.py renders PNG + sends Zalo + sheet write-back.
 #
-# Flags: --hours N | --require-llm | --dry-run (print items, no state/post) | --no-post (state,
-#        no Discord — Friday batch) | --post-pending (post any unposted review states — Friday)
+# 2026-09-21 (plan-centric, see plan_pipeline.py): groups are bound many-to-one to the rows planned
+# in the weekly tab, % is judged per planned row against its goal from the sheet baseline, work
+# outside the plan is listed as "Ngoài kế hoạch" (U<n>) and reaches the sheet only on "thêm: U<n>".
+#
+# Flags: --hours N | --require-llm | --dry-run (print items, no state/post) | --out FILE (dry-run:
+#        write the full report JSON there) | --no-post (state, no Discord — Friday batch) |
+#        --post-pending (post any unposted review states — Friday)
 import json
 import os
 import re
@@ -27,6 +32,7 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import daily_report_sheet as drs  # noqa: E402  (reads/writes the weekly task sheet)
+import plan_pipeline as pp  # noqa: E402  (plan-centric binding + progress)
 
 WORK = "/app/workspace/_daily-report"
 DIGEST = f"{WORK}/digest_sessions.py"
@@ -66,6 +72,12 @@ WORK_FILTER = os.environ.get("DAILY_REPORT_WORK_FILTER", r"projects\work").lower
 
 TZ = timezone(timedelta(hours=7))
 LLM_CHUNK = 25  # max task groups per describe call (3x sources -> avoid mid-array truncation)
+# Whole-run budget: Zip's exec is cut at 600s. Digest + two LLM calls must finish inside it, so each
+# call gets min(LLM_CALL_MAX, time left) and the run falls back instead of being killed mid-way.
+RUN_BUDGET_S = 480
+LLM_CALL_MAX = 240
+LLM_MIN_S = 20
+_RUN_START = datetime.now(timezone.utc)
 
 
 def is_work_project(path: object) -> bool:
@@ -181,9 +193,11 @@ def synth_host_sessions(hd: dict | None, start_idx: int, since: datetime | None 
             continue
         out.append({
             "idx": idx, "project": r.get("project_label", ""), "src": "antigravity",
+            "uid": f"ag:{r.get('ts', '')}:{str(r.get('title') or '')[:40]}",
             "name": str(r.get("title") or "antigravity session"),
             "edits": int(r.get("steps") or 0),
             "intent": [str(r.get("title") or "")[:140]] + [str(x)[:140] for x in (r.get("intents") or [])[:3]],
+            "outcome": "",
         })
         idx += 1
     for g in hd.get("git", []):
@@ -194,9 +208,12 @@ def synth_host_sessions(hd: dict | None, start_idx: int, since: datetime | None 
             continue
         out.append({
             "idx": idx, "project": g.get("repo", ""), "src": "git",
+            "uid": f"git:{g.get('repo', '')}:{max((str(c.get('ts', '')) for c in commits), default='')}",
             "name": f"{g.get('repo', '')} (commits)",
             "edits": len(commits),
             "intent": [m[:140] for m in msgs],
+            # a commit message IS a record of work done, not a request
+            "outcome": "; ".join(m[:120] for m in msgs)[:400],
         })
         idx += 1
     if dropped:
@@ -220,14 +237,16 @@ def flatten_sessions(projects: list) -> tuple[list, list]:
             name = s.get("title") or s.get("agent") or s.get("session_id") or "session"
             sessions.append({
                 "idx": len(sessions),
+                # session + last-event time: re-running the same window gives the same uid (so an
+                # approved unit is not counted twice), the next day's activity gives a new one
+                "uid": f"claude:{s.get('session_id', '')}:{s.get('to', '')}",
                 "project": label,
                 "src": "claude",
                 "name": str(name),
                 "edits": tools.get("Edit", 0) + tools.get("Write", 0),
-                # 6x200 rather than 3x140: the LLM decides task identity and sheet binding from
-                # this text, and three truncated prompts were not enough to tell two tasks in the
-                # same repo apart (it invented generic names like "Công việc không xác định").
+                # digest sends first 3 + last 3 prompts: what was asked AND where it ended up
                 "intent": [str(x)[:200] for x in (s.get("prompts") or [])[:6]],
+                "outcome": str(s.get("outcome") or "")[:400],
             })
     return sessions, order
 
@@ -252,6 +271,16 @@ def _pattern_hit(pat: str, hay: str) -> bool:
     return p in hay
 
 
+def best_alias(session: dict, aliases: list) -> dict | None:
+    hay = (session["name"] + " " + " ".join(session.get("intent", []))).lower()
+    best_len, best = -1, None
+    for a in aliases:
+        for pat in a.get("match", []):
+            if pat and len(pat) > best_len and _pattern_hit(pat, hay):
+                best_len, best = len(pat), a
+    return best
+
+
 def resolve_task(session: dict, aliases: list) -> tuple[str | None, str | None, bool]:
     """Map 1 session -> (task hiển thị, tên-trong-sheet|None, known).
 
@@ -259,12 +288,7 @@ def resolve_task(session: dict, aliases: list) -> tuple[str | None, str | None, 
     made the order of task_aliases.json load-bearing: the catch-all {"match":["openclaw"]} sat above
     the specific entries, so any session merely mentioning openclaw was relabelled "Vận hành
     OpenClaw server" and its real work vanished into that bucket."""
-    hay = (session["name"] + " " + " ".join(session.get("intent", []))).lower()
-    best_len, best = -1, None
-    for a in aliases:
-        for pat in a.get("match", []):
-            if pat and len(pat) > best_len and _pattern_hit(pat, hay):
-                best_len, best = len(pat), a
+    best = best_alias(session, aliases)
     if best is None:
         return (session["name"], None, False)
     if best.get("ignore"):
@@ -282,7 +306,7 @@ def is_junk_group(g: dict) -> str | None:
     with almost no intent text makes the LLM invent a task ("Công việc không xác định / 5%")."""
     if g["known"]:
         return None  # an alias vouched for it — never drop
-    text = " ".join(str(x) for x in g["intents"]).strip()
+    text = " ".join(str(x) for x in g["intents"] + g.get("outcomes", [])).strip()
     if HEX_NAME_RE.match(g["name"].strip()) and len(text) < MIN_INTENT_CHARS:
         return "session-id name, no usable intent"
     if len(text) < MIN_INTENT_CHARS:
@@ -295,17 +319,27 @@ def group_tasks(sessions: list, aliases: list) -> list:
     sources are kept SEPARATE (no label-merge: one project = many tasks); provenance in srcs.
     Junk groups (session-id names / no usable intent) are dropped BEFORE the LLM so they can
     never become a report item nor an appended sheet row."""
-    groups: dict[str, dict] = {}
+    groups: dict = {}
     order: list = []
     for s in sessions:
         name, sheet, known = resolve_task(s, aliases)
         if name is None:  # ignored alias
             continue
-        if name not in groups:
-            groups[name] = {"name": name, "sheet": sheet, "known": known, "intents": [], "srcs": []}
-            order.append(name)
-        g = groups[name]
+        # alias groups merge across projects (the alias names the task); raw session titles only
+        # merge inside one project — two repos can each have a session called "Fix lỗi đồng bộ"
+        key = name if known else (s.get("project", ""), name)
+        if key not in groups:
+            alias = best_alias(s, aliases) if known else None
+            groups[key] = {"name": name, "sheet": sheet, "known": known, "intents": [], "srcs": [],
+                           "project": s.get("project", ""), "outcomes": [], "uids": [],
+                           "ongoing": bool(alias and alias.get("ongoing"))}
+            order.append(key)
+        g = groups[key]
         g["intents"].extend(s.get("intent", []))
+        if s.get("outcome"):
+            g["outcomes"].append(s["outcome"])
+        if s.get("uid"):
+            g["uids"].append(s["uid"])
         src = s.get("src", "claude")
         if src not in g["srcs"]:
             g["srcs"].append(src)
@@ -317,7 +351,7 @@ def group_tasks(sessions: list, aliases: list) -> list:
     for n in order:
         reason = is_junk_group(groups[n])
         if reason:
-            log(f"drop junk group '{n}': {reason}")
+            log(f"drop junk group '{groups[n]['name']}': {reason}")
             continue
         kept.append(groups[n])
     return kept
@@ -379,15 +413,33 @@ def _describe_items(groups: list, by_idx: dict) -> list:
     return items
 
 
+def llm_timeout() -> int:
+    """Seconds this LLM call may take: min(LLM_CALL_MAX, time left in RUN_BUDGET_S)."""
+    left = RUN_BUDGET_S - (datetime.now(timezone.utc) - _RUN_START).total_seconds()
+    if left < LLM_MIN_S:
+        raise TimeoutError(f"run budget exhausted ({int(left)}s left)")
+    return int(min(LLM_CALL_MAX, left))
+
+
 def llm_chat(messages: list) -> str:
+    timeout = llm_timeout()
     if LLM_URL:
         data = json.dumps({"messages": messages}).encode("utf-8")
         req = urllib.request.Request(LLM_URL, data=data,
                                      headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]["content"]
     payload = {"model": f"agent:{ANALYST_AGENT}", "stream": False, "messages": messages}
-    return http_post("/v1/chat/completions", payload, timeout=300)["choices"][0]["message"]["content"]
+    return http_post("/v1/chat/completions", payload, timeout=timeout)["choices"][0]["message"]["content"]
+
+
+def llm_text(prompt: str) -> str:
+    """Single-prompt LLM call for plan_pipeline; '' on any failure (callers treat it as no answer)."""
+    try:
+        return llm_chat([{"role": "user", "content": prompt}])
+    except Exception as exc:  # noqa: BLE001
+        log("LLM call failed:", exc)
+        return ""
 
 
 def _describe_chunk(feed: list) -> dict | None:
@@ -765,7 +817,49 @@ def write_review_state(report: dict) -> None:
     })
 
 
-PROGRESS_LABEL = {"done": "Xong", "doing": "Đang làm", "blocked": "Blocked", "new": "Mới"}
+PROGRESS_LABEL = {"done": "Xong", "doing": "Đang làm", "blocked": "Blocked", "new": "Mới",
+                  "ongoing": "Vận hành"}
+
+
+def _pct_text(it: dict) -> str:
+    if it.get("progress") == "ongoing":
+        return ""
+    p = it.get("percent")
+    if p is None:
+        return "?% "
+    prev = it.get("prev_pct")
+    return f"{prev}% → {p}% " if isinstance(prev, int) and prev != p else f"{p}% "
+
+
+def _plan_review_lines(report: dict) -> list:
+    """Three blocks keyed by stable ids (P/O/U): 'thêm: U2' and edits address an id, never a
+    position, so reordering or deleting an item cannot shift consent onto another one."""
+    items = report.get("items", [])
+    lines = [f"📋 **Báo cáo công việc {report.get('report_date', '')}** — bản nháp chờ DUYỆT "
+             f"({report.get('source', '')}, tab {report.get('sheet_tab') or '?'})."]
+    blocks = (("planned", "📌 **Kế hoạch tuần**"), ("ongoing", "⚙️ **Vận hành**"),
+              ("unplanned", "🆕 **Ngoài kế hoạch** (chưa ghi sheet)"))
+    for plan, header in blocks:
+        part = [it for it in items if it.get("plan") == plan]
+        if not part:
+            continue
+        lines.append(f"\n{header}")
+        for it in part:
+            label = PROGRESS_LABEL.get(it.get("progress", "doing"), "Đang làm")
+            flag = " ⚠️" if it.get("uncertain") else ""
+            add = " ✅ sẽ thêm vào sheet" if it.get("add_sheet") else ""
+            units = f" · {it['units']} phiên" if it.get("units", 0) > 1 else ""
+            lines.append(f"{it.get('id', '')}. **{it.get('title', '')}** — {_pct_text(it)}{label}"
+                         f"{units}{add}{flag}")
+            if it.get("note"):
+                lines.append(f"   ↳ {it['note']}")
+            for s in it.get("sub") or []:
+                lines.append(f"      • {s}")
+            if it.get("remaining"):
+                lines.append(f"   ⏭ còn: {it['remaining']}")
+            if it.get("flags"):
+                lines.append(f"   ⚠️ {'; '.join(it['flags'])}")
+    return lines
 
 
 def build_review_text(report: dict) -> str:
@@ -778,14 +872,15 @@ def build_review_text(report: dict) -> str:
             lines.append("⚠️ % chưa refresh (LLM lỗi) — số liệu lấy theo sheet hiện có.")
         secs = report.get("sections", {})
         for key, label in (("done", "✅ Hoàn thành"), ("doing", "🔨 Đang làm"),
-                           ("blocked", "⛔ Blocked"), ("nopct", "❔ Chưa có %")):
+                           ("blocked", "⛔ Blocked"), ("ongoing", "⚙️ Vận hành"),
+                           ("nopct", "❔ Chưa có %")):
             rows = secs.get(key, [])
             if not rows:
                 continue
             lines.append(f"\n**{label}** ({len(rows)})")
             for r in rows:
                 pct = r.get("percent")
-                pct_s = f" — {pct}%" if pct is not None else ""
+                pct_s = f" — {pct}%" if pct is not None and key != "ongoing" else ""
                 note = f" · {r['note']}" if r.get("note") else ""
                 lines.append(f"• {r.get('title', '')}{pct_s}{note}")
         idle = int(secs.get("idle_count") or 0)
@@ -796,16 +891,21 @@ def build_review_text(report: dict) -> str:
             lines.append(f"\n🆕 **Task mới phát hiện, CHƯA ghi sheet** ({len(prop)}): "
                          + "; ".join(str(x) for x in prop[:10])
                          + ("…" if len(prop) > 10 else ""))
+    elif any("plan" in it for it in report.get("items", [])):
+        lines.extend(_plan_review_lines(report))
     else:
         date_s = report.get("report_date", "")
         src = report.get("source", "")
         lines.append(f"📋 **Báo cáo công việc {date_s}** — bản nháp chờ DUYỆT ({src}).")
         for i, it in enumerate(report.get("items", []), 1):
-            try:
-                pct = int(round(float(it.get("percent"))))
-            except (TypeError, ValueError):
-                pct = DEFAULT_PCT.get(it.get("progress", "doing"), 50)
             label = PROGRESS_LABEL.get(it.get("progress", "doing"), "Đang làm")
+            if it.get("progress") == "ongoing":
+                pct_s = ""  # operational work: no % (a default 50% would be invented)
+            else:
+                try:
+                    pct_s = f"{int(round(float(it.get('percent'))))}% "
+                except (TypeError, ValueError):
+                    pct_s = f"{DEFAULT_PCT.get(it.get('progress', 'doing'), 50)}% "
             flag = " ⚠️" if it.get("uncertain") else ""
             if it.get("skip_sheet"):
                 new = " (mới — ĐÃ BỎ, không ghi sheet)"
@@ -813,7 +913,7 @@ def build_review_text(report: dict) -> str:
                 new = " (mới)"
             else:
                 new = ""
-            lines.append(f"{i}. **{it.get('title', '')}** — {pct}% {label}{new}{flag}")
+            lines.append(f"{i}. **{it.get('title', '')}** — {pct_s}{label}{new}{flag}")
             if it.get("note"):
                 lines.append(f"   ↳ {it['note']}")
         # New tasks are the ONLY items that add rows to the weekly sheet. Surfacing them as an
@@ -824,6 +924,9 @@ def build_review_text(report: dict) -> str:
         if proposed:
             lines.append(f"\n🆕 **Task MỚI sẽ được thêm vào sheet** (mục {', '.join(proposed)}). "
                          f"Không muốn thêm mục nào → reply **'bỏ mới: <số>, <số>'**.")
+    if any(it.get("plan") == "unplanned" for it in report.get("items", [])):
+        lines.append("\n🆕 Muốn thêm việc ngoài kế hoạch vào sheet → reply **'thêm: U1, U3'** "
+                     "(gỡ: **'bỏ thêm: U1'**).")
     lines.append("\n➡️ Reply **DUYỆT** để render ảnh + đăng nhóm TEAM AI, hoặc **'sửa: <yêu cầu>'** "
                  "(daily) / **'sửa tuần: <yêu cầu>'** (weekly).")
     return "\n".join(lines)
@@ -881,6 +984,27 @@ def post_pending() -> int:
         posted += 1
     print(f"OK posted={posted}")
     return posted
+
+
+def analyze(groups: list, sheet_tasks: list, aliases: list, today) -> tuple[list, str]:
+    """Plan-centric analysis (plan_pipeline): bind groups many-to-one to planned rows, then one
+    progress call for every row with evidence. Returns (items, source)."""
+    history = pp.load_history(today)
+    groups = pp.drop_counted(groups, pp.counted_uids(history))
+    rows = pp.plan_rows(sheet_tasks, aliases)
+    binding, desc, bind_src = pp.bind_groups(groups, rows, load_learned(), llm_text)
+    for gidx, b in binding.items():
+        g = groups[gidx]
+        where = rows[b["sidx"]]["name"] if b["kind"] == "row" else b["kind"]
+        log(f"bind [{b.get('tier', '-')}] '{g['name']}' ({g.get('project', '')}) -> {where}"
+            + (f" ({b['reason']})" if b.get("reason") else ""))
+    feeds = pp.row_feeds(groups, rows, binding, history)
+    row_desc = pp.describe_rows(feeds, llm_text)
+    if row_desc is None:
+        log(f"row progress: LLM unavailable for {len(feeds)} rows — keeping baseline %")
+    items = pp.build_plan_items(groups, rows, binding, desc, row_desc, history)
+    source = "LLM" if bind_src == "LLM" and row_desc is not None else "fallback"
+    return items, source
 
 
 def fmt_window(digest: dict) -> tuple[str, str]:
@@ -972,18 +1096,10 @@ def main():
     groups = group_tasks(sessions, aliases)
     log(f"aliases: {len(aliases)} | task groups: {len(groups)} ({', '.join(g['name'] for g in groups)})")
 
-    sheet_pct = {_norm(t["name"]): t.get("pct") for t in sheet_tasks}
-    items = llm_describe(groups, sheet_pct, sheet_tasks)
-    source = "LLM"
-    if items is None:
-        if require_llm:
-            log("LLM unavailable and --require-llm set: exit 3 so wrapper can retry")
-            raise SystemExit(3)
-        items = fallback_describe(groups)
-        source = "fallback"
-    match_sheet(items, sheet_tasks)
-    items = merge_duplicate_items(items)   # after match_sheet: bindings decide what may merge
-    enforce_monotonic(items, sheet_tasks)
+    items, source = analyze(groups, sheet_tasks, aliases, today)
+    if source == "fallback" and require_llm:
+        log("LLM unavailable and --require-llm set: exit 3 so wrapper can retry")
+        raise SystemExit(3)
     log(f"analysis source: {source} | items: {len(items)}")
 
     report = {
@@ -995,8 +1111,12 @@ def main():
     }
 
     if dry_run:
+        if "--out" in sys.argv:  # full report for an offline render check (--render-only)
+            with open(sys.argv[sys.argv.index("--out") + 1], "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(report, ensure_ascii=False, indent=1))
         print(json.dumps({"items": items, "duplicate_candidates": duplicate_candidates(groups)},
                          ensure_ascii=False, indent=1))
+        print(build_review_text(report), file=sys.stderr)
         return
 
     write_review_state(report)
