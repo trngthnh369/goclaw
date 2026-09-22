@@ -132,7 +132,7 @@ def edge_prompts(prompts: list) -> list:
         picked = ordered
     else:
         picked = ordered[:EDGE_PROMPTS] + ordered[-EDGE_PROMPTS:]
-    return [redact(t) for t in picked]
+    return picked  # already redacted before truncation at collection time
 
 
 def pick_outcome(texts: list) -> str:
@@ -142,8 +142,8 @@ def pick_outcome(texts: list) -> str:
     for _ts, t in ordered:
         s = t.strip()
         if len(s) >= OUTCOME_MIN_CHARS and not s.rstrip("*_` ").endswith("?"):
-            return redact(s[:OUTCOME_CHARS])
-    return redact(ordered[0][1].strip()[:OUTCOME_CHARS]) if ordered else ""
+            return redact(s)[:OUTCOME_CHARS]
+    return redact(ordered[0][1].strip())[:OUTCOME_CHARS] if ordered else ""
 
 
 def summarize(args):
@@ -262,7 +262,7 @@ def summarize(args):
                     sess["user_turns"] += 1
                     # (ts, text): files are walked in arbitrary order, so "first"/"last" must come
                     # from timestamps, not from append order
-                    sess["prompts"].append((ts, txt[:PROMPT_SNIPPET_CHARS]))
+                    sess["prompts"].append((ts, redact(txt)[:PROMPT_SNIPPET_CHARS]))
             elif t == "assistant" and isinstance(msg, dict):
                 sess["assistant_turns"] += 1
                 content = msg.get("content")
@@ -286,7 +286,7 @@ def summarize(args):
                             if len(sess["assistant_snippets"]) < 3:
                                 sess["assistant_snippets"].append(redact(snip[:ASSISTANT_SNIPPET_CHARS]))
                             texts = sess["assistant_texts"]
-                            texts.append((ts, snip[:OUTCOME_CHARS * 2]))
+                            texts.append((ts, redact(snip)[:OUTCOME_CHARS * 2]))
                             if len(texts) > OUTCOME_KEEP * 4:  # bounded: keep the newest only
                                 texts.sort(key=lambda x: x[0])
                                 del texts[:-OUTCOME_KEEP]

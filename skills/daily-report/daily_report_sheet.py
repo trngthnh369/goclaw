@@ -203,7 +203,7 @@ def resolve_columns(header: list) -> dict:
     return cols
 
 
-def _cell(r: list, idx: object) -> str:
+def _cell(r: list, idx: int | None) -> str:
     if idx is None or idx >= len(r):
         return ""
     return str(r[idx]).strip()
@@ -253,6 +253,17 @@ def ensure_pct_column(tab: dict) -> str:
     return read_tasks(tab["title"])["pct_col"] or col  # re-resolve after the insert
 
 
+FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+TEXT_KEYS = ("name", "note", "owner")
+
+
+def safe_text(val: str) -> str:
+    """Writes use valueInputOption=USER_ENTERED, so a cell starting with = + - @ would be parsed as
+    a formula. Task names/notes come from session text and LLM output: prefix an apostrophe (shown
+    as plain text by Sheets) instead of letting them execute."""
+    return "'" + val if val.startswith(FORMULA_LEAD) else val
+
+
 def build_row(cols: dict, width: int, values: dict) -> list:
     """One sheet row from {logical_key: value}, placed by header. Keys without a column are dropped
     (never shifted into a neighbour). "goal" is not accepted: Mô tả belongs to the user."""
@@ -261,11 +272,11 @@ def build_row(cols: dict, width: int, values: dict) -> list:
     for key, val in values.items():
         if key == "goal" or val is None or key not in cols:
             continue
-        row[cols[key]] = val
+        row[cols[key]] = safe_text(str(val)) if key in TEXT_KEYS else val
     return row
 
 
-def fmt_pct(p: object) -> str | None:
+def fmt_pct(p: int | None) -> str | None:
     return None if p is None else f"{int(p)}%"
 
 

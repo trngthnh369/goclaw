@@ -93,3 +93,12 @@ def test_backup_and_staging_tabs_are_not_weekly_tabs(sheets):
 
     assert drs.find_week_tab(date(2026, 9, 23))["title"] == TAB
     assert drs._week_bounds("_bak (21-27/09)", 2026) is None
+
+
+def test_appended_text_starting_like_a_formula_is_neutralised(sheets):
+    import daily_report_sheet as drs
+    tab = _new_layout_tab(sheets)
+
+    drs.write_progress(tab, "E", [], [{"name": "=IMPORTXML(\"x\")", "percent": 10, "status": "WIP"}])
+
+    assert sheets.tabs[TAB][-1][1] == "'=IMPORTXML(\"x\")"

@@ -922,8 +922,7 @@ def build_review_text(report: dict) -> str:
         proposed = [str(i) for i, it in enumerate(report.get("items", []), 1)
                     if it.get("is_new") and not it.get("skip_sheet")]
         if proposed:
-            lines.append(f"\n🆕 **Task MỚI sẽ được thêm vào sheet** (mục {', '.join(proposed)}). "
-                         f"Không muốn thêm mục nào → reply **'bỏ mới: <số>, <số>'**.")
+            lines.append(f"\n🆕 **Task MỚI sẽ được thêm vào sheet** (mục {', '.join(proposed)}).")
     if any(it.get("plan") == "unplanned" for it in report.get("items", [])):
         lines.append("\n🆕 Muốn thêm việc ngoài kế hoạch vào sheet → reply **'thêm: U1, U3'** "
                      "(gỡ: **'bỏ thêm: U1'**).")

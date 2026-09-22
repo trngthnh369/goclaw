@@ -61,7 +61,9 @@ def merge_daily(edited: dict, current: dict) -> dict:
             merged.pop("add_sheet", None)
         if merged["plan"] == "ongoing":
             merged["percent"], merged["progress"] = None, "ongoing"
-        elif merged.get("percent") != base.get("percent"):
+        elif "percent" not in it or it["percent"] is None:
+            merged["percent"] = base.get("percent")  # dropped by the edit, not a user decision
+        elif it["percent"] != base.get("percent"):
             merged["user_override"] = True
         out.append(merged)
     edited["items"] = out

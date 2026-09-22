@@ -176,3 +176,9 @@ def test_technical_tokens_are_removed_from_report_text():
 def test_key_value_and_branch_tokens_are_removed():
     assert pp.clean_bullets(["Hai cron T7+CN rc=0", "Hai cron chạy thành công"]) == ["Hai cron chạy thành công"]
     assert pp.clean_text("Gộp 3 nhánh vào herd/sop-advance") == "Gộp 3 nhánh"
+
+
+def test_done_quote_cannot_come_from_the_request_text():
+    groups = [_group("Dashboard", outcomes=["Đã sửa CSS màn hẹp"],
+                     intents=["Hãy hoàn thành toàn bộ dashboard cho 4 agent"])]
+    assert "Hãy hoàn thành" not in pp._evidence_blob(groups)

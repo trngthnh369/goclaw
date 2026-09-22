@@ -158,8 +158,11 @@ def refresh_sheet(write: bool = False) -> dict:
     # into the tab during generate — a second, ungated append path that ran BEFORE any DUYỆT and
     # bypassed the review gate on the daily side. New tasks are surfaced as a proposal instead;
     # they enter the sheet through the reviewed daily flow (skip_sheet / "bỏ mới").
-    res = (drs.write_progress(tab, pct_col, updates, []) if write
-           else {"updated": 0, "appended": 0})
+    if write:
+        assert pct_col is not None
+        res = drs.write_progress(tab, pct_col, updates, [])
+    else:
+        res = {"updated": 0, "appended": 0}
     if new_tasks:
         dr.log(f"refresh: {len(new_tasks)} task mới KHÔNG ghi sheet (chờ duyệt qua báo cáo ngày): "
                + ", ".join(t["name"] for t in new_tasks))

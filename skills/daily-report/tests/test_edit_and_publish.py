@@ -115,3 +115,10 @@ def test_republish_after_partial_failure_resumes_without_resending(sheets, monke
 
     assert res == "resumed" and ran == ["sheet", "history", "learned"]
     assert all(json.loads(active_path.read_text())["steps"].values())
+
+
+def test_edit_that_drops_percent_inherits_it_without_override(sheets):
+    import edit_repost as er
+    out = er.merge_daily({"items": [{"id": "P1", "title": "Dashboard", "progress": "doing"}]},
+                         _report())["items"][0]
+    assert out["percent"] == 75 and "user_override" not in out

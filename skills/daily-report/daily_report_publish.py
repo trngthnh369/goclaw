@@ -231,7 +231,7 @@ def post_send_steps(kind: str, report: dict, active: dict, active_path: str) -> 
         try:
             msgs.append(f"{name}: {fn()}")
             steps[name] = True
-        except Exception as exc:  # noqa: BLE001
+        except (Exception, SystemExit) as exc:  # noqa: BLE001  (sheet helpers raise SystemExit)
             msgs.append(f"{name} FAIL {exc}")
             log(f"{kind}: {name} failed: {exc}")
             if name == "sheet":

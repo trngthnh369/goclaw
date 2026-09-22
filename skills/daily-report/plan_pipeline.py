@@ -309,7 +309,9 @@ def enforce_progress(item: dict, prev_pct: int | None, evidence: str, has_goal: 
 # ---- assembly -----------------------------------------------------------------------------------
 
 def _evidence_blob(gs: list) -> str:
-    return " ".join(" ".join(g.get("outcomes", [])) + " " + " ".join(g.get("intents", [])) for g in gs)
+    """What a done_quote is verified against: session outcomes and commit messages (git outcomes
+    ARE the commits). Prompts are excluded — echoing the request must not prove completion."""
+    return " ".join(o for g in gs for o in g.get("outcomes", []))
 
 
 def _row_feed(row: dict, gs: list, base: dict) -> dict:
