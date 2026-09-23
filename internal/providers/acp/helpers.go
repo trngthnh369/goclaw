@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // contextKey is the unexported type for context values set by this package.
@@ -40,6 +42,7 @@ var sensitiveEnvPrefixes = []string{
 // These are required for Google/GCP authentication in ACP subprocesses (e.g., Gemini).
 var allowedEnvExact = map[string]bool{
 	"GOOGLE_API_KEY":                 true,
+	"GEMINI_API_KEY":                 true,
 	"GOOGLE_APPLICATION_CREDENTIALS": true,
 	"GOOGLE_CLOUD_PROJECT":           true,
 	"GCP_PROJECT":                    true,
@@ -60,7 +63,7 @@ var sensitiveEnvExact = map[string]bool{
 func filterACPEnv(environ []string) []string {
 	var filtered []string
 	for _, e := range environ {
-		key, _, _ := strings.Cut(e, "=")
+		key, value, _ := strings.Cut(e, "=")
 		upper := strings.ToUpper(key)
 		if allowedEnvExact[upper] {
 			filtered = append(filtered, e)
@@ -77,6 +80,11 @@ func filterACPEnv(environ []string) []string {
 			}
 		}
 		if skip {
+			continue
+		}
+		// The prefix lists cannot anticipate deployment-specific names such
+		// as REMOTE_WEBMIN_PASS; the shape check catches those.
+		if security.IsSensitiveEnv(key, value) {
 			continue
 		}
 		filtered = append(filtered, e)

@@ -70,3 +70,12 @@ func TestStripSensitiveEnv_KeepsAllowlistedCredential(t *testing.T) {
 		t.Fatalf("StripSensitiveEnv = %v, want %v", out, want)
 	}
 }
+
+// Decision 2026-09-23: SSH_AUTH_SOCK is withheld on purpose. It is only a socket
+// path, but it lets a child sign with every key loaded in the host ssh-agent;
+// git over SSH from agents goes through secure-CLI credentials instead.
+func TestIsSensitiveEnv_SSHAgentSocketIsWithheld(t *testing.T) {
+	if !IsSensitiveEnv("SSH_AUTH_SOCK", "/tmp/ssh-XXXX/agent.1") {
+		t.Fatal("SSH_AUTH_SOCK must be withheld from untrusted subprocesses")
+	}
+}
