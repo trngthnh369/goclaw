@@ -49,3 +49,26 @@ def test_fresh_digest_passes_through(tmp_path):
     digest = dr.load_sessions_digest(str(path))
     assert digest["health"]["mount_status"] == "ok"
     assert len(digest["projects"]) == 1
+
+
+def test_title_agent_and_discord_token_are_redacted(tmp_path):
+    projects = tmp_path / "projects" / "demo"
+    projects.mkdir(parents=True)
+    token = "MTU1MjE3OTAwOTU0MDg1Nzg3Ng" + "." + "Gx7kQp" + "." + "a" * 38
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    events = [
+        {"type": "ai-title", "sessionId": "s1", "aiTitle": "rotate " + token},
+        {"type": "agent-name", "sessionId": "s1", "agentName": "bot " + token},
+        {"type": "user", "sessionId": "s1", "timestamp": now, "cwd": "D:\demo",
+         "message": {"role": "user", "content": "token la " + token}},
+    ]
+    (projects / "s1.jsonl").write_text("\n".join(json.dumps(e) for e in events),
+                                       encoding="utf-8")
+    out = tmp_path / "sessions-latest.json"
+
+    subprocess.run([sys.executable, str(SCRIPT), "--projects-dir", str(tmp_path / "projects"),
+                    "--hours", "24", "--out", str(out)], check=True)
+
+    text = out.read_text(encoding="utf-8")
+    assert token not in text
+    assert "rotate [REDACTED]" in text

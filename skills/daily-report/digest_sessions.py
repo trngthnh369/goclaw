@@ -65,6 +65,7 @@ REDACT_PATTERNS = [
         r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}",
         r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{6,}",  # JWT
         r"[A-Fa-f0-9]{40,}",  # long hex (sha/tokens)
+        r"[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,7}\.[A-Za-z0-9_\-]{27,}",  # Discord bot token
     )
 ]
 
@@ -308,8 +309,8 @@ def summarize(args):
     for s in ordered:
         out_sessions.append({
             "session_id": s["session_id"][:8],
-            "title": s["title"],
-            "agent": s["agent"],
+            "title": redact(s["title"]),
+            "agent": redact(s["agent"]),
             "project": s["project"],
             "branches": sorted(s["branches"]),
             "from": to_local(s["first_ts"]),

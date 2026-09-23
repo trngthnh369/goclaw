@@ -122,7 +122,7 @@ func isSecretPathWebhook(u *url.URL) bool {
 	case host == "hooks.slack.com":
 		return strings.HasPrefix(u.Path, "/services/")
 	case host == "discord.com" || host == "discordapp.com" ||
-		strings.HasSuffix(host, ".discord.com"):
+		strings.HasSuffix(host, ".discord.com") || strings.HasSuffix(host, ".discordapp.com"):
 		return strings.HasPrefix(u.Path, "/api/webhooks/")
 	}
 	return false

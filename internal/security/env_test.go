@@ -88,6 +88,7 @@ func TestIsSensitiveEnv_WebhookAndSchemelessValues(t *testing.T) {
 		{"app:" + "s3cret@tcp(db:3306)/app?parseTime=true", true},
 		{"app:" + "s3cret@db:5432/app", true},
 		{"https://discord.com/api/webhooks/123/" + "abcDEF-token", true},
+		{"https://canary.discordapp.com/api/webhooks/123/" + "abcDEF-token", true},
 		{"https://hooks.slack.com/services/T0/B0/" + "xyz", true},
 		{"https://api.example.com/hook?token=" + "abc123", true},
 		{"https://maps.example.com/v1?key=" + "AIza-x&q=hanoi", true},
