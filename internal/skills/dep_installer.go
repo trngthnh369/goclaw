@@ -107,6 +107,7 @@ func InstallSingleDep(ctx context.Context, dep string) (bool, string) {
 			defer release()
 		}
 		cmd := exec.CommandContext(ctx, "pip3", "install", "--no-cache-dir", "--break-system-packages", pkg)
+		cmd.Env = scrubbedProcessEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			msg := fmt.Sprintf("%s: %v", strings.TrimSpace(string(out)), err)
@@ -184,6 +185,7 @@ func InstallDeps(ctx context.Context, manifest *SkillManifest, missing []string)
 		var successful []string
 		for _, pkg := range pipPkgs {
 			cmd := exec.CommandContext(ctx, "pip3", "install", "--no-cache-dir", "--break-system-packages", pkg)
+			cmd.Env = scrubbedProcessEnv()
 			if out, err := cmd.CombinedOutput(); err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("pip %s: %s (%v)", pkg, strings.TrimSpace(string(out)), err))
 				if hint := pipBuildFailHint(pkg, string(out)); hint != "" {
@@ -266,6 +268,7 @@ func UninstallPackage(ctx context.Context, dep string) (bool, string) {
 	case strings.HasPrefix(dep, "pip:"):
 		pkg := strings.TrimPrefix(dep, "pip:")
 		cmd := exec.CommandContext(ctx, "pip3", "uninstall", "-y", pkg)
+		cmd.Env = scrubbedProcessEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			msg := fmt.Sprintf("%s: %v", strings.TrimSpace(string(out)), err)

@@ -68,17 +68,20 @@ func checkPythonPackages(importNames []string, scriptsDir string) []string {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "python3", "-c", sb.String())
+	// Importing a package runs its module-level code, so the probe gets the
+	// scrubbed environment, never the gateway's credentials.
+	cmd.Env = scrubbedProcessEnv()
 	// PYTHONPATH lets Python find local modules in scriptsDir — stdlib and local dirs
 	// resolve natively, so only truly missing pip packages produce ImportError.
-	// We filter the existing PYTHONPATH from os.Environ() to avoid duplicate-key issues
+	// We filter the existing PYTHONPATH out first to avoid duplicate-key issues
 	// (on Linux, getenv() returns the first match, so appending would be silently ignored).
 	if scriptsDir != "" {
 		pythonpath := scriptsDir
 		if existing := os.Getenv("PYTHONPATH"); existing != "" {
 			pythonpath = existing + ":" + scriptsDir
 		}
-		baseEnv := make([]string, 0, len(os.Environ()))
-		for _, e := range os.Environ() {
+		baseEnv := make([]string, 0, len(cmd.Env))
+		for _, e := range cmd.Env {
 			if !strings.HasPrefix(e, "PYTHONPATH=") {
 				baseEnv = append(baseEnv, e)
 			}

@@ -159,3 +159,37 @@ func envContainsPrefixValue(env []string, key, wantPrefix string) bool {
 	}
 	return false
 }
+
+func TestScrubbedProcessEnvDropsGatewaySecretsKeepsRegistryAuth(t *testing.T) {
+	t.Setenv("GOCLAW_ENCRYPTION_KEY", "0123abcd")
+	t.Setenv("GOCLAW_POSTGRES_DSN", "postgres://goclaw:" + "pw@postgres:5432/goclaw")
+	t.Setenv("NPM_TOKEN", "registry-token")
+	t.Setenv("PIP_INDEX_URL", "https://user:" + "pw@pypi.internal/simple")
+	t.Setenv("GOCLAW_WORKSPACE", "/app/workspace")
+
+	env := scrubbedProcessEnv()
+	has := func(key string) bool {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, k := range []string{"GOCLAW_ENCRYPTION_KEY", "GOCLAW_POSTGRES_DSN"} {
+		if has(k) {
+			t.Errorf("%s must not reach package subprocesses", k)
+		}
+	}
+	for _, k := range []string{"NPM_TOKEN", "PIP_INDEX_URL", "GOCLAW_WORKSPACE"} {
+		if !has(k) {
+			t.Errorf("%s must be preserved", k)
+		}
+	}
+	for _, kv := range npmCommandEnv() {
+		if strings.HasPrefix(kv, "GOCLAW_ENCRYPTION_KEY=") {
+			t.Fatal("npmCommandEnv must build on the scrubbed environment")
+		}
+	}
+}

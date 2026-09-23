@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // staticCredentialEnvKeys are always stripped from fall-through exec env.
@@ -34,8 +36,11 @@ var staticCredentialEnvKeys = []string{
 }
 
 // scrubCredentialEnv returns env with any KEY=VALUE pair removed whose key
-// matches staticCredentialEnvKeys or any key in dynamicKeys. Comparison is
-// case-sensitive per POSIX — env names are case-sensitive.
+// matches staticCredentialEnvKeys or any key in dynamicKeys, or that
+// security.IsSensitiveEnv flags by shape. The shape check is what covers the
+// gateway's own secrets (GOCLAW_ENCRYPTION_KEY, GOCLAW_POSTGRES_DSN) and
+// deployment-specific names no static list can anticipate. Exact-key
+// comparison is case-sensitive per POSIX — env names are case-sensitive.
 func scrubCredentialEnv(env []string, dynamicKeys []string) []string {
 	if len(env) == 0 {
 		return env
@@ -58,6 +63,9 @@ func scrubCredentialEnv(env []string, dynamicKeys []string) []string {
 			continue
 		}
 		if _, drop := deny[kv[:i]]; drop {
+			continue
+		}
+		if security.IsSensitiveEnv(kv[:i], kv[i+1:]) {
 			continue
 		}
 		out = append(out, kv)

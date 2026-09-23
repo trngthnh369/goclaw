@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 func packageRuntimeDir() string {
@@ -77,13 +79,41 @@ func ensureNpmGlobalEnv() {
 	prependProcessPath(npmGlobalBinDir())
 }
 
+// packageManagerAuthEnv are registry credentials the package managers
+// themselves consume. Operators set them deliberately for these commands, so
+// they pass through even though they look like secrets.
+var packageManagerAuthEnv = map[string]struct{}{
+	"NPM_TOKEN":           {},
+	"NODE_AUTH_TOKEN":     {},
+	"PIP_INDEX_URL":       {},
+	"PIP_EXTRA_INDEX_URL": {},
+}
+
+// scrubbedProcessEnv returns the gateway environment minus its credentials.
+// Package installs and dependency probes run third-party code (setup.py,
+// npm lifecycle scripts, import-time side effects) that must not be able to
+// read GOCLAW_ENCRYPTION_KEY or the Postgres DSN.
+func scrubbedProcessEnv() []string {
+	src := os.Environ()
+	env := make([]string, 0, len(src))
+	for _, kv := range src {
+		key, value, _ := strings.Cut(kv, "=")
+		if _, keep := packageManagerAuthEnv[key]; !keep && security.IsSensitiveEnv(key, value) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
 func npmCommandEnv() []string {
 	prefix := npmGlobalPrefix()
 	binDir := npmGlobalBinDir()
 	nodePath := npmGlobalNodePath()
 
-	env := make([]string, 0, len(os.Environ())+3)
-	for _, e := range os.Environ() {
+	base := scrubbedProcessEnv()
+	env := make([]string, 0, len(base)+3)
+	for _, e := range base {
 		switch {
 		case strings.HasPrefix(e, "NPM_CONFIG_PREFIX="):
 			continue

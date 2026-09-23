@@ -117,6 +117,7 @@ func (c *PipUpdateChecker) runOutdated(ctx context.Context, includePre bool) ([]
 	}
 
 	cmd := exec.CommandContext(cctx, pipBinary, args...)
+	cmd.Env = scrubbedProcessEnv()
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
