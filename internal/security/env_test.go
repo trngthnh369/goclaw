@@ -57,3 +57,16 @@ func TestIsSensitiveEnv_ValueEmbedsPassword(t *testing.T) {
 		}
 	}
 }
+
+func TestStripSensitiveEnv_KeepsAllowlistedCredential(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"GOCLAW_ENCRYPTION_KEY=" + "0123abcd",
+		"NPM_TOKEN=" + "registry-token",
+	}
+	out := StripSensitiveEnv(in, map[string]struct{}{"NPM_TOKEN": {}})
+	want := []string{"PATH=/usr/bin", "NPM_TOKEN=" + "registry-token"}
+	if len(out) != len(want) || out[0] != want[0] || out[1] != want[1] {
+		t.Fatalf("StripSensitiveEnv = %v, want %v", out, want)
+	}
+}

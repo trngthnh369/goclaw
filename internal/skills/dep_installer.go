@@ -456,7 +456,9 @@ func apkViaHelper(ctx context.Context, action, pkg string) (bool, string) {
 // cleanCaches removes pip and npm caches to save disk space.
 // Uses pipBinary so test fixtures can redirect pip3 invocations.
 func cleanCaches(ctx context.Context) {
-	exec.CommandContext(ctx, pipBinary, "cache", "purge").Run() //nolint:errcheck
+	purge := exec.CommandContext(ctx, pipBinary, "cache", "purge")
+	purge.Env = scrubbedProcessEnv()
+	purge.Run() //nolint:errcheck
 	// Remove npm temp dirs using native Go (avoid sh -c shell glob + symlink risk).
 	// Matches only direct entries in /tmp; skips symlinks to prevent attacker-pointed rm.
 	matches, _ := filepath.Glob("/tmp/npm-*")

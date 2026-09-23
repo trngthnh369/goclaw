@@ -53,6 +53,21 @@ func IsSensitiveEnv(key, value string) bool {
 	return valueEmbedsPassword(value)
 }
 
+// StripSensitiveEnv returns env without the KEY=VALUE pairs IsSensitiveEnv
+// flags, except for the keys in keep (credentials a specific child process is
+// meant to receive, e.g. a package registry token). keep may be nil.
+func StripSensitiveEnv(env []string, keep map[string]struct{}) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, value, _ := strings.Cut(kv, "=")
+		if _, ok := keep[key]; !ok && IsSensitiveEnv(key, value) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // valueEmbedsPassword catches connection strings stored under innocent names
 // (DATABASE_URL, REDIS_URL): URL userinfo with a password, or a libpq-style
 // key/value DSN carrying password=.

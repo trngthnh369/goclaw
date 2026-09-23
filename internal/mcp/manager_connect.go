@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // connectAndDiscover creates a client, initializes the MCP handshake, and
@@ -287,7 +291,8 @@ func createClient(transportType, command string, args []string, env map[string]s
 	switch transportType {
 	case "stdio":
 		envSlice := mapToEnvSlice(env)
-		return mcpclient.NewStdioMCPClient(command, envSlice, args...)
+		return mcpclient.NewStdioMCPClientWithOptions(command, envSlice, args,
+			transport.WithCommandFunc(scrubbedStdioCommand))
 
 	case "sse":
 		var opts []transport.ClientOption
@@ -482,4 +487,14 @@ func fullReconnect(ctx context.Context, ss *serverState) bool {
 
 	_ = oldClient.Close()
 	return true
+}
+
+// scrubbedStdioCommand launches a stdio MCP server without the gateway's own
+// credentials. mcp-go's default is append(os.Environ(), env...), which handed
+// third-party npx/uvx packages GOCLAW_ENCRYPTION_KEY and the Postgres DSN. The
+// server's configured env is appended unfiltered: the admin set it on purpose.
+func scrubbedStdioCommand(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Env = append(security.StripSensitiveEnv(os.Environ(), nil), env...)
+	return cmd, nil
 }

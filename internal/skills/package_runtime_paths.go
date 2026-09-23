@@ -94,16 +94,7 @@ var packageManagerAuthEnv = map[string]struct{}{
 // npm lifecycle scripts, import-time side effects) that must not be able to
 // read GOCLAW_ENCRYPTION_KEY or the Postgres DSN.
 func scrubbedProcessEnv() []string {
-	src := os.Environ()
-	env := make([]string, 0, len(src))
-	for _, kv := range src {
-		key, value, _ := strings.Cut(kv, "=")
-		if _, keep := packageManagerAuthEnv[key]; !keep && security.IsSensitiveEnv(key, value) {
-			continue
-		}
-		env = append(env, kv)
-	}
-	return env
+	return security.StripSensitiveEnv(os.Environ(), packageManagerAuthEnv)
 }
 
 func npmCommandEnv() []string {

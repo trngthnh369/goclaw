@@ -18,7 +18,11 @@ var (
 )
 
 func runSystemCommandCombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	// apt maintainer scripts run as root; whether sudo resets the environment
+	// depends on a sudoers file outside this repo, so never hand it secrets.
+	cmd.Env = scrubbedProcessEnv()
+	return cmd.CombinedOutput()
 }
 
 func installSystemPackage(ctx context.Context, requested string) (bool, string) {

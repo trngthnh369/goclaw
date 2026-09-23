@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"slices"
 	"testing"
 )
 
@@ -62,5 +64,30 @@ func TestResolveEnvVars(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Regression: mcp-go's default stdio spawn inherited the whole gateway env, so
+// an npx-launched MCP server could read the master encryption key.
+func TestScrubbedStdioCommand_DropsGatewaySecretsKeepsConfiguredEnv(t *testing.T) {
+	t.Setenv("GOCLAW_ENCRYPTION_KEY", "0123"+"abcd")
+	t.Setenv("PATH", "/usr/bin")
+
+	configured := []string{"SERVER_API_KEY=" + "set-by-admin"}
+	cmd, err := scrubbedStdioCommand(context.Background(), "npx", configured, []string{"-y", "pkg"})
+	if err != nil {
+		t.Fatalf("scrubbedStdioCommand: %v", err)
+	}
+	if slices.ContainsFunc(cmd.Env, func(kv string) bool { return len(kv) > 22 && kv[:22] == "GOCLAW_ENCRYPTION_KEY=" }) {
+		t.Errorf("GOCLAW_ENCRYPTION_KEY leaked into MCP server env: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "PATH=/usr/bin") {
+		t.Errorf("PATH must be inherited, got %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, configured[0]) {
+		t.Errorf("admin-configured env must be kept, got %v", cmd.Env)
+	}
+	if want := []string{"npx", "-y", "pkg"}; !slices.Equal(cmd.Args, want) {
+		t.Errorf("Args = %v, want %v", cmd.Args, want)
 	}
 }
