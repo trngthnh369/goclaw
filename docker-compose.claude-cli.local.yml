@@ -2,8 +2,8 @@
 # Use this INSTEAD of docker-compose.claude-cli.yml. It:
 #   - builds a THIN derived image (Dockerfile.claude-cli: prebuilt v3.14.0 + claude CLI),
 #     so no slow from-source rebuild and the exact v3.14.0 binary is preserved
-#   - mounts the WINDOWS host ~/.claude (Docker Desktop path) so the in-container `claude`
-#     authenticates (entrypoint copies .credentials.json) AND can read projects/**/*.jsonl
+#   - mounts ONLY the WINDOWS host ~/.claude/host-digest (Docker Desktop path): sanitized
+#     digests built on the host. No credentials, no raw transcripts (see the volume comment)
 #   - shares the goclaw-workspace volume into the Chrome sidecar so HTML render via
 #     file:// works across containers (P4 in the plan)
 #
@@ -18,8 +18,7 @@
 #     up -d --build
 #
 # Verify after up:
-#   docker compose ... exec goclaw ls /app/.claude-host/projects   # P2 mount
-#   docker compose ... exec goclaw claude -p "ping"                # P1 auth
+#   docker compose ... exec goclaw ls /app/.claude-host/host-digest   # digest mount
 #
 # ⚠️ MOUNT SOURCE: this host runs Docker Desktop (WSL2 backend) and compose is invoked
 #    from Windows, so the bind source is the Windows path. Verified the user's Claude Code
@@ -33,15 +32,14 @@ services:
       context: .
       dockerfile: Dockerfile.claude-cli
     volumes:
+      # ONLY ~/.claude/host-digest: the sanitized JSON the host job writes (git, Antigravity and
+      # the Claude Code sessions digest). Mounting all of ~/.claude exposed .credentials.json and
+      # every raw transcript to every agent's exec tool (2026-09-23), so neither is mounted any
+      # more; the in-container claude CLI is unused (daily-report-send.sh has no callers).
+      # ~/.codex is not mounted either: sync_codex_token.sh pipes auth.json over stdin.
       - type: bind
-        source: "C:/Users/truon/.claude"
-        target: /app/.claude-host
-        read_only: true
-      # Windows-host ~/.codex (ChatGPT OAuth tokens) — for GPT Image generation via the
-      # codex subscription image_generation tool (no OpenAI API key needed).
-      - type: bind
-        source: "C:/Users/truon/.codex"
-        target: /app/.codex-host
+        source: "C:/Users/truon/.claude/host-digest"
+        target: /app/.claude-host/host-digest
         read_only: true
       # Patched gateway binary, mounted instead of baked into the image.
       #

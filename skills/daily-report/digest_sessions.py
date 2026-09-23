@@ -374,6 +374,8 @@ def main():
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     ap.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS)
     ap.add_argument("--tz-offset", type=float, default=DEFAULT_TZ_OFFSET_H)
+    ap.add_argument("--out", default=None,
+                    help="write the digest here (atomic) instead of stdout; used by the host job")
     args = ap.parse_args()
     # Force UTF-8 stdout regardless of host locale (Windows cp1252 / Alpine C.UTF-8).
     try:
@@ -384,7 +386,17 @@ def main():
         result = summarize(args)
     except Exception as e:  # never crash the cron turn; emit a health failure
         result = {"error": str(e), "health": {"mount_status": "error"}}
-    sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2))
+    result["generated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if not args.out:
+        sys.stdout.write(text)
+        return
+    # Written on the host and read by the container: a reader must never see a
+    # half-written file, so write beside the target and rename over it.
+    tmp = args.out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, args.out)
 
 
 if __name__ == "__main__":

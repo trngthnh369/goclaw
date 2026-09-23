@@ -17,9 +17,16 @@ PG="${PG_CONTAINER:-goclaw-postgres-1}"
 TENANT="${GOCLAW_TENANT:-0193a5b0-7000-7000-8000-000000000001}"
 ENCRYPT_PY="/app/data/skills/daily-report/codex_token_encrypt.py"
 
+CODEX_AUTH="${CODEX_AUTH:-$HOME/.codex/auth.json}"
+if [ ! -r "$CODEX_AUTH" ]; then
+  echo "[sync-codex] FATAL: $CODEX_AUTH not readable. Run 'codex login' on this host first." >&2
+  exit 1
+fi
+
 echo "[sync-codex] encrypting CLI token (in $GOCLAW)..."
-# codex_token_encrypt.py self-adds pylib to sys.path, so no PYTHONPATH env needed.
-VALS=$(docker exec -u goclaw -i "$GOCLAW" sh -c "python3 $ENCRYPT_PY" 2>/dev/null)
+# auth.json is piped over stdin, never mounted: a mount would be readable by every
+# agent's exec tool. codex_token_encrypt.py self-adds pylib to sys.path.
+VALS=$(docker exec -u goclaw -i "$GOCLAW" sh -c "python3 $ENCRYPT_PY" < "$CODEX_AUTH" 2>/dev/null)
 ENC_ACCESS=$(printf '%s\n' "$VALS" | grep '^ENC_ACCESS=' | cut -d= -f2-)
 ENC_REFRESH=$(printf '%s\n' "$VALS" | grep '^ENC_REFRESH=' | cut -d= -f2-)
 ACCOUNT_ID=$(printf '%s\n' "$VALS" | grep '^ACCOUNT_ID=' | cut -d= -f2-)
@@ -30,13 +37,23 @@ if [ -z "$ENC_ACCESS" ] || [ -z "$ENC_REFRESH" ]; then
 fi
 
 echo "[sync-codex] writing provider + refresh secret to DB..."
+# UPSERT, not DELETE+INSERT: a delete drops the row's id (FK churn in agent_heartbeats /
+# usage_cap_policies) AND silently wipes settings that are NOT ours to own — notably
+# reasoning_defaults{effort:high}, which the tier-1 Codex routing depends on. `||` merges
+# our account_id over whatever else is there, so repeat runs stay non-destructive.
+# api_base is deliberately left alone: empty means NewCodexProvider's default
+# (https://chatgpt.com/backend-api), and an operator override must survive a token sync.
 docker exec -i "$PG" psql -U goclaw -d goclaw >/dev/null 2>&1 <<SQL
-DELETE FROM config_secrets WHERE key='oauth.openai-codex.refresh_token' AND tenant_id='$TENANT';
-DELETE FROM llm_providers WHERE name='openai-codex';
 INSERT INTO llm_providers (name, display_name, provider_type, api_base, api_key, enabled, settings, tenant_id)
-VALUES ('openai-codex','Codex','chatgpt_oauth','','$ENC_ACCESS', true, '{"account_id":"$ACCOUNT_ID"}'::jsonb, '$TENANT');
+VALUES ('openai-codex','Codex','chatgpt_oauth','','$ENC_ACCESS', true, '{"account_id":"$ACCOUNT_ID"}'::jsonb, '$TENANT')
+ON CONFLICT (tenant_id, name) DO UPDATE SET
+  api_key    = EXCLUDED.api_key,
+  enabled    = true,
+  settings   = llm_providers.settings || EXCLUDED.settings,
+  updated_at = now();
 INSERT INTO config_secrets (key, value, tenant_id)
-VALUES ('oauth.openai-codex.refresh_token', convert_to('$ENC_REFRESH','UTF8'), '$TENANT');
+VALUES ('oauth.openai-codex.refresh_token', convert_to('$ENC_REFRESH','UTF8'), '$TENANT')
+ON CONFLICT (key, tenant_id) DO UPDATE SET value = EXCLUDED.value;
 SQL
 
 echo "[sync-codex] restarting GoClaw to reload provider..."

@@ -17,7 +17,6 @@
 # Run (in container): python3 /app/workspace/_daily-report/weekly_report.py [--dry-run|--report]
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -28,7 +27,8 @@ import plan_pipeline as pp  # noqa: E402
 import sheets_client as sc  # noqa: E402
 
 TZ = timezone(timedelta(hours=7))
-DIGEST = f"{dr.WORK}/digest_sessions.py"
+# Built on the host with the Monday..now window (run_daily_report.ps1, Fridays).
+SESSIONS_WEEK = "/app/.claude-host/host-digest/sessions-week.json"
 HOST_WEEK = "/app/.claude-host/host-digest/week.json"
 DEFAULT_PCT = {"done": 100, "doing": 50, "blocked": 30, "new": 10}
 STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WIP",
@@ -36,12 +36,9 @@ STATUS_LABEL = {"done": "Done", "blocked": "Blocked", "doing": "WIP", "new": "WI
 
 
 def run_digest(from_iso: str, to_iso: str) -> dict:
-    p = subprocess.run(
-        ["python3", DIGEST, "--from", from_iso, "--to", to_iso, "--max-bytes", "150000"],
-        capture_output=True, text=True, timeout=240)
-    if p.returncode != 0:
-        raise SystemExit(f"DIGEST_FAIL rc={p.returncode} {p.stderr[:300]}")
-    return json.loads(p.stdout)
+    """The week window is fixed by the host job that built the file; from/to are logged by
+    the caller for the record."""
+    return dr.load_sessions_digest(SESSIONS_WEEK)
 
 
 def ensure_week_tab(name: str) -> tuple[dict, bool]:

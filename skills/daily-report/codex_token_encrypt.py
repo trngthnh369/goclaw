@@ -4,7 +4,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 enc_key_hex = os.environ["GOCLAW_ENCRYPTION_KEY"]
 key = bytes.fromhex(enc_key_hex)  # 64 hex -> 32 bytes
-auth = json.load(open("/app/.codex-host/auth.json", encoding="utf-8"))
+# auth.json arrives on stdin from the host (sync_codex_token.sh). It is no longer
+# bind-mounted: any mount is readable by every agent's exec tool.
+auth = json.load(sys.stdin)
 tok = auth.get("tokens", {})
 access = tok.get("access_token", "")
 refresh = tok.get("refresh_token", "")

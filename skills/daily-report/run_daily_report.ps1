@@ -21,7 +21,9 @@
 #
 # Pipeline additions (2026-07-18):
 #   - HOST collector (git + Antigravity) runs BEFORE the container generate, writing
-#     %USERPROFILE%\.claude\host-digest\*.json (readable in-container via /app/.claude-host ro mount).
+#     %USERPROFILE%\.claude\host-digest\*.json (readable in-container via /app/.claude-host/host-digest ro mount).
+#   - 2026-09-23: the Claude Code sessions digest is also built here (sessions-latest.json, Friday
+#     sessions-week.json); the container no longer mounts the raw ~/.claude transcripts.
 #   - Friday: weekly report merged into this run (batch TEXT review, one DUYỆT publishes both).
 #     Gate: set GOCLAW_WEEKLY=off (user env var) to disable the Friday weekly branch without
 #     reverting this file.
@@ -84,9 +86,17 @@ function Sync-Scripts {
   # each round-trip is pure Docker Desktop overhead. The glob copies the same set of artefacts.
   & $DOCKER exec -u goclaw $GOCLAW sh -c 'cp -f /app/data/skills/daily-report/*.py /app/data/skills/daily-report/*.html /app/data/skills/daily-report/*.mjs /app/data/skills/daily-report/task_aliases.json /app/workspace/_daily-report/' 2>$null
   if ($LASTEXITCODE -ne 0) { Log "WARN: script sync rc=$LASTEXITCODE (container dung ban cu)" }
-  # Refresh the gateway-token file so Zip-triggered publish/edit can auth (GoClaw v3.14 exec env
-  # does NOT expose GOCLAW_GATEWAY_TOKEN; scripts read this chmod-600 file as fallback).
-  & $DOCKER exec -u goclaw $GOCLAW sh -c 'printf "%s" "$GOCLAW_GATEWAY_TOKEN" > /app/workspace/_daily-report/.gwtoken && chmod 600 /app/workspace/_daily-report/.gwtoken' 2>$null
+  # Token for Zip-triggered publish/edit (the exec env carries no gateway credentials). It is an
+  # operator.write API key, NOT the admin gateway token: every agent's exec can read this file,
+  # so it must not unlock providers, API keys or config. The key lives on the host only
+  # (%USERPROFILE%\.goclaw\daily-report.apikey) and is piped in over stdin.
+  $keyFile = Join-Path $env:USERPROFILE ".goclaw\daily-report.apikey"
+  if (Test-Path $keyFile) {
+    (Get-Content -Raw $keyFile).Trim() | & $DOCKER exec -i -u goclaw $GOCLAW sh -c 'umask 077 && cat > /app/workspace/_daily-report/.gwtoken' 2>$null
+    if ($LASTEXITCODE -ne 0) { Log "WARN: .gwtoken refresh rc=$LASTEXITCODE" }
+  } else {
+    Log "WARN: $keyFile missing -> Zip publish/edit se 401 (tao API key operator.write)"
+  }
 }
 
 function Invoke-Collector([string[]]$WindowArgs, [string]$OutFile) {
@@ -97,6 +107,17 @@ function Invoke-Collector([string[]]$WindowArgs, [string]$OutFile) {
   & $PYTHON (Join-Path $REPO "skills\daily-report\collect_host_digest.py") @WindowArgs --out $OutFile 2>&1 |
     ForEach-Object { Log "collect> $_" }
   if ($LASTEXITCODE -ne 0) { Log "WARN: host collector rc=$LASTEXITCODE (report se chi dung Claude sessions)" }
+}
+
+function Invoke-SessionsDigest([string[]]$WindowArgs, [int]$MaxBytes, [string]$OutFile) {
+  # Claude Code sessions digest, built HERE and redacted by digest_sessions.py. The container
+  # only mounts ~\.claude\host-digest: mounting ~\.claude\projects put every raw transcript
+  # (pasted secrets included) within reach of every agent's exec tool.
+  $env:PYTHONUTF8 = "1"
+  $projects = Join-Path $env:USERPROFILE ".claude\projects"
+  & $PYTHON (Join-Path $REPO "skills\daily-report\digest_sessions.py") --projects-dir $projects `
+    @WindowArgs --max-bytes $MaxBytes --out $OutFile 2>&1 | ForEach-Object { Log "sessions> $_" }
+  if ($LASTEXITCODE -ne 0) { Log "WARN: sessions digest rc=$LASTEXITCODE (report se bao loi nguon session)" }
 }
 
 function Invoke-Generate([bool]$RequireLlm, [bool]$NoPost = $false) {
@@ -124,9 +145,12 @@ try {
     Invoke-Collector @("--from", $monday.ToString("yyyy-MM-ddT00:00:00+07:00"),
                        "--to", (Get-Date -Format "yyyy-MM-ddTHH:mm:ss+07:00")) (Join-Path $DIGEST_DIR "week.json")
     Copy-Item (Join-Path $DIGEST_DIR "week.json") (Join-Path $DIGEST_DIR "latest.json") -Force -ErrorAction SilentlyContinue
+    Invoke-SessionsDigest @("--from", $monday.ToString("yyyy-MM-ddT00:00:00+07:00"),
+                            "--to", (Get-Date -Format "yyyy-MM-ddTHH:mm:ss+07:00")) 150000 (Join-Path $DIGEST_DIR "sessions-week.json")
   } else {
     Invoke-Collector @("--hours", "24") (Join-Path $DIGEST_DIR "latest.json")
   }
+  Invoke-SessionsDigest @("--hours", "24") 60000 (Join-Path $DIGEST_DIR "sessions-latest.json")
 
   Sync-Scripts
 

@@ -25,7 +25,6 @@
 import json
 import os
 import re
-import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -35,8 +34,11 @@ import daily_report_sheet as drs  # noqa: E402  (reads/writes the weekly task sh
 import plan_pipeline as pp  # noqa: E402  (plan-centric binding + progress)
 
 WORK = "/app/workspace/_daily-report"
-DIGEST = f"{WORK}/digest_sessions.py"
 HOST_DIGEST = "/app/.claude-host/host-digest/latest.json"
+# Claude Code sessions digest, built and redacted on the HOST (run_daily_report.ps1 runs
+# digest_sessions.py --out). The raw ~/.claude/projects transcripts are no longer mounted:
+# every agent's exec could read them, pasted secrets included.
+SESSIONS_DIGEST = "/app/.claude-host/host-digest/sessions-latest.json"
 ACTIVE = f"{WORK}/active.json"
 REPORT = f"{WORK}/report.json"
 ACTIVE_WEEKLY = f"{WORK}/active_weekly.json"
@@ -116,14 +118,35 @@ def http_post(path: str, payload: dict, extra_headers: dict | None = None, timeo
         return json.loads(resp.read().decode("utf-8"))
 
 
+def load_sessions_digest(path: str = SESSIONS_DIGEST, max_age_h: float = 3.0) -> dict:
+    """Read the host-built sessions digest. Missing, unreadable or stale comes back as a
+    health failure (mount_status != ok), so the caller reports it instead of posting old
+    work as today's."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            digest = json.load(fh)
+    except FileNotFoundError:
+        log(f"WARN sessions digest missing ({path}) — chạy run_daily_report.ps1 trên host")
+        return {"health": {"mount_status": "missing"}}
+    except (OSError, ValueError) as exc:
+        log("WARN sessions digest unreadable:", exc)
+        return {"health": {"mount_status": "unreadable"}}
+    try:
+        gen = datetime.fromisoformat(digest["generated_at"])
+        age_h = (datetime.now(timezone.utc) - gen).total_seconds() / 3600
+    except (KeyError, TypeError, ValueError):
+        return {"health": {"mount_status": "no_generated_at"}}
+    if age_h > max_age_h:
+        log(f"WARN sessions digest STALE ({age_h:.1f}h > {max_age_h}h) — chạy lại "
+            "run_daily_report.ps1 -CollectOnly trên host")
+        digest.setdefault("health", {})["mount_status"] = "stale"
+    return digest
+
+
 def run_digest(hours: int) -> dict:
-    proc = subprocess.run(
-        ["python3", DIGEST, "--hours", str(hours), "--max-bytes", "60000"],
-        capture_output=True, text=True, timeout=300,
-    )
-    if proc.returncode != 0:
-        raise SystemExit(f"DIGEST_FAIL rc={proc.returncode} {proc.stderr[:300]}")
-    return json.loads(proc.stdout)
+    if hours != 24:
+        log(f"WARN --hours {hours}: host digest luôn là cửa sổ 24h")
+    return load_sessions_digest()
 
 
 # ---- host digest (git + antigravity, collected on the Windows host) --------
