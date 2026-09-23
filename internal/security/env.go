@@ -2,6 +2,7 @@ package security
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -68,16 +69,61 @@ func StripSensitiveEnv(env []string, keep map[string]struct{}) []string {
 	return out
 }
 
-// valueEmbedsPassword catches connection strings stored under innocent names
-// (DATABASE_URL, REDIS_URL): URL userinfo with a password, or a libpq-style
-// key/value DSN carrying password=.
+// schemelessDSN matches driver-style DSNs with no scheme, where the password
+// sits before the host: user:pass@tcp(host:3306)/db, user:pass@host:5432/db.
+// The whole value must have that shape, so "git@github.com:org/repo" (no
+// password before the @) does not match.
+var schemelessDSN = regexp.MustCompile(`^[A-Za-z0-9._%+-]+:[^\s@/]+@[^\s@]+$`)
+
+// credentialQueryParams are query keys whose value is itself a credential,
+// as in https://api.example.com/hook?token=...
+var credentialQueryParams = []string{
+	"token", "access_token", "api_key", "apikey", "key", "secret",
+	"password", "sig", "signature", "auth",
+}
+
+// valueEmbedsPassword catches credentials stored under innocent names
+// (DATABASE_URL, ALERT_WEBHOOK_URL): URL userinfo with a password, a libpq
+// key/value DSN carrying password=, a scheme-less driver DSN, an incoming
+// webhook URL whose path is the secret, or a credential query parameter.
 func valueEmbedsPassword(value string) bool {
-	if strings.Contains(value, "://") {
-		if u, err := url.Parse(value); err == nil && u.User != nil {
-			if _, hasPassword := u.User.Password(); hasPassword {
-				return true
-			}
+	if strings.Contains(strings.ToLower(value), "password=") || schemelessDSN.MatchString(value) {
+		return true
+	}
+	if !strings.Contains(value, "://") {
+		return false
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return true
 		}
 	}
-	return strings.Contains(strings.ToLower(value), "password=")
+	if isSecretPathWebhook(u) {
+		return true
+	}
+	query := u.Query()
+	for _, name := range credentialQueryParams {
+		if query.Get(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isSecretPathWebhook reports incoming-webhook URLs whose path carries the
+// token: anyone holding the URL can post as the integration.
+func isSecretPathWebhook(u *url.URL) bool {
+	host := strings.ToLower(u.Hostname())
+	switch {
+	case host == "hooks.slack.com":
+		return strings.HasPrefix(u.Path, "/services/")
+	case host == "discord.com" || host == "discordapp.com" ||
+		strings.HasSuffix(host, ".discord.com"):
+		return strings.HasPrefix(u.Path, "/api/webhooks/")
+	}
+	return false
 }

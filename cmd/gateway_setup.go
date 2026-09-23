@@ -237,6 +237,13 @@ func setupToolRegistry(
 			if cfgPath := os.Getenv("GOCLAW_CONFIG"); cfgPath != "" {
 				et.DenyPaths(cfgPath)
 			}
+			// CLI credential stores in the gateway's home (the entrypoint copies the
+			// claude OAuth file to ~/.claude). Defense in depth only: DenyPaths
+			// matches command text, so the real fix is keeping these files out of
+			// the container.
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				et.DenyPaths(filepath.Join(home, ".claude")+"/", filepath.Join(home, ".codex")+"/")
+			}
 		}
 	}
 

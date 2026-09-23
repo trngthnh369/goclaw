@@ -79,3 +79,27 @@ func TestIsSensitiveEnv_SSHAgentSocketIsWithheld(t *testing.T) {
 		t.Fatal("SSH_AUTH_SOCK must be withheld from untrusted subprocesses")
 	}
 }
+
+func TestIsSensitiveEnv_WebhookAndSchemelessValues(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"app:" + "s3cret@tcp(db:3306)/app?parseTime=true", true},
+		{"app:" + "s3cret@db:5432/app", true},
+		{"https://discord.com/api/webhooks/123/" + "abcDEF-token", true},
+		{"https://hooks.slack.com/services/T0/B0/" + "xyz", true},
+		{"https://api.example.com/hook?token=" + "abc123", true},
+		{"https://maps.example.com/v1?key=" + "AIza-x&q=hanoi", true},
+		{"git@github.com:org/repo.git", false},
+		{"https://discord.com/channels/1487758328577921066/1552179009540857876", false},
+		{"https://example.com/search?q=hanoi&page=2", false},
+		{"10.0.0.52:10000", false},
+		{"Asia/Ho_Chi_Minh", false},
+	}
+	for _, tc := range cases {
+		if got := IsSensitiveEnv("ALERT_URL", tc.value); got != tc.want {
+			t.Errorf("IsSensitiveEnv(ALERT_URL, %q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
