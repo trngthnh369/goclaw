@@ -99,6 +99,7 @@ func runGateway() {
 	textHandler := slog.NewTextHandler(logOutput, &slog.HandlerOptions{Level: logLevel})
 	logTee := gateway.NewLogTee(textHandler)
 	slog.SetDefault(slog.New(logTee))
+	hardenGatewayProcess()
 
 	// Load config
 	cfgPath := resolveConfigPath()
