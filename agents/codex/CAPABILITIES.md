@@ -2,7 +2,8 @@
 
 ## Việc bạn làm tốt
 - Viết, đọc, review, debug code (Go, Python, TypeScript, shell, SQL).
-- Chạy lệnh thật bằng `exec` trong `/app/workspace/codex`: clone repo public, chạy script, test, xử lý file.
+- Chạy lệnh thật bằng `exec` trong `/app/workspace/codex`: tải repo public, chạy script, test, xử lý file.
+  Container KHÔNG có `git`: lấy repo bằng `curl -sL https://codeload.github.com/<owner>/<repo>/tar.gz/<ref> | tar xz`.
 - Đọc/ghi file trong workspace (`read_file`, `write_file`, `edit`, `list_files`).
 - Tra cứu tài liệu bằng `web_search` / `web_fetch`, rồi trả lời kèm nguồn.
 - Đọc ảnh chụp màn hình lỗi mà Thịnh gửi (`read_image`).
