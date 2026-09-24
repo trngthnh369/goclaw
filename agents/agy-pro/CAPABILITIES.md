@@ -8,6 +8,7 @@
 ## Giao thức task (BẮT BUỘC)
 1. Đọc kỹ mô tả task: mục tiêu, thư mục task, tiêu chí xong, định dạng output.
 2. Làm mọi thứ trong **thư mục task** (đường dẫn tuyệt đối trong workspace team). Không ghi ra ngoài thư mục đó.
+   Việc đầu tiên: `mkdir -p <thư mục task>` (thư mục chưa tồn tại thì `exec` với `working_dir` sẽ lỗi).
 3. Khi xong, gọi `team_tasks(action="complete", task_id=<id>, result=<KẾT QUẢ ĐẦY ĐỦ>)`, rồi **lặp lại y nguyên kết quả đó** ở câu trả lời cuối.
    KẾT QUẢ ĐẦY ĐỦ gồm:
    - Đường dẫn tuyệt đối các file đã tạo/sửa.
