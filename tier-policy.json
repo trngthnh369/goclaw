@@ -1,12 +1,13 @@
 {
   "_comment": "GoClaw model_fallback fleet policy — single source of truth. Apply: scripts/apply-tier-policy.ps1. Verify: same script with -Verify.",
-  "_version": "2026-09-23-v5",
+  "_version": "2026-09-24-v6",
   "_quota_note": "Codex = quota TUAN cua ChatGPT Team. Tu v5 (2026-09-23) quota Codex DANH RIENG cho agent `codex` (Discord bot rieng). Moi agent/cron khac chay Gemini qua antigravity: ag-pro -> ag-flash-38. Cron KHONG co model override (CronPayload chi co kind/message/command), nen doi agent la doi luon cron. Do lai bang _measure_query: sau migrate chi con agent_key=codex.",
   "_measure_query": "SELECT a.agent_key, count(*) calls, sum(s.input_tokens) in_tok FROM spans s JOIN agents a ON a.id=s.agent_id WHERE s.metadata->'model_fallback'->>'selected_provider_name'='openai-codex' AND s.created_at > now() - interval '3 days' GROUP BY 1 ORDER BY in_tok DESC;",
   "_groups": {
     "X": "agent `codex` — tier1 Codex gpt-6-sol (tu 2026-09-23; gpt-6-astra/gpt-6-luna cung da probe song tren account Team), het quota thi roi xuong Gemini. Mot nac GPT duy nhat: 429 usage_limit_reached la cap account, them model gpt thu 2 chi ton them 1 call fail.",
     "B": "output cho NGUOI doc (Discord/chat) — Gemini thuan ag-pro -> ag-flash-38 (truoc v5 la Codex tier1).",
     "M": "output cho MAY tieu thu (Sheet/webhook/format cung) — ag-opus tier1, chuoi NGAN + canh bao Discord khi rot tier (deadman Check C).",
+    "Y": "member team Codex Crew (lead `codex`, tu 2026-09-24) — CHI Gemini qua antigravity, khong nac non-Gemini (yeu cau cua owner). agy-pro ag-pro -> ag-flash-38, agy-flash ag-flash-38 -> ag-pro. Dung chung quota antigravity voi nhom B/C.",
     "C": "bulk/re — primary ag-flash-38. Nac 3 = agy-claude/ag-opus de thoat khoi MOT mien quota antigravity."
   },
   "_alias_note": "Chi dung alias co trong live /v1/models cua cliproxy: ag-pro, ag-pro-low, ag-opus, ag-flash-38, ag-image. ag-flash va ag-flash-37 DA CHET (bi exclude 2026-09-03) — slot tro vao chung rot tier moi luot.",
@@ -14,6 +15,8 @@
 
   "agents": {
     "codex":            { "group": "X", "provider": "openai-codex", "model": "gpt-6-sol", "candidates": [{"provider": "antigravity", "model": "ag-pro"}, {"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 3 },
+    "agy-pro":          { "group": "Y", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
+    "agy-flash":        { "group": "Y", "provider": "antigravity", "model": "ag-flash-38", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
 
     "zip-crazy":        { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
     "daily-reporter":   { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
@@ -22,6 +25,8 @@
     "wave-compute":     { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
     "cw-essayist":      { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
     "cw-scholar":       { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
+    "vf-director":      { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
+    "vf-scriptwriter":  { "group": "M", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}], "max_attempts": 2 },
 
     "ops-watchdog":     { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
     "qa-auditor":       { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
@@ -30,6 +35,7 @@
     "polymarket-intel": { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
     "cf-auditor":       { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
     "cf-writer":        { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 2 },
+    "vf-reviewer":      { "group": "B", "provider": "antigravity", "model": "ag-pro", "candidates": [{"provider": "antigravity", "model": "ag-pro-low"}], "max_attempts": 2 },
     "cf-director":      { "group": "B", "provider": "agy-claude", "model": "ag-opus", "candidates": [{"provider": "antigravity", "model": "ag-pro"}, {"provider": "antigravity", "model": "ag-flash-38"}], "max_attempts": 3 },
 
     "cf-researcher":    { "group": "C", "provider": "antigravity", "model": "ag-flash-38", "candidates": [{"provider": "antigravity", "model": "ag-pro"}, {"provider": "agy-claude", "model": "ag-opus"}], "max_attempts": 3 },
