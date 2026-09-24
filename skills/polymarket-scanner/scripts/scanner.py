@@ -260,6 +260,36 @@ def fetch_market_snapshot(market):
         else:
             entry["fetch_errors"].append(f"price_{outcome}")
 
+    # Fallback: CLOB /price is 403-blocked for this host, so read prices off the
+    # Gamma market object instead (outcomePrices, else lastTradePrice).
+    if not any(v is not None for v in entry["prices"].values()):
+        gamma = api_get(f"{GAMMA_API}/markets/{quote(str(market_id))}")
+        if gamma:
+            gamma_prices = gamma.get("outcomePrices")
+            if isinstance(gamma_prices, str):
+                try:
+                    gamma_prices = json.loads(gamma_prices)
+                except json.JSONDecodeError:
+                    gamma_prices = None
+            outcomes = market.get("outcomes", [])
+            if isinstance(gamma_prices, list) and gamma_prices:
+                for i, raw in enumerate(gamma_prices):
+                    outcome = outcomes[i] if i < len(outcomes) else f"outcome_{i}"
+                    try:
+                        entry["prices"][outcome] = float(raw)
+                    except (ValueError, TypeError):
+                        continue
+                entry["price_source"] = "gamma"
+                entry["fetch_errors"] = [e for e in entry["fetch_errors"] if not e.startswith("price_")]
+            elif gamma.get("lastTradePrice") is not None:
+                outcome = outcomes[0] if outcomes else "Yes"
+                try:
+                    entry["prices"][outcome] = float(gamma["lastTradePrice"])
+                    entry["price_source"] = "gamma_last_trade"
+                    entry["fetch_errors"] = [e for e in entry["fetch_errors"] if not e.startswith("price_")]
+                except (ValueError, TypeError):
+                    pass
+
     # Fetch recent trades
     trades_data = api_get(f"{DATA_API}/trades?market={quote(condition_id)}&limit=100")
     if trades_data and isinstance(trades_data, list):
