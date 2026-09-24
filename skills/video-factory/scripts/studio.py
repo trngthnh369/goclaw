@@ -53,6 +53,10 @@ DEFAULT_CONFIG = {
     "publish": {"facebook_reels": {"enabled": False}},
 }
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+# create_image saves into <director workspace>/.../generated/<date>/; attach takes
+# only those files, so a scene can never be pointed at some other file the
+# gateway can read and have it rendered into a public video.
+IMAGE_ROOT = Path("/app/workspace/vf-director")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -359,7 +363,10 @@ def cmd_attach(args: argparse.Namespace) -> int:
     scene = next((s for s in state.script["scenes"] if s["id"] == args.scene), None)
     if scene is None or scene["visual"]["kind"] != "ai_image":
         raise StudioError(f"scene {args.scene} is not an ai_image scene")
-    src = Path(args.file.removeprefix("MEDIA:").strip())
+    src = Path(args.file.removeprefix("MEDIA:").strip()).resolve()
+    root = IMAGE_ROOT.resolve()
+    if not src.is_relative_to(root) or "generated" not in src.relative_to(root).parts:
+        raise StudioError(f"attach takes only a picture create_image made (under {root}/.../generated/)")
     if not src.is_file() or src.suffix.lower() not in IMAGE_EXTS:
         raise StudioError(f"{src} is not an image file (png/jpg/webp)")
     width, height = _probe_image(src)

@@ -255,8 +255,16 @@ class FlowTests(unittest.TestCase):
 
         if not HAS_FFPROBE:
             return
-        image = self.tmp / "img.png"
+        outside = self.tmp / "img.png"
+        outside.write_bytes(png_bytes(768, 1376))
+        code, text = run_cli("--workspace", self.ws, "attach", "--job", job, "--scene",
+                             self._next(job)["calls"][0]["scene"], "--file", f"MEDIA:{outside}")
+        self.assertEqual(code, 1, text)                       # not a create_image output
+        image = self.tmp / "generated" / "2026-09-24" / "img.png"
+        image.parent.mkdir(parents=True)
         image.write_bytes(png_bytes(768, 1376))
+        self.addCleanup(setattr, studio, "IMAGE_ROOT", studio.IMAGE_ROOT)
+        studio.IMAGE_ROOT = self.tmp
         for c in self._next(job)["calls"]:
             code, text = run_cli("--workspace", self.ws, "attach", "--job", job, "--scene", c["scene"],
                                  "--file", f"MEDIA:{image}")
