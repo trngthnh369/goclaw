@@ -348,7 +348,7 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn("commands", action)                  # nothing to run until the human answers
         action = jobs.next_action(Studio(Path(self.ws)), paths, {})
         self.assertEqual((action["stage"], action["action"]), ("escalated", "stop"))
-        self.assertIn("--quote", action["human_commands"]["continue anyway"])
+        self.assertNotIn("--quote", action["human_commands"]["continue anyway"])   # the gateway supplies the words
         # The same situation raised by a person is never capped.
         code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
                              "--scene", "s2", "--text", "ảnh cảnh 2 tối quá")
@@ -403,23 +403,70 @@ class FlowTests(unittest.TestCase):
             second = write_json_numbered(Path(root), "video", 1, {"n": 2})
             self.assertEqual((first.name, second.name), ("video-01.json", "video-02.json"))
 
-    def test_override_answers_only_an_escalation_and_carries_the_human_quote(self):
+    def _gateway_receipt(self, receipt: dict) -> None:
+        """Stand in for the gateway's GET /v1/runs/receipt for this test."""
+        import http.server
+        import threading
+
+        body = json.dumps(receipt).encode("utf-8")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                ok = self.headers.get("Authorization") == "Bearer tok-1"
+                self.send_response(200 if ok else 404)
+                self.end_headers()
+                if ok:
+                    self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(setattr, studio, "RECEIPT_URL", studio.RECEIPT_URL)
+        studio.RECEIPT_URL = f"http://127.0.0.1:{server.server_port}/v1/runs/receipt"
+
+    def test_override_takes_the_persons_reply_from_the_gateway_never_from_the_model(self):
         job, paths = self._job_at_video_review()
-        code, text = run_cli("--workspace", self.ws, "override", "--job", job, "--stage", "video",
-                             "--quote", "cứ đăng đi")
+        override = ("--workspace", self.ws, "override", "--job", job, "--stage", "video")
+        code, text = run_cli(*override)
         self.assertEqual(code, 1, text)                       # nothing escalated: nothing to override
         self.assertIn("only answers an escalated review", text)
         meta = jobs.load_meta(paths)
         meta["status"], meta["escalated_stage"] = "escalated", "video"
         jobs.save_meta(paths, meta)
-        code, text = run_cli("--workspace", self.ws, "override", "--job", job, "--stage", "video",
-                             "--quote", "cứ đăng đi")
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli(*override)                       # a cron run: no receipt at all
+        self.assertEqual(code, 1, text)
+        question = f"⚠️ Video Factory · x\njob: {job}\n\nReview video vẫn chưa đạt"
+        cases = [({"human_reply": False}, "not started by an allowlisted person"),
+                 ({"human_reply": True, "reply_to_content": "⚠️ Video Factory\njob: vf-other",
+                   "current_message": "cứ làm tiếp"}, "not the escalation question"),
+                 ({"human_reply": True, "reply_to_content": question, "current_message": "không được, làm lại"},
+                  "does not say to continue")]
+        cases.insert(1, ({"human_reply": True, "channel": "telegram-main", "reply_to_content": question,
+                          "current_message": "cứ làm tiếp"}, "not the review channel"))
+        for receipt, _ in cases[2:]:
+            receipt["channel"] = "vf-discord"
+        run_cli("--workspace", self.ws, "config", "set", "delivery.channel=vf-discord")
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        for receipt, reason in cases:
+            self._gateway_receipt(receipt)
+            code, text = run_cli(*override)
+            self.assertEqual(code, 1, text)
+            self.assertIn(reason, text)
+        self.assertEqual(jobs.load_meta(paths)["status"], "escalated")
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": question,
+                               "current_message": "cứ làm tiếp"})
+        code, text = run_cli(*override)
         self.assertEqual(code, 0, text)
         self.assertEqual(jobs.load_meta(paths)["status"], "active")
-        self.assertEqual(jobs.reviews(paths, "video")[-1]["_human_quote"], "cứ đăng đi")
+        self.assertEqual(jobs.reviews(paths, "video")[-1]["_human_quote"], "cứ làm tiếp")
         message = package.review_message(*PackageTests.ARGS, "Caption.", [], "/tmp/p.mp4", publishable=False,
-                                         overrides=["cứ đăng đi"])
-        self.assertIn("theo lời bạn: «cứ đăng đi»", message)
+                                         overrides=["cứ làm tiếp"])
+        self.assertIn("theo lời bạn: «cứ làm tiếp»", message)
 
     def test_voice_change_does_not_reopen_fact_check(self):
         job, paths = self._job_at_video_review()

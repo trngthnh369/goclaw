@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.2.0"
-  bundle_revision: "2026-09-24-016"
+  bundle_revision: "2026-09-24-017"
   runtime: python3
   forked_from: comingwave-study
 ---
@@ -53,12 +53,12 @@ Agents `write_file` into `<workspace>/inbox/<job>/<kind>.json` and run `submit -
 | `render` | vf-director | `out/master.mp4` for the current inputs, hard QA passed |
 | `review_video` | vf-reviewer | a verdict bound to the master sha; REVISE -> `fix_visuals` (director) or `script_revise` |
 | `deliver` | vf-director | `deliver/delivery.json` status `sent` for the current master |
-| `escalated` | human | `override --quote`, `feedback` or `cancel` on the human's word |
+| `escalated` | human | `override` (gateway-confirmed reply), `feedback` or `cancel` on the human's word |
 | `awaiting_approval` | human | - |
 | `published` | gateway | `published --job J` after the `message` tool answered `posted` |
 
 Two REVISE rounds on either review escalate to the human: the job's status becomes `escalated` and every `next` stops until the human answers.
-`override` works only on an escalated job and stores the human's words (`--quote`), which the review message then shows the human; a director in a cron run once overrode on its own.
+`override` works only on an escalated job and only in a run the gateway confirms was started by an allowlisted person replying to that job's escalation question (`GOCLAW_RUN_RECEIPT` -> `GET /v1/runs/receipt`); it stores the person's words as the gateway reports them, and the review message shows them. A director in a cron run once overrode on its own with a made-up quote.
 
 ## Commands
 
@@ -82,7 +82,7 @@ attach --job J --scene S --file PATH        redo --job J --scene S
 revise-visual --job J --scene S [--prompt P] [--motion M]
 render --job J [--budget SECONDS]           (resumable; PARTIAL means run it again)
 package --job J                             delivered --job J --status sent|failed      published --job J
-override --job J --stage script|video --quote Q (escalated jobs only) cancel --job J --reason R
+override --job J --stage script|video (escalated jobs, in the reply to a person) cancel --job J --reason R
 backlog add --topic T [--brief B] | backlog list | backlog take | backlog remove --id bN
                                    (take prints RESUME <job> while the cron's last video is still active)
 config set publish.facebook_reels.enabled=true   (review messages carry the [caption] block only when on)

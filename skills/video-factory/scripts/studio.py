@@ -16,7 +16,7 @@ stdout (exec), never through read_file.
     studio.py render --job J [--budget SECONDS]
     studio.py package --job J | delivered --job J --status sent [--message-id ID] | published --job J
     studio.py config set publish.facebook_reels.enabled=true|false
-    studio.py override --job J --stage script|video --quote "<human words>" | cancel --job J --reason R
+    studio.py override --job J --stage script|video (only in the reply to a person) | cancel --job J --reason R
     studio.py feedback --job J --type visual|script [--scene S] --text T   (human change request)
     studio.py set --job J [--voice V] [--rate N] [--theme T]
     studio.py backlog add --topic T [--brief B] | backlog list | backlog take
@@ -31,6 +31,8 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -513,20 +515,59 @@ def cmd_published(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_override(args: argparse.Namespace) -> int:
-    """Pass an escalated review on the human's word.
+# The gateway answers, for the run an exec command belongs to, whether the turn
+# that started it is an allowlisted person replying to this bot (see
+# internal/http/run_receipt.go). Nothing the model writes can stand in for it.
+RECEIPT_ENV = "GOCLAW_RUN_RECEIPT"
+RECEIPT_URL = os.environ.get("VF_RECEIPT_URL", "http://127.0.0.1:18790/v1/runs/receipt")
+CONTINUE_WORDS = ("cứ làm tiếp", "làm tiếp", "tiếp tục", "cứ đăng", "đồng ý", "được", "duyệt", "ok", "continue")
+# Checked first: "không được" contains "được", and a reply asking for changes or
+# a stop must never pass a review.
+STOP_WORDS = ("không", "khong", "chưa", "đừng", "huỷ", "hủy", "bỏ", "sửa", "dừng", "làm lại", "no", "cancel", "stop")
 
-    The quote is stored with the review and printed in the review message the
-    human receives, so an override the human never gave is in front of the one
-    person who can catch it.
+
+def human_reply_for(job_id: str, review_channel: str) -> str:
+    """The person's own words answering this job's escalation question, from the gateway.
+
+    The reply must come through the configured review channel: other channels
+    have their own allowlists, and none of them approves videos.
+    """
+    token = os.environ.get(RECEIPT_ENV, "").strip()
+    if not token:
+        raise StudioError("no run receipt: override runs only in the reply to a person's answer in the review channel")
+    request = urllib.request.Request(RECEIPT_URL, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            receipt = json.load(response)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise StudioError(f"the gateway did not confirm this run: {exc}") from None
+    if not receipt.get("human_reply"):
+        raise StudioError("this run was not started by an allowlisted person replying to the bot; "
+                          "only the person can pass an escalated review")
+    if not review_channel or receipt.get("channel") != review_channel:
+        raise StudioError(f"the reply came through {receipt.get('channel')!r}, not the review channel "
+                          f"{review_channel!r} (config delivery.channel)")
+    replied = receipt.get("reply_to_content", "")
+    if "Video Factory" not in replied or f"job: {job_id}" not in replied.splitlines():
+        raise StudioError(f"the person replied to a message that is not the escalation question of {job_id}")
+    return receipt.get("current_message", "").strip()
+
+
+def cmd_override(args: argparse.Namespace) -> int:
+    """Pass an escalated review on the person's word, as the gateway reports it.
+
+    A director in a cron run once passed a review on its own with a made-up
+    quote; the words stored here come from the gateway, never from the model.
     """
     studio = studio_from(args)
     paths = job_paths(studio, args.job)
     status = jobs.load_meta(paths).get("status")
     if status != "escalated":
         raise StudioError(f"job {args.job} is {status}; override only answers an escalated review")
-    if len(args.quote.strip()) < 2:
-        raise StudioError("--quote must be the human's own words, verbatim")
+    quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""))
+    words = quote.lower()
+    if any(word in words for word in STOP_WORDS) or not any(word in words for word in CONTINUE_WORDS):
+        raise StudioError(f"the person's reply does not say to continue: {quote[:200]!r}")
     state = jobs.load_state(paths)
     if args.stage == "script":
         target = jobs.script_review_sha(state.research, state.script)
@@ -536,12 +577,12 @@ def cmd_override(args: argparse.Namespace) -> int:
             raise StudioError("nothing rendered to override")
     write_json_numbered(paths.reviews, args.stage, len(jobs.reviews(paths, args.stage)) + 1, {
         "schema": "vf.review.v1", "stage": args.stage, "verdict": "PASS", "issues": [],
-        "notes": f"HUMAN OVERRIDE: {args.quote}", "_override": True, "_human_quote": args.quote.strip(),
+        "notes": f"HUMAN OVERRIDE: {quote}", "_override": True, "_human_quote": quote,
         "_target_sha": target, "_submitted_at": utc_now()})
     meta = jobs.load_meta(paths)
     meta["status"] = "active"
-    jobs.log_event(paths, meta, "override", stage=args.stage, quote=args.quote.strip()[:300])
-    out(f"OK {args.stage} review overridden by the human; run: {studio_cmd()} next --job {args.job}")
+    jobs.log_event(paths, meta, "override", stage=args.stage, quote=quote[:300])
+    out(f"OK {args.stage} review passed on the person's word; run: {studio_cmd()} next --job {args.job}")
     return 0
 
 
@@ -756,7 +797,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("override")
     p.add_argument("--job", required=True)
     p.add_argument("--stage", required=True, choices=["script", "video"])
-    p.add_argument("--quote", required=True, help="the human's own words, verbatim")
     p = sub.add_parser("cancel")
     p.add_argument("--job", required=True)
     p.add_argument("--reason", required=True)

@@ -450,7 +450,7 @@ def _human_decision_commands(paths: JobPaths, kind: str) -> dict[str, str]:
                  f"{cmd} cancel --job {job} --reason \"<direction>\", then {cmd} new --topic \"<topic>\" "
                  "--brief \"<the human's direction>\"")
     return {
-        "continue anyway": f"{cmd} override --job {job} --stage {kind} --quote \"<the human's words, verbatim>\"",
+        "continue anyway": f"{cmd} override --job {job} --stage {kind}   (the gateway supplies the person's words)",
         "give direction": direction,
         "cancel": f"{cmd} cancel --job {job} --reason \"<the human's words>\"",
     }

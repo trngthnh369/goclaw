@@ -37,7 +37,7 @@ F. **Approval of a delivered video** ("duyệt", "ok đăng", or a ✅ on the re
      - An error -> do NOT call it again. Tell the human the error in one Vietnamese sentence. If it says nothing was published, they can approve again; otherwise they must check the fanpage.
    - No `[caption]` block (publishing is off, or the cut is not a 9:16 Reel): reply that the video is approved and where the master file is (`status --job J`).
 G. **Answer to an escalation question** (a reply to your ⚠️ message; the job id is on its `job:` line): `exec` `next --job J`; it prints `human_commands`.
-   - "cứ làm tiếp", "ok", "được rồi" -> `override`, with their message verbatim in `--quote`.
+   - "cứ làm tiếp", "ok", "được rồi" -> `override --job J --stage <stage>`. The gateway confirms the reply and supplies their words; it refuses in any run a person's reply did not start.
    - "sửa: ..." or any direction -> `feedback` with their words (video), or the script route printed there.
    - "huỷ", "bỏ" -> `cancel` with their words as the reason.
    - Then run the loop. Never answer an escalation for them.
@@ -55,7 +55,7 @@ Run `next`, do exactly what its `action` says, run `next` again. Repeat until th
 - **`run` with `exec`** (stage `render`) - run it. `PARTIAL` means run the same command again. Then `next`.
 - **`fix_visuals`** - for each scene in `scenes`, read `issues`: a bad render of a good idea -> `redo --job J --scene sN`; a wrong idea -> `revise-visual --job J --scene sN --prompt "<new English prompt ending with no text>"`. Then `next`.
 - **`deliver`** - `exec` the `package` command. It prints either one `message` tool call (send it with exactly those arguments) or, when no channel is configured, the review text. Then `exec` `delivered --job J --status sent`. If there is no channel, your FINAL reply is that review text verbatim, including its `MEDIA:` line.
-- **`ask_human`** - the job is now escalated. If there is a `message_call`, send it with ONE `message` tool call, arguments exactly as printed (it carries the question and the video). Otherwise tell the human, in Vietnamese, what is still wrong (the `issues`) and the choices: continue anyway, give direction, or cancel. Then end your run (in a `VF_CRON` run after sending, your final reply is `NO_REPLY`). Nobody has answered yet: never run `override`, `feedback` or `cancel` in this run, and never in a `VF_CRON` run. When the human answers later, `next` prints `human_commands`; `override` takes the human's words verbatim in `--quote`, and the review message shows that quote to the human.
+- **`ask_human`** - the job is now escalated. If there is a `message_call`, send it with ONE `message` tool call, arguments exactly as printed (it carries the question and the video). Otherwise tell the human, in Vietnamese, what is still wrong (the `issues`) and the choices: continue anyway, give direction, or cancel. Then end your run (in a `VF_CRON` run after sending, your final reply is `NO_REPLY`). Nobody has answered yet: never run `override`, `feedback` or `cancel` in this run, and never in a `VF_CRON` run. When the human answers later (case G), `next` prints `human_commands`.
 - **`stop`** - final reply: 2-3 lines in Vietnamese (job, duration, what to do next). In a `VF_CRON` run the final reply is `NO_REPLY` unless you sent nothing at all.
 
 ## Hard rules
