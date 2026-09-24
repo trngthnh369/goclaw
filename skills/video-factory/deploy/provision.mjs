@@ -54,7 +54,8 @@ const TEAM = { name: 'Video Factory', lead: 'vf-director', members: ['vf-scriptw
 const headers = { Authorization: `Bearer ${TOKEN}`, 'X-GoClaw-User-Id': USER, 'Content-Type': 'application/json' };
 async function http(method, url, body) {
   if (DRY && method !== 'GET') { console.log('DRY', method, url); return {}; }
-  const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(30000) });
   const text = await res.text();
   if (!res.ok) throw new Error(`${method} ${url} -> ${res.status} ${text.slice(0, 300)}`);
   return text ? JSON.parse(text) : {};
@@ -64,6 +65,9 @@ function rpcClient() {
   const ws = new WebSocket(WS_URL);
   const pending = new Map();
   let n = 0;
+  // A dropped socket or a stalled gateway must fail the run, not hang it.
+  const failAll = (err) => { for (const { rej } of pending.values()) rej(err); pending.clear(); };
+  ws.addEventListener('close', () => failAll(new Error('ws closed')));
   const ready = new Promise((res, rej) => {
     ws.addEventListener('open', () => {
       const id = 'c' + (++n);
@@ -82,7 +86,11 @@ function rpcClient() {
     await ready;
     if (DRY && !method.endsWith('.list') && !method.endsWith('.get')) { console.log('DRY rpc', method); return {}; }
     const id = 'r' + (++n);
-    return new Promise((res, rej) => { pending.set(id, { res, rej }); ws.send(JSON.stringify({ type: 'req', id, method, params })); });
+    return new Promise((res, rej) => {
+      const timer = setTimeout(() => { pending.delete(id); rej(new Error(`${method} timed out`)); }, 30000);
+      pending.set(id, { res: (v) => { clearTimeout(timer); res(v); }, rej: (e) => { clearTimeout(timer); rej(e); } });
+      ws.send(JSON.stringify({ type: 'req', id, method, params }));
+    });
   };
   return { call, close: () => ws.close() };
 }

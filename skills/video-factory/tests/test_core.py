@@ -376,6 +376,25 @@ class FlowTests(unittest.TestCase):
         self.assertIn("[s1] bàn tay sáu ngón", message)
         self.assertIn("cứ làm tiếp", message)
 
+    def test_redo_takes_only_a_scene_of_the_script(self):
+        job, paths = self._job_at_video_review()
+        code, text = run_cli("--workspace", self.ws, "redo", "--job", job, "--scene", "../job")
+        self.assertEqual(code, 1, text)
+        self.assertTrue(paths.meta.exists())
+
+    def test_config_values_are_typed_and_a_publish_switch_is_only_true_or_false(self):
+        for kv in ("publish.facebook_reels.enabled=no", "defaults.rate=abc"):
+            code, text = run_cli("--workspace", self.ws, "config", "set", kv)
+            self.assertEqual(code, 1, text)
+        self.assertFalse(studio.load_config(Studio(Path(self.ws)))["publish"]["facebook_reels"]["enabled"])
+
+    def test_two_reviews_claiming_one_number_both_survive(self):
+        from vfcore.util import write_json_numbered
+        with tempfile.TemporaryDirectory() as root:
+            first = write_json_numbered(Path(root), "video", 1, {"n": 1})
+            second = write_json_numbered(Path(root), "video", 1, {"n": 2})
+            self.assertEqual((first.name, second.name), ("video-01.json", "video-02.json"))
+
     def test_override_answers_only_an_escalation_and_carries_the_human_quote(self):
         job, paths = self._job_at_video_review()
         code, text = run_cli("--workspace", self.ws, "override", "--job", job, "--stage", "video",

@@ -29,7 +29,8 @@ if (botToken.length < 50 || /\s/.test(botToken)) {
 
 const headers = { Authorization: `Bearer ${TOKEN}`, 'X-GoClaw-User-Id': USER, 'Content-Type': 'application/json' };
 async function http(method, url, body) {
-  const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(30000) });
   const text = await res.text();
   if (!res.ok) throw new Error(`${method} ${url} -> ${res.status} ${text.slice(0, 200)}`);
   return text ? JSON.parse(text) : {};
@@ -56,7 +57,10 @@ async function main() {
   const existing = instances.find((i) => i.name === NAME);
   const body = { agent_id: director.id, credentials: { token: botToken }, config, enabled: true };
   if (existing) {
-    await http('PUT', `/v1/channels/instances/${existing.id}`, body);
+    // The store replaces config as a whole (only credentials are merged), so keep
+    // what was set elsewhere, e.g. in the web UI, and override only our keys.
+    await http('PUT', `/v1/channels/instances/${existing.id}`,
+      { ...body, config: { ...(existing.config || {}), ...config } });
     console.log('UPDATED', NAME, existing.id, 'review chat', chatId);
   } else {
     const created = await http('POST', '/v1/channels/instances',

@@ -13,10 +13,32 @@
 // Node 24 ships fetch and WebSocket, so this has no dependencies.
 import fs from 'node:fs';
 import { lookup } from 'node:dns/promises';
+import net from 'node:net';
 
 const CDP_HOST = process.env.CDP_HOST || 'chrome';
 const CDP_PORT = process.env.CDP_PORT || '9222';
 const NAV_TIMEOUT_MS = 25000;
+const CONNECT_TIMEOUT_MS = 15000;
+
+// Mirrors vfcore/netguard.py. The Python check resolves the name once, but Chrome
+// resolves it again on its own, so a record that changes in between (DNS
+// rebinding) would slip past; every response a page loads is checked here, on the
+// address Chrome actually connected to.
+const PRIVATE_V4 = [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.168.0.0', 16], ['224.0.0.0', 3]];
+const v4num = (ip) => ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
+function isPrivateAddress(raw) {
+  let ip = String(raw || '').replace(/^\[|\]$/g, '').toLowerCase();
+  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) ip = mapped[1];
+  if (net.isIPv4(ip)) {
+    return PRIVATE_V4.some(([base, bits]) => Math.floor(v4num(ip) / 2 ** (32 - bits)) === Math.floor(v4num(base) / 2 ** (32 - bits)));
+  }
+  if (net.isIPv6(ip)) {
+    return ip === '::' || ip === '::1' || /^f[cd]/.test(ip) || /^fe[89ab]/.test(ip) || ip.startsWith('ff');
+  }
+  return false;   // no address (served from cache or a data: URL)
+}
 const MOBILE_UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/128.0.0.0 Mobile Safari/537.36';
@@ -73,12 +95,14 @@ class Cdp {
 
 async function connect() {
   const { address } = await lookup(CDP_HOST);
-  const version = await (await fetch(`http://${address}:${CDP_PORT}/json/version`)).json();
+  const version = await (await fetch(`http://${address}:${CDP_PORT}/json/version`,
+    { signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) })).json();
   const wsUrl = version.webSocketDebuggerUrl.replace(/\/\/[^/]+\//, `//${address}:${CDP_PORT}/`);
   const ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => {
-    ws.onopen = res;
-    ws.onerror = (e) => rej(new Error('ws: ' + (e.message || 'connect failed')));
+    const timer = setTimeout(() => rej(new Error('ws: connect timed out')), CONNECT_TIMEOUT_MS);
+    ws.onopen = () => { clearTimeout(timer); res(); };
+    ws.onerror = (e) => { clearTimeout(timer); rej(new Error('ws: ' + (e.message || 'connect failed'))); };
   });
   return new Cdp(ws);
 }
@@ -101,10 +125,23 @@ async function renderOne(cdp, sessionId, job) {
   // An empty override clears a transparent background left by a previous job.
   await cdp.send('Emulation.setDefaultBackgroundColorOverride',
     job.transparent ? { color: { r: 0, g: 0, b: 0, a: 0 } } : {}, sessionId);
-  const loaded = cdp.waitFor('Page.loadEventFired', sessionId, NAV_TIMEOUT_MS);
-  const nav = await cdp.send('Page.navigate', { url: job.url }, sessionId, NAV_TIMEOUT_MS);
-  if (nav.errorText) throw new Error('navigation failed: ' + nav.errorText);
-  await loaded;
+  let privateHit = null;
+  const watch = (msg) => {
+    if (msg.method === 'Network.responseReceived' && msg.sessionId === sessionId
+        && isPrivateAddress(msg.params.response.remoteIPAddress)) {
+      privateHit = privateHit || `${msg.params.response.url} from ${msg.params.response.remoteIPAddress}`;
+    }
+  };
+  if (!isHtml) cdp.listeners.push(watch);
+  try {
+    const loaded = cdp.waitFor('Page.loadEventFired', sessionId, NAV_TIMEOUT_MS);
+    const nav = await cdp.send('Page.navigate', { url: job.url }, sessionId, NAV_TIMEOUT_MS);
+    if (nav.errorText) throw new Error('navigation failed: ' + nav.errorText);
+    await loaded;
+    if (privateHit) throw new Error('refused: the page loaded ' + privateHit + ', a non-public address');
+  } finally {
+    cdp.listeners = cdp.listeners.filter((f) => f !== watch);
+  }
   // Fonts and late layout: wait for document.fonts, then a short settle.
   await cdp.send('Runtime.evaluate',
     { expression: 'document.fonts ? document.fonts.ready.then(() => true) : true', awaitPromise: true },
@@ -118,6 +155,7 @@ async function renderOne(cdp, sessionId, job) {
     const maxCss = Math.floor((job.maxHeight || height * scale * 3) / scale);
     clipHeight = Math.max(height, Math.min(Math.ceil(content.height), maxCss));
   }
+  if (privateHit) throw new Error('refused: the page loaded ' + privateHit + ', a non-public address');
   const shot = await cdp.send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: !isHtml,
@@ -135,6 +173,7 @@ async function main() {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Page.enable', {}, sessionId);
+  await cdp.send('Network.enable', {}, sessionId);
   let failed = 0;
   for (const job of jobs) {
     try {

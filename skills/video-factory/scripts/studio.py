@@ -37,10 +37,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from vfcore import backlog, briefs, jobs, package, render  # noqa: E402
 from vfcore.formats import FORMATS  # noqa: E402
-from vfcore.paths import CDP_RENDER_JS, FONTS_DIR, Studio, default_workspace, studio_cmd  # noqa: E402
+from vfcore.paths import CDP_RENDER_JS, FONTS_DIR, JobPaths, Studio, default_workspace, studio_cmd  # noqa: E402
 from vfcore.schema import MOTIONS, validate_research  # noqa: E402
 from vfcore.util import (StudioError, append_ndjson, read_json, sha256_file, utc_now,  # noqa: E402
-                         write_json)
+                         write_json, write_json_numbered)
 
 DEFAULT_CONFIG = {
     "schema": "vf.studio.v1",
@@ -104,7 +104,7 @@ def metric(studio: Studio, **row: object) -> None:
     append_ndjson(studio.metrics, {"at": utc_now(), **row})
 
 
-def payload_file(paths, given: str | None, kind: str) -> Path | None:
+def payload_file(paths: JobPaths, given: str | None, kind: str) -> Path | None:
     """The inbox file to read, or None for stdin. Only the job's own inbox is accepted."""
     if not given:
         return None
@@ -382,6 +382,10 @@ def cmd_attach(args: argparse.Namespace) -> int:
 def cmd_redo(args: argparse.Namespace) -> int:
     studio = studio_from(args)
     paths = job_paths(studio, args.job, open_only=True)
+    state = jobs.load_state(paths)
+    scene_ids = [s["id"] for s in state.script.get("scenes", [])] if state.script_ok else []
+    if args.scene not in scene_ids:   # also keeps "../x" from naming a file outside assets/
+        raise StudioError(f"scene must be one of {', '.join(scene_ids) or '(no valid script yet)'}")
     record = paths.assets / f"{args.scene}.json"
     if record.exists():
         record.unlink()
@@ -444,7 +448,7 @@ def cmd_package(args: argparse.Namespace) -> int:
     studio = studio_from(args)
     paths = job_paths(studio, args.job, open_only=True)
     cfg = load_config(studio)
-    record = package.package(paths, publish_enabled=bool(cfg["publish"]["facebook_reels"].get("enabled")))
+    record = package.package(paths, publish_enabled=cfg["publish"]["facebook_reels"].get("enabled") is True)
     channel, target = cfg["delivery"].get("channel"), cfg["delivery"].get("target")
     out(f"PACKAGED {args.job}: {paths.deliver}")
     out("Reels: publishable on approval" if record["reels_publishable"]
@@ -523,8 +527,7 @@ def cmd_override(args: argparse.Namespace) -> int:
         target = (read_json(paths.manifest) or {}).get("master_sha")
         if not target:
             raise StudioError("nothing rendered to override")
-    count = len(jobs.reviews(paths, args.stage)) + 1
-    write_json(paths.reviews / f"{args.stage}-{count:02d}.json", {
+    write_json_numbered(paths.reviews, args.stage, len(jobs.reviews(paths, args.stage)) + 1, {
         "schema": "vf.review.v1", "stage": args.stage, "verdict": "PASS", "issues": [],
         "notes": f"HUMAN OVERRIDE: {args.quote}", "_override": True, "_human_quote": args.quote.strip(),
         "_target_sha": target, "_submitted_at": utc_now()})
@@ -645,6 +648,26 @@ def cmd_backlog(args: argparse.Namespace) -> int:
     return 0
 
 
+# Each settable key has one type. A Discord chat id stays text: 19 digits pass 2**53
+# and a JSON reader using doubles (the gateway's tool arguments) rounds them. A
+# publish switch accepts only true/false: "no" used to be stored as a string, and
+# a non-empty string is truthy, so it switched publishing ON.
+CONFIG_TYPES = {"publish.facebook_reels.enabled": bool, "brand.show": bool,
+                "defaults.rate": int, "music.volume_db": float}
+
+
+def _config_value(key: str, value: str) -> object:
+    kind = CONFIG_TYPES.get(key, str)
+    if kind is bool:
+        if value.lower() not in ("true", "false"):
+            raise StudioError(f"{key} must be true or false")
+        return value.lower() == "true"
+    try:
+        return kind(value)
+    except ValueError:
+        raise StudioError(f"{key} must be a {kind.__name__}, got {value!r}") from None
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     studio = studio_from(args)
     cfg = load_config(studio)
@@ -659,15 +682,7 @@ def cmd_config(args: argparse.Namespace) -> int:
         raise StudioError(f"settable keys: {', '.join(sorted(allowed))}")
     raw = read_json(studio.config) or {}
     *parents, name = key.split(".")
-    parsed: object = value
-    # A Discord chat id has 19 digits: stored as a number it passes 2**53 and a
-    # JSON reader that uses doubles (the gateway's tool arguments) rounds it.
-    if key in ("delivery.channel", "delivery.target", "brand.handle"):
-        parsed = value
-    elif value.lower() in ("true", "false"):
-        parsed = value.lower() == "true"
-    elif re.fullmatch(r"-?\d+", value):
-        parsed = int(value)
+    parsed = _config_value(key, value)
     if key == "defaults.format" and value not in FORMATS:
         raise StudioError(f"format must be one of {', '.join(FORMATS)}")
     node = raw
@@ -782,6 +797,9 @@ def main(argv: list[str] | None = None) -> int:
     except StudioError as exc:
         out(f"ERROR {exc}")
         return 1
+    except Exception as exc:  # the agents parse ERROR lines; a traceback reads as noise
+        out(f"ERROR unexpected {type(exc).__name__}: {exc}")
+        return 2
 
 
 def newer_install(script: Path | None = None) -> Path | None:

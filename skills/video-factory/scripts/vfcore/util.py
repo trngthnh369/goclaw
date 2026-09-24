@@ -66,6 +66,31 @@ def write_text(path: Path, text: str) -> None:
         raise
 
 
+def write_json_numbered(directory: Path, prefix: str, start: int, value: Any) -> Path:
+    """Write `value` to the first free `<prefix>-NN.json` from `start`, never over one.
+
+    Counting existing files and then writing lets two runs on one job pick the same
+    number, and the second atomic write replaces the first review. A hard link of
+    a complete temp file fails if the name exists, so each run claims its own.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{prefix}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        os.chmod(tmp, 0o644)
+        number = start
+        while True:
+            target = directory / f"{prefix}-{number:02d}.json"
+            try:
+                os.link(tmp, target)
+                return target
+            except FileExistsError:
+                number += 1
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def append_ndjson(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:

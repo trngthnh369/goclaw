@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .jobs import latest_review, load_state, script_review_sha
+from .jobs import JobState, latest_review, load_state, script_review_sha
 from .paths import JobPaths
 from .util import StudioError, read_json, sha256_file, utc_now, write_json, write_text
 
@@ -114,7 +114,7 @@ def escalation_message(paths: JobPaths, issues: list[str]) -> str:
     return text
 
 
-def override_quotes(paths: JobPaths, state, manifest: dict) -> list[str]:
+def override_quotes(paths: JobPaths, state: JobState, manifest: dict) -> list[str]:
     """The human's words behind each review that was passed by override for what ships."""
     current = [latest_review(paths, "script", script_review_sha(state.research, state.script)),
                latest_review(paths, "video", manifest["master_sha"])]

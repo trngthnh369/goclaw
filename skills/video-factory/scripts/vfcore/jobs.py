@@ -25,7 +25,8 @@ from .paths import JobPaths, Studio, studio_cmd
 from .schema import (script_fact_refs, script_scene_ids, validate_research,
                      validate_review, validate_script)
 from .textutil import slugify
-from .util import StudioError, canonical_json, read_json, sha256_file, sha256_text, utc_now, write_json
+from .util import (StudioError, canonical_json, read_json, sha256_file, sha256_text, utc_now, write_json,
+                   write_json_numbered)
 
 MAX_SCRIPT_REVISIONS = 2
 MAX_VIDEO_REVISIONS = 2
@@ -491,8 +492,7 @@ def submit_review(paths: JobPaths, kind: str, doc: Any) -> tuple[list[str], list
     doc = dict(doc)
     doc["_target_sha"] = target
     doc["_submitted_at"] = utc_now()
-    count = len(reviews(paths, stage)) + 1
-    write_json(paths.reviews / f"{stage}-{count:02d}.json", doc)
+    write_json_numbered(paths.reviews, stage, len(reviews(paths, stage)) + 1, doc)
     meta = load_meta(paths)
     log_event(paths, meta, f"review_{stage}", verdict=doc["verdict"], target=target)
     return [], warnings, None
@@ -551,8 +551,7 @@ def record_human_feedback(paths: JobPaths, kind: str, scene: str, text: str) -> 
         current["_submitted_at"] = utc_now()
         write_json(target, current)
     else:
-        count = len(reviews(paths, "video")) + 1
-        write_json(paths.reviews / f"video-{count:02d}.json", {
+        write_json_numbered(paths.reviews, "video", len(reviews(paths, "video")) + 1, {
             "schema": "vf.review.v1", "stage": "video", "verdict": "REVISE", "issues": [issue],
             "checked_scenes": scene_ids, "_human": True,
             "_target_sha": manifest["master_sha"], "_submitted_at": utc_now()})
