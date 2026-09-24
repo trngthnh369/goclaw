@@ -131,10 +131,12 @@ func (s *SQLiteTeamStore) CreateTask(ctx context.Context, task *store.TeamTaskDa
 		nilStr(task.UserID), nilStr(task.Channel),
 		task.TaskType, taskNumber, task.Identifier,
 		task.BatchID,
-		nilStr(task.IdempotencyKey),
-		nilStr(task.TaskRole),
+		// NOT NULL DEFAULT '' columns: an explicit NULL skips the default and
+		// violates the constraint, so pass the plain string.
+		task.IdempotencyKey,
+		task.TaskRole,
 		task.DependencyPolicy,
-		nilStr(task.ExecutionMode),
+		task.ExecutionMode,
 		task.CreatedByAgentID, task.ParentID,
 		nilStr(task.ChatID),
 		metaJSON,

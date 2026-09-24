@@ -143,10 +143,12 @@ func (s *PGTeamStore) CreateTask(ctx context.Context, task *store.TeamTaskData) 
 		sql.NullString{String: task.Channel, Valid: task.Channel != ""},
 		task.TaskType, taskNumber, task.Identifier,
 		task.BatchID,
-		sql.NullString{String: task.IdempotencyKey, Valid: task.IdempotencyKey != ""},
-		sql.NullString{String: task.TaskRole, Valid: task.TaskRole != ""},
+		// NOT NULL DEFAULT '' columns (migration 000082): an explicit NULL skips
+		// the default and violates the constraint, so pass the plain string.
+		task.IdempotencyKey,
+		task.TaskRole,
 		task.DependencyPolicy,
-		sql.NullString{String: task.ExecutionMode, Valid: task.ExecutionMode != ""},
+		task.ExecutionMode,
 		task.CreatedByAgentID, task.ParentID,
 		sql.NullString{String: task.ChatID, Valid: task.ChatID != ""},
 		metaJSON,
