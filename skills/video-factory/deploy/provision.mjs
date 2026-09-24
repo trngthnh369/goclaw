@@ -69,6 +69,9 @@ function rpcClient() {
   const failAll = (err) => { for (const { rej } of pending.values()) rej(err); pending.clear(); };
   ws.addEventListener('close', () => failAll(new Error('ws closed')));
   const ready = new Promise((res, rej) => {
+    const timer = setTimeout(() => { rej(new Error('ws connect timed out')); ws.close(); }, 30000);
+    const settle = (fn) => (v) => { clearTimeout(timer); fn(v); };
+    res = settle(res); rej = settle(rej);
     ws.addEventListener('open', () => {
       const id = 'c' + (++n);
       pending.set(id, { res, rej });

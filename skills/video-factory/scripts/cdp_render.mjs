@@ -25,7 +25,8 @@ const CONNECT_TIMEOUT_MS = 15000;
 // rebinding) would slip past; every response a page loads is checked here, on the
 // address Chrome actually connected to.
 const PRIVATE_V4 = [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
-  ['172.16.0.0', 12], ['192.168.0.0', 16], ['224.0.0.0', 3]];
+  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 3]];
 const v4num = (ip) => ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
 function isPrivateAddress(raw) {
   let ip = String(raw || '').replace(/^\[|\]$/g, '').toLowerCase();
@@ -37,7 +38,7 @@ function isPrivateAddress(raw) {
   if (net.isIPv6(ip)) {
     return ip === '::' || ip === '::1' || /^f[cd]/.test(ip) || /^fe[89ab]/.test(ip) || ip.startsWith('ff');
   }
-  return false;   // no address (served from cache or a data: URL)
+  return false;   // no address: the caller decides (data:/blob: responses have none)
 }
 const MOBILE_UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -125,43 +126,50 @@ async function renderOne(cdp, sessionId, job) {
   // An empty override clears a transparent background left by a previous job.
   await cdp.send('Emulation.setDefaultBackgroundColorOverride',
     job.transparent ? { color: { r: 0, g: 0, b: 0, a: 0 } } : {}, sessionId);
+  // The watch stays on until the screenshot is taken: a page can fetch more after
+  // its load event, during the font wait and the settle below.
   let privateHit = null;
   const watch = (msg) => {
-    if (msg.method === 'Network.responseReceived' && msg.sessionId === sessionId
-        && isPrivateAddress(msg.params.response.remoteIPAddress)) {
-      privateHit = privateHit || `${msg.params.response.url} from ${msg.params.response.remoteIPAddress}`;
+    if (msg.method !== 'Network.responseReceived' || msg.sessionId !== sessionId) return;
+    const { url, remoteIPAddress } = msg.params.response;
+    const networked = /^(https?|wss?):/i.test(url);
+    if (isPrivateAddress(remoteIPAddress) || (networked && !remoteIPAddress)) {
+      privateHit = privateHit || `${url} from ${remoteIPAddress || 'an unknown address'}`;
     }
   };
+  const refuseIfPrivate = () => {
+    if (privateHit) throw new Error('refused: the page loaded ' + privateHit + ', not a public address');
+  };
   if (!isHtml) cdp.listeners.push(watch);
+  let shot, clipHeight = height;
   try {
     const loaded = cdp.waitFor('Page.loadEventFired', sessionId, NAV_TIMEOUT_MS);
     const nav = await cdp.send('Page.navigate', { url: job.url }, sessionId, NAV_TIMEOUT_MS);
     if (nav.errorText) throw new Error('navigation failed: ' + nav.errorText);
     await loaded;
-    if (privateHit) throw new Error('refused: the page loaded ' + privateHit + ', a non-public address');
+    refuseIfPrivate();
+    // Fonts and late layout: wait for document.fonts, then a short settle.
+    await cdp.send('Runtime.evaluate',
+      { expression: 'document.fonts ? document.fonts.ready.then(() => true) : true', awaitPromise: true },
+      sessionId, 15000).catch(() => {});
+    await sleep(isHtml ? 250 : 1800);
+    if (!isHtml) {
+      const metrics = await cdp.send('Page.getLayoutMetrics', {}, sessionId);
+      const content = metrics.cssContentSize || metrics.contentSize;
+      const maxCss = Math.floor((job.maxHeight || height * scale * 3) / scale);
+      clipHeight = Math.max(height, Math.min(Math.ceil(content.height), maxCss));
+    }
+    refuseIfPrivate();
+    shot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: !isHtml,
+      fromSurface: true,
+      clip: { x: 0, y: 0, width, height: clipHeight, scale },
+    }, sessionId, 60000);
+    refuseIfPrivate();
   } finally {
     cdp.listeners = cdp.listeners.filter((f) => f !== watch);
   }
-  // Fonts and late layout: wait for document.fonts, then a short settle.
-  await cdp.send('Runtime.evaluate',
-    { expression: 'document.fonts ? document.fonts.ready.then(() => true) : true', awaitPromise: true },
-    sessionId, 15000).catch(() => {});
-  await sleep(isHtml ? 250 : 1800);
-
-  let clipHeight = height;
-  if (!isHtml) {
-    const metrics = await cdp.send('Page.getLayoutMetrics', {}, sessionId);
-    const content = metrics.cssContentSize || metrics.contentSize;
-    const maxCss = Math.floor((job.maxHeight || height * scale * 3) / scale);
-    clipHeight = Math.max(height, Math.min(Math.ceil(content.height), maxCss));
-  }
-  if (privateHit) throw new Error('refused: the page loaded ' + privateHit + ', a non-public address');
-  const shot = await cdp.send('Page.captureScreenshot', {
-    format: 'png',
-    captureBeyondViewport: !isHtml,
-    fromSurface: true,
-    clip: { x: 0, y: 0, width, height: clipHeight, scale },
-  }, sessionId, 60000);
   fs.writeFileSync(job.out, Buffer.from(shot.data, 'base64'));
   return `${Math.round(width * scale)}x${Math.round(clipHeight * scale)}`;
 }
@@ -174,6 +182,8 @@ async function main() {
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Page.enable', {}, sessionId);
   await cdp.send('Network.enable', {}, sessionId);
+  // A resource cached by an earlier job would come back with no address to check.
+  await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
   let failed = 0;
   for (const job of jobs) {
     try {
