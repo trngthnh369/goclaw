@@ -35,6 +35,17 @@ func (ch *Channel) afterPublish(ctx context.Context, msg bus.OutboundMessage, po
 	ch.announcePublished(msg, postID, link)
 }
 
+// afterPublishReel is afterPublish for a reel: the id is a video id and its
+// permalink comes back as a facebook.com path.
+func (ch *Channel) afterPublishReel(ctx context.Context, msg bus.OutboundMessage, videoID string) {
+	link, err := ch.graphClient.GetReelPermalink(ctx, videoID)
+	if err != nil {
+		slog.Warn("facebook: reel permalink lookup failed", "video_id", videoID, "error", err)
+	}
+	ch.recordPublication(msg, videoID, link)
+	ch.announcePublished(msg, videoID, link)
+}
+
 func (ch *Channel) announcePublished(msg bus.OutboundMessage, postID, link string) {
 	notifyCh := strings.TrimSpace(msg.Metadata["notify_channel"])
 	notifyChat := strings.TrimSpace(msg.Metadata["notify_chat"])
@@ -47,9 +58,19 @@ func (ch *Channel) announcePublished(msg bus.OutboundMessage, postID, link strin
 		return
 	}
 
+	// The first line must stay "✅ Đã đăng lên fanpage." for reels too: the
+	// Discord channel matches that prefix to tell published drafts from pending.
 	text := fmt.Sprintf("✅ Đã đăng lên fanpage.\npost_id: %s", postID)
+	if msg.Metadata["fb_mode"] == "reels_post" {
+		text = fmt.Sprintf("✅ Đã đăng lên fanpage.\nreel video_id: %s", postID)
+	}
 	if link != "" {
 		text += "\n" + link
+	}
+	// The Discord channel reads this line to tell published drafts from
+	// pending ones when an approver types "duyệt" without replying.
+	if draftID := strings.TrimSpace(msg.Metadata["review_message_id"]); draftID != "" {
+		text += "\ndraft_id: " + draftID
 	}
 
 	out := bus.OutboundMessage{Channel: notifyCh, ChatID: notifyChat, Content: text}

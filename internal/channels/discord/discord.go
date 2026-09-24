@@ -50,7 +50,8 @@ func New(cfg config.DiscordConfig, msgBus *bus.MessageBus, pairingSvc store.Pair
 	// Request necessary intents
 	session.Identify.Intents = discordgo.IntentsGuildMessages |
 		discordgo.IntentsDirectMessages |
-		discordgo.IntentsMessageContent
+		discordgo.IntentsMessageContent |
+		discordgo.IntentsGuildMessageReactions // ✅ on a review draft approves it
 
 	base := channels.NewBaseChannel(channels.TypeDiscord, msgBus, cfg.AllowFrom)
 	base.ValidatePolicy(cfg.DMPolicy, cfg.GroupPolicy)
@@ -86,6 +87,7 @@ func (c *Channel) Start(_ context.Context) error {
 	slog.Info("starting discord bot")
 
 	c.session.AddHandler(c.handleMessage)
+	c.session.AddHandler(c.handleReactionAdd)
 
 	if err := c.session.Open(); err != nil {
 		return fmt.Errorf("open discord session: %w", err)
@@ -215,7 +217,11 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) (err error)
 				_ = c.session.ChannelMessageDelete(channelID, msgID)
 			}
 		}
-		return c.sendMediaMessage(channelID, content, msg.Media)
+		id, err := c.sendMediaMessageID(channelID, content, msg.Media)
+		if err == nil {
+			c.markIfReviewDraft(msg, channelID, []string{id})
+		}
+		return err
 	}
 
 	// NO_REPLY cleanup: content is empty when agent suppresses reply.
@@ -264,21 +270,35 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) (err error)
 	}
 
 	// Send as new message(s), chunking if needed
-	return c.sendChunked(channelID, content)
+	ids, err := c.sendChunkedIDs(channelID, content)
+	if err == nil {
+		c.markIfReviewDraft(msg, channelID, ids)
+	}
+	return err
 }
 
 // sendChunked sends a message, splitting into multiple messages if over 2000 chars.
 // Uses markdown-aware chunking to avoid splitting inside fenced code blocks.
 func (c *Channel) sendChunked(channelID, content string) error {
+	_, err := c.sendChunkedIDs(channelID, content)
+	return err
+}
+
+func (c *Channel) sendChunkedIDs(channelID, content string) ([]string, error) {
 	const maxLen = 2000
 
+	var ids []string
 	for _, chunk := range channels.ChunkMarkdown(content, maxLen) {
-		if _, err := c.session.ChannelMessageSend(channelID, chunk); err != nil {
-			return fmt.Errorf("send discord message: %w", err)
+		sent, err := c.session.ChannelMessageSend(channelID, chunk)
+		if err != nil {
+			return ids, fmt.Errorf("send discord message: %w", err)
+		}
+		if sent != nil {
+			ids = append(ids, sent.ID)
 		}
 	}
 
-	return nil
+	return ids, nil
 }
 
 // lastIndexByte returns the last index of byte c in s, or -1.

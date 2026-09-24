@@ -165,6 +165,7 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "history_limit", label: "Group History Limit", type: "number", defaultValue: 50, help: "Max pending group messages for context (0 = disabled)" },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Discord user IDs" },
     { key: "approval_allow_from", label: "Approval Allowed Users", type: "tags", help: "Discord user IDs allowed to approve irreversible public actions (e.g. publishing to a Facebook page). Separate from Allowed Users — empty means nobody can approve." },
+    { key: "reels_review_chat_ids", label: "Reels Review Channels", type: "tags", help: "Discord channel IDs whose approved review drafts (one video + a [caption] block) may be published as Facebook Reels. Empty means no channel publishes Reels." },
     ...chatBehaviorOverrideFields,
   ],
   slack: [
@@ -231,6 +232,7 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "post_context_cache_ttl", label: "Post Cache TTL", type: "text", placeholder: "e.g. 15m" },
     { key: "first_inbox_message", label: "First Inbox DM Text", type: "textarea", help: "Custom DM sent to first-time commenters. Defaults to Vietnamese if empty." },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Facebook user IDs" },
+    { key: "publishers", label: "Co-publisher Agents", type: "tags", help: "Agent keys, besides the agent this page is bound to, that may publish human-approved posts and reels to the page." },
   ],
   pancake: [
     { key: "page_id", label: "Page ID", type: "text", required: true, help: "Pancake internal page ID (numeric, from Pancake dashboard)" },

@@ -1212,39 +1212,111 @@ func TestMessagePost_CrossTargetExplicitApprovalPasses(t *testing.T) {
 	}
 }
 
-func TestMessagePost_RejectsContentNotInApprovedReply(t *testing.T) {
-	tool := NewMessageTool(t.TempDir(), false)
-	var dispatched bool
+// The model's copy of the article is never published. When it drifts from the
+// reviewed Discord message, the reviewed message is what goes out.
+func TestMessagePost_MutatedContentPublishesReviewedDraft(t *testing.T) {
+	const reviewed = "Read https://example.com/Product/ABC"
+	for name, mutated := range map[string]string{
+		"suffix": reviewed + " with an unapproved suffix",
+		"case":   "Read https://example.com/product/abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tool := NewMessageTool(t.TempDir(), false)
+			var dispatched []bus.OutboundMessage
+			tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
+				dispatched = append(dispatched, msg)
+				return nil
+			})
+			ctx := approvedFeedPostCtxFor(reviewed, "review-msg-"+name, "")
+
+			res := tool.Execute(ctx, map[string]any{
+				"action":         "post",
+				"channel":        "fb-page",
+				"target":         "feed",
+				"forward":        true,
+				"forward_reason": "User replied 'duyệt' to this ContentFactory article",
+				"message":        mutated,
+			})
+			if res == nil || res.IsError {
+				t.Fatalf("expected reviewed draft to be published, got: %+v", res)
+			}
+			if len(dispatched) != 1 || dispatched[0].Content != reviewed {
+				t.Fatalf("dispatched = %+v, want exactly the reviewed text", dispatched)
+			}
+			if got := dispatched[0].Metadata["review_message_id"]; got != "review-msg-"+name {
+				t.Fatalf("review_message_id = %q", got)
+			}
+		})
+	}
+}
+
+// The live shape of the fallback: every real draft carries one image, and a
+// model that retypes the text also passes its own MEDIA path. Both are
+// replaced by the reviewed message and its attachment.
+func TestMessagePost_MutatedContentWithMediaPublishesReviewedDraft(t *testing.T) {
+	workspace := t.TempDir()
+	imgFile := filepath.Join(workspace, "approved.png")
+	if err := os.WriteFile(imgFile, []byte("approved-png-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imgCanonical, err := filepath.EvalSymlinks(imgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgSHA, err := hashFeedPostFile(imgCanonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewMessageTool(workspace, true)
+	var dispatched []bus.OutboundMessage
+	var dispatchedMedia []byte
 	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
-		dispatched = true
+		dispatched = append(dispatched, msg)
+		if len(msg.Media) == 1 {
+			dispatchedMedia, _ = os.ReadFile(msg.Media[0].URL)
+		}
 		return nil
 	})
 
-	res := tool.Execute(approvedFeedPostCtx(), map[string]any{
+	const reviewed = "Bài viết đã duyệt, đầy đủ."
+	ctx := approvedFeedPostCtxFor(reviewed, "review-msg-rebind-media", "approved.png="+imgSHA)
+	store.RunContextFromCtx(ctx).ReplyToMediaPaths = []string{imgCanonical}
+	res := tool.Execute(ctx, map[string]any{
 		"action":         "post",
 		"channel":        "fb-page",
 		"target":         "feed",
 		"forward":        true,
 		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
-		"message":        approvedFeedPostContent + " with an unapproved suffix",
+		"message":        "Bai viet da duyet, day du.\nMEDIA:" + imgCanonical,
 	})
-	if res == nil || !res.IsError {
-		t.Fatalf("expected full-content mismatch error, got: %+v", res)
+	if res == nil || res.IsError {
+		t.Fatalf("expected reviewed draft to be published, got: %+v", res)
 	}
-	if dispatched {
-		t.Fatal("dispatcher must not be called for unapproved content")
+	if len(dispatched) != 1 || dispatched[0].Content != reviewed {
+		t.Fatalf("dispatched = %+v, want exactly the reviewed text", dispatched)
+	}
+	if len(dispatched[0].Media) != 1 || string(dispatchedMedia) != "approved-png-data" {
+		t.Fatalf("media = %+v (%q), want the reviewed attachment", dispatched[0].Media, dispatchedMedia)
+	}
+	if got := dispatched[0].Metadata["approved_media_sha256"]; got != imgSHA {
+		t.Fatalf("approved_media_sha256 = %q, want %q", got, imgSHA)
 	}
 }
 
-func TestMessagePost_RejectsCaseSensitiveContentMutation(t *testing.T) {
-	const reviewed = "Read https://example.com/Product/ABC"
+// With a digest tag the Discord message is only a pointer, so there is no
+// reviewed text to fall back to and a mismatch must still refuse.
+func TestMessagePost_DigestModeMismatchStillRejects(t *testing.T) {
+	const article = "Long approved article body"
+	h := sha256.Sum256([]byte(article))
+	reply := "Bài dài, xem file [Article SHA-256: " + hex.EncodeToString(h[:]) + "]"
 	tool := NewMessageTool(t.TempDir(), false)
 	var dispatched bool
 	tool.SetOutboundDispatcher(func(_ context.Context, msg bus.OutboundMessage) error {
 		dispatched = true
 		return nil
 	})
-	ctx := approvedFeedPostCtxFor(reviewed, "review-msg-case", "")
+	ctx := approvedFeedPostCtxFor(reply, "review-msg-digest", "")
 
 	res := tool.Execute(ctx, map[string]any{
 		"action":         "post",
@@ -1252,13 +1324,13 @@ func TestMessagePost_RejectsCaseSensitiveContentMutation(t *testing.T) {
 		"target":         "feed",
 		"forward":        true,
 		"forward_reason": "User replied 'duyệt' to this ContentFactory article",
-		"message":        "Read https://example.com/product/abc",
+		"message":        article + " edited",
 	})
 	if res == nil || !res.IsError {
-		t.Fatalf("expected case-sensitive content mismatch, got: %+v", res)
+		t.Fatalf("expected digest mismatch error, got: %+v", res)
 	}
 	if dispatched {
-		t.Fatal("dispatcher must not be called for case-mutated content")
+		t.Fatal("dispatcher must not be called on a digest mismatch")
 	}
 }
 
@@ -1638,22 +1710,30 @@ func TestFeedPostContentMatchesApproval_Hybrid(t *testing.T) {
 
 func TestIsPositiveFeedPostApproval_PhrasesAndNegation(t *testing.T) {
 	positives := []string{
-		"duyệt", "approve", "đăng", "post",
+		"duyệt", "approve", "đăng", "post", "Duyệt", "DUYỆT!",
 		"duyệt nhé", "duyệt bài", "duyệt bài này", "duyệt đi", "duyệt nha",
-		"approve this", "ok duyệt", "đã duyệt",
+		"approve this", "ok duyệt", "đã duyệt", "duyet",
+		"duyệt nhé em", "ok, đăng luôn!", "Duyệt 👍", "✅ duyệt",
+		"đăng lên fanpage đi", "oke duyệt bài này nha bạn",
+		"duye\u0323\u0302t", // decomposed diacritics
 	}
 	for _, p := range positives {
-		if !isPositiveFeedPostApproval(p) {
-			t.Errorf("isPositiveFeedPostApproval(%q) = false, want true", p)
+		if !IsPositiveFeedPostApproval(p) {
+			t.Errorf("IsPositiveFeedPostApproval(%q) = false, want true", p)
 		}
 	}
 
 	negatives := []string{
+		"", "ok", "👍", "✅",
 		"chưa duyệt", "không duyệt", "đừng đăng", "hủy", "bỏ", "sửa bài", "edit this", "từ chối", "don't post", "stop",
+		"duyệt bỏ", "đăng đừng", "duyệt?", "có nên đăng không", "đăng chưa",
+		"duyệt nhưng sửa tiêu đề", "duyệt, không cần sửa",
+		"đăng bài mới về Nvidia", "khoan đã duyệt", "để sau duyệt",
+		"duyệt duyệt duyệt duyệt duyệt duyệt duyệt duyệt duyệt duyệt duyệt",
 	}
 	for _, n := range negatives {
-		if isPositiveFeedPostApproval(n) {
-			t.Errorf("isPositiveFeedPostApproval(%q) = true, want false", n)
+		if IsPositiveFeedPostApproval(n) {
+			t.Errorf("IsPositiveFeedPostApproval(%q) = true, want false", n)
 		}
 	}
 }

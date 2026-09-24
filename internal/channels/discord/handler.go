@@ -67,6 +67,19 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		}
 	}
 
+	// A bare "duyệt" is not addressed to the bot under require_mention, so it
+	// has to be bound before the mention gate below records it as history.
+	if !isDM {
+		draft, handled := c.resolveImplicitApproval(m)
+		if handled {
+			return
+		}
+		if draft != nil {
+			m.ReferencedMessage = draft
+			mentioned = true
+		}
+	}
+
 	if isDM {
 		if !c.checkDMPolicy(ctx, senderID, channelID) {
 			return
@@ -354,6 +367,7 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		"reply_to_author_id":      replyToAuthorID,
 		"channel_bot_user_id":     c.botUserID,
 		"approval_sender_allowed": strconv.FormatBool(c.isExplicitApprovalSender(senderID)),
+		"approval_publish_target": c.approvalPublishTarget(channelID),
 		"user_id":                 senderID,
 		"username":                m.Author.Username,
 		"display_name":            channels.SanitizeDisplayName(senderName),
@@ -405,6 +419,30 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	if peerKind == "group" {
 		c.GroupHistory().Clear(channelID)
 	}
+}
+
+// approvalPublishTarget returns the publish target this instance binds to a
+// chat: "reels" for a configured Reels review channel, "" otherwise. It comes
+// from the channel instance config, never from the model, so the message tool
+// can tell which destination an approval in this chat may reach.
+func (c *Channel) approvalPublishTarget(chatID string) string {
+	if c.isReelsReviewChat(chatID) {
+		return "reels"
+	}
+	return ""
+}
+
+func (c *Channel) isReelsReviewChat(chatID string) bool {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false
+	}
+	for _, id := range c.config.ReelsReviewChatIDs {
+		if strings.TrimSpace(id) == chatID {
+			return true
+		}
+	}
+	return false
 }
 
 // isExplicitApprovalSender reports whether the sender may approve irreversible

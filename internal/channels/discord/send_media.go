@@ -13,6 +13,13 @@ import (
 // sendMediaMessage sends media attachments to a Discord channel using file uploads.
 // Text content (if any) is included as the message body alongside the first attachment.
 func (c *Channel) sendMediaMessage(channelID string, content string, mediaList []bus.MediaAttachment) error {
+	_, err := c.sendMediaMessageID(channelID, content, mediaList)
+	return err
+}
+
+// sendMediaMessageID is sendMediaMessage that also reports the id of the
+// message it created ("" when nothing was sent).
+func (c *Channel) sendMediaMessageID(channelID string, content string, mediaList []bus.MediaAttachment) (string, error) {
 	var files []*discordgo.File
 
 	for _, att := range mediaList {
@@ -28,12 +35,12 @@ func (c *Channel) sendMediaMessage(channelID string, content string, mediaList [
 
 		f, err := os.Open(filePath)
 		if err != nil {
-			return fmt.Errorf("open media file %s: %w", filePath, err)
+			return "", fmt.Errorf("open media file %s: %w", filePath, err)
 		}
 		defer f.Close()
 
 		if info, err := f.Stat(); err == nil && info.Size() > maxBytes {
-			return fmt.Errorf("outbound media too large: %d bytes (limit %d)", info.Size(), maxBytes)
+			return "", fmt.Errorf("outbound media too large: %d bytes (limit %d)", info.Size(), maxBytes)
 		}
 
 		ct := att.ContentType
@@ -49,7 +56,7 @@ func (c *Channel) sendMediaMessage(channelID string, content string, mediaList [
 	}
 
 	if len(files) == 0 {
-		return nil
+		return "", nil
 	}
 
 	// Discord supports multiple files + text in a single message.
@@ -62,14 +69,17 @@ func (c *Channel) sendMediaMessage(channelID string, content string, mediaList [
 	const maxDiscordMessageBytes = 2000
 	if content != "" {
 		if len([]byte(content)) > maxDiscordMessageBytes {
-			return fmt.Errorf("discord media message content too long: %d bytes (limit %d)", len([]byte(content)), maxDiscordMessageBytes)
+			return "", fmt.Errorf("discord media message content too long: %d bytes (limit %d)", len([]byte(content)), maxDiscordMessageBytes)
 		}
 		msg.Content = content
 	}
 
-	_, err := c.session.ChannelMessageSendComplex(channelID, msg)
+	sent, err := c.session.ChannelMessageSendComplex(channelID, msg)
 	if err != nil {
-		return fmt.Errorf("send discord media message: %w", err)
+		return "", fmt.Errorf("send discord media message: %w", err)
 	}
-	return nil
+	if sent == nil {
+		return "", nil
+	}
+	return sent.ID, nil
 }

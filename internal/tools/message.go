@@ -61,6 +61,13 @@ var (
 	// separately and byte-bound. Kept only to strip these phrases out of
 	// article drafts.
 	abortPhrasePattern = regexp.MustCompile(`(?i)(?:I was unable to complete this task|CRITICAL:|\[ABORT PIPELINE\])`)
+	// abortNoticePattern recognises a run giving up out loud. It is deliberately
+	// wider than abortPhrasePattern, which only strips alarm phrasing out of
+	// article drafts: every real abort notice this pipeline has sent said
+	// "Abort" somewhere and matched none of the three phrases above, so the
+	// narrow pattern would have silenced the abort path once drafts began
+	// requiring an image (2026-09-18).
+	abortNoticePattern = regexp.MustCompile(`(?i)(?:\babort\b|I was unable to complete this task|CRITICAL:)`)
 )
 
 const (
@@ -233,7 +240,7 @@ func (t *MessageTool) Parameters() map[string]any {
 			},
 			"message": map[string]any{
 				"type":        "string",
-				"description": "Message content to send. For action='post' after a structured approval reply, pass exactly 'APPROVED_REPLY' to bind the complete reviewed text and attachment natively. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'.",
+				"description": "Message content to send. For action='post' after an approval, pass exactly 'APPROVED_REPLY': the gateway publishes the complete reviewed text and attachment itself, so never retype the article. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'.",
 			},
 			"forward": map[string]any{
 				"type":        "boolean",
@@ -281,8 +288,9 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	if target == "" {
 		return ErrorResult("target chat ID is required (no current chat in context)")
 	}
-	if action == "post" && (channel != t.facebookChannel || target != t.facebookTarget) {
-		return ErrorResult(fmt.Sprintf("feed post destination must be %s/%s", t.facebookChannel, t.facebookTarget))
+	if action == "post" && (channel != t.facebookChannel || (target != t.facebookTarget && target != reelsTarget)) {
+		return ErrorResult(fmt.Sprintf("feed post destination must be %s/%s (or %s/%s for an approved Video Factory reel)",
+			t.facebookChannel, t.facebookTarget, t.facebookChannel, reelsTarget))
 	}
 	isContentFactoryReviewTarget := action == "send" && (target == t.getApprovalChannelID() || target == contentFactoryApprovalChannelID)
 	if isContentFactoryReviewTarget {
@@ -298,12 +306,20 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		// An abort notice may say why the pipeline stopped; a draft may not
 		// carry these phrases. Distinguished by whether an image is attached:
 		// a review draft always ships with one, an abort notice never does.
-		if !embeddedMediaPattern.MatchString(message) && abortPhrasePattern.MatchString(message) {
+		if !embeddedMediaPattern.MatchString(message) && abortNoticePattern.MatchString(message) {
 			// abort notice: allowed through, but recorded so a run that ends
 			// this way is visible without reading the channel.
 			slog.Warn("message.contentfactory_abort_notice", "target", target, "bytes", len(message))
 		} else if abortPhrasePattern.MatchString(message) {
 			return ErrorResult("An article draft cannot contain abort/error phrasing. Send the clean draft, or send the abort notice on its own without an image.")
+		} else if !embeddedMediaPattern.MatchString(message) {
+			// A draft with no image is not reviewable: approval binds the text
+			// and the image of ONE message, so an image sent afterwards can
+			// never join this draft. Runs kept ending this way when the
+			// cf-designer gate rejected a malformed handoff — the director gave
+			// up on the image, sent the text, and only then produced the image,
+			// which then had nowhere to go (2026-09-17, 2026-09-18).
+			return ErrorResult("A review draft must carry its audited image in the SAME message: delegate cf-designer (sync, with AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes each starting their own line), then resend the article with MEDIA:<image path>. If no image can be produced, send an abort notice instead — it must contain the word ABORT.")
 		}
 		// A review draft carrying an image must go out as ONE message: the
 		// approval binds content and media from the single message the reviewer
@@ -341,6 +357,10 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			return res
 		}
 	}
+
+	// An abort notice goes to the same channel but is not something to approve.
+	isReviewDraftSend := isContentFactoryReviewTarget &&
+		(embeddedMediaPattern.MatchString(message) || !abortPhrasePattern.MatchString(message))
 
 	// Self-send guard: prevent agent from sending to its own chat via message tool.
 	// Text self-sends are always blocked (response goes through normal outbound).
@@ -424,6 +444,9 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	if action == "post" {
 		forward, _ := args["forward"].(bool)
 		reason := strings.TrimSpace(argString(args, "forward_reason"))
+		if target == reelsTarget {
+			return noticeOnSuccess(t.postReel(ctx, channel, message, forward, reason))
+		}
 		if err := t.validateFeedPostApprovalContext(ctx, forward, reason); err != nil {
 			return ErrorResult(err.Error())
 		}
@@ -456,24 +479,11 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		if origCh, origChat := ToolChannelFromCtx(ctx), ToolChatIDFromCtx(ctx); origCh != "" && origChat != "" {
 			outMsg.Metadata["notify_channel"] = origCh
 			outMsg.Metadata["notify_chat"] = origChat
+			outMsg.Metadata["review_message_id"] = rc.ReplyToMessageID
 		}
 		if strings.TrimSpace(message) == approvedReplyPayloadToken {
-			if strings.TrimSpace(rc.ReplyToContent) == "" {
-				return ErrorResult("approved Discord reply has no publishable content")
-			}
-			outMsg.Content = rc.ReplyToContent
-			if len(rc.ReplyToMediaPaths) > 1 {
-				return ErrorResult("approved Discord reply has too many bound media files")
-			}
-			if len(rc.ReplyToMediaPaths) == 1 {
-				resolved, err := t.resolveFeedPostMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0])
-				if err != nil {
-					return ErrorResult("approved Discord media path is unavailable")
-				}
-				outMsg.Media = []bus.MediaAttachment{{
-					URL:         resolved,
-					ContentType: mimeFromPath(resolved),
-				}}
+			if res := t.bindApprovedReply(ctx, rc, &outMsg); res != nil {
+				return res
 			}
 		} else if strings.Contains(message, "MEDIA:") {
 			cleanMsg, embeddedMedia, err := t.extractFeedPostMedia(ctx, message)
@@ -486,7 +496,23 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		}
 
 		if !feedPostContentMatchesApproval(outMsg.Content, rc.ReplyToContent, rc.ReplyToMedia) {
-			return ErrorResult("feed post content does not match the approved Discord reply")
+			// The approver approved the Discord message, not the model's copy of
+			// it. When that message IS the article, publishing it verbatim is
+			// the binding, so a model that retyped a character wrong must not
+			// block the post. Digest modes stay strict: there the reply is only
+			// a pointer and the text has to come from the model.
+			if !isPlainReviewDraft(rc.ReplyToContent, rc.ReplyToMedia) {
+				return ErrorResult("feed post content does not match the approved Discord reply")
+			}
+			slog.Warn("message.feed_post_rebound_to_review",
+				"reply_to_message_id", rc.ReplyToMessageID,
+				"model_bytes", len(outMsg.Content),
+				"review_bytes", len(rc.ReplyToContent),
+			)
+			outMsg.Media = nil
+			if res := t.bindApprovedReply(ctx, rc, &outMsg); res != nil {
+				return res
+			}
 		}
 		approvedMediaSHA, err := approvedFeedPostMediaSHA(rc.ReplyToMedia, rc.ReplyToMediaCount)
 		if err != nil {
@@ -551,12 +577,32 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		if isGroupContext(ctx) {
 			outMsg.Metadata = map[string]string{"group_id": target}
 		}
+		if isReviewDraftSend || (action == "send" && isReelsReviewDraft(message, embeddedMedia)) {
+			if outMsg.Metadata == nil {
+				outMsg.Metadata = map[string]string{}
+			}
+			outMsg.Metadata[MetaContentFactoryReviewDraft] = "true"
+		}
 		t.msgBus.PublishOutbound(outMsg)
 		// Mark each embedded media path as delivered.
 		if dm := DeliveredMediaFromCtx(ctx); dm != nil {
 			for _, att := range embeddedMedia {
 				dm.Mark(att.URL)
 			}
+		}
+		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"sent","channel":"%s","target":"%s"}`, channel, target)))
+	}
+
+	// A text-only review draft still needs its draft flag, which the plain
+	// sender cannot carry; the dispatcher is equally synchronous.
+	if isReviewDraftSend && t.outboundDispatcher != nil {
+		if err := t.outboundDispatcher(ctx, bus.OutboundMessage{
+			Channel:  channel,
+			ChatID:   target,
+			Content:  message,
+			Metadata: map[string]string{"group_id": target, MetaContentFactoryReviewDraft: "true"},
+		}); err != nil {
+			return ErrorResult(fmt.Sprintf("failed to send message: %v", err))
 		}
 		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"sent","channel":"%s","target":"%s"}`, channel, target)))
 	}
@@ -597,18 +643,47 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	return ErrorResult("no channel sender or message bus available")
 }
 
-var (
-	positiveApprovalPattern = regexp.MustCompile(`(?i)^(ok\s+|đã\s+)?(duyệt|approve|đăng|post)(d?|d\s+this|\s+(bài\s+này|bài|này|nhé|ngay|đi|nha|this))?$`)
-	negationPattern         = regexp.MustCompile(`(?i)\b(chưa|không|ko|k|đừng|hủy|bỏ|sửa|edit|change|từ\s+chối|no|don'?t|stop)\b`)
-)
+// bindApprovedReply replaces the outbound payload with the reviewed Discord
+// message itself: its full text and its single attachment.
+func (t *MessageTool) bindApprovedReply(ctx context.Context, rc *store.RunContext, outMsg *bus.OutboundMessage) *Result {
+	if strings.TrimSpace(rc.ReplyToContent) == "" {
+		return ErrorResult("approved Discord reply has no publishable content")
+	}
+	outMsg.Content = rc.ReplyToContent
+	if len(rc.ReplyToMediaPaths) > 1 {
+		return ErrorResult("approved Discord reply has too many bound media files")
+	}
+	if len(rc.ReplyToMediaPaths) == 1 {
+		resolved, err := t.resolveFeedPostMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0])
+		if err != nil {
+			return ErrorResult("approved Discord media path is unavailable")
+		}
+		outMsg.Media = []bus.MediaAttachment{{
+			URL:         resolved,
+			ContentType: mimeFromPath(resolved),
+		}}
+	}
+	return nil
+}
 
-func isPositiveFeedPostApproval(message string) bool {
-	cmd := strings.ToLower(strings.TrimSpace(message))
-	cmd = strings.Trim(cmd, " \t\r\n.!✅👍")
-	if negationPattern.MatchString(cmd) {
+// isPlainReviewDraft reports whether the reviewed Discord message carries the
+// article text itself, as opposed to a digest tag or an attached .md/.txt
+// document that stands in for a longer article.
+func isPlainReviewDraft(replyContent, replyMedia string) bool {
+	if strings.TrimSpace(replyContent) == "" || articleSHAPattern.MatchString(replyContent) {
 		return false
 	}
-	return positiveApprovalPattern.MatchString(cmd)
+	for line := range strings.SplitSeq(replyMedia, "\n") {
+		name, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		name = strings.ToLower(strings.TrimSpace(name))
+		if strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt") {
+			return false
+		}
+	}
+	return true
 }
 
 func feedPostContentMatchesApproval(postContent, replyContent, replyMedia string) bool {
@@ -884,6 +959,13 @@ func (t *MessageTool) reserveFeedPost(
 	return reservation, nil
 }
 
+// release deletes a reservation whose publish is known not to have started, so
+// the same approved draft can be approved again. Only for failures the
+// publisher marks as certainly unpublished; anything ambiguous stays reserved.
+func (r *feedPostReservation) release() error {
+	return os.Remove(r.path)
+}
+
 func (r *feedPostReservation) mark(status string) error {
 	r.entry.Status = status
 	r.entry.UpdatedAt = time.Now().UTC()
@@ -903,6 +985,16 @@ func (r *feedPostReservation) mark(status string) error {
 }
 
 func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forward bool, reason string) error {
+	return t.validatePublishApprovalContext(ctx, forward, reason, t.getFacebookTarget())
+}
+
+// validatePublishApprovalContext checks that the current run is a human's
+// approval of one bot-authored review message, given in the one review channel
+// that may publish to target. Each target has its own channel, and the two
+// never overlap: the ContentFactory review channel publishes feed posts only,
+// and a Reels review channel is named by the Discord instance's own config
+// (rc.ApprovalPublishTarget), never by anything the model says.
+func (t *MessageTool) validatePublishApprovalContext(ctx context.Context, forward bool, reason, target string) error {
 	if !forward || reason == "" {
 		return fmt.Errorf("feed post requires explicit forward=true and forward_reason quoting the user's approval")
 	}
@@ -914,7 +1006,15 @@ func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forwa
 	if ctxChannel == "" || ctxChatID == "" {
 		return fmt.Errorf("feed post requires an origin channel and chat for approval evidence")
 	}
-	if ctxChatID != t.getApprovalChannelID() {
+	rc := store.RunContextFromCtx(ctx)
+	if target == reelsTarget {
+		if rc == nil || rc.ApprovalPublishTarget != reelsTarget {
+			return fmt.Errorf("reels approval must originate from a channel configured as a Reels review channel")
+		}
+		if ctxChatID == t.getApprovalChannelID() || ctxChatID == contentFactoryApprovalChannelID {
+			return fmt.Errorf("the ContentFactory review channel publishes feed posts only")
+		}
+	} else if ctxChatID != t.getApprovalChannelID() {
 		return fmt.Errorf("feed post approval must originate from the ContentFactory review channel")
 	}
 	channelType := ToolChannelTypeFromCtx(ctx)
@@ -924,7 +1024,6 @@ func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forwa
 	if channelType == "" && !strings.Contains(strings.ToLower(ctxChannel), "discord") {
 		return fmt.Errorf("feed post approval must originate from Discord")
 	}
-	rc := store.RunContextFromCtx(ctx)
 	if rc == nil || strings.TrimSpace(rc.SenderID) == "" {
 		return fmt.Errorf("feed post approval requires an authenticated sender")
 	}
@@ -940,7 +1039,7 @@ func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forwa
 	if !rc.ReplyToMediaComplete {
 		return fmt.Errorf("feed post approval media evidence is incomplete")
 	}
-	if !isPositiveFeedPostApproval(rc.CurrentMessage) {
+	if !IsPositiveFeedPostApproval(rc.CurrentMessage) {
 		return fmt.Errorf("feed post requires a positive approval command in the current message")
 	}
 	lowerReason := strings.ToLower(reason)
@@ -1078,13 +1177,22 @@ func (t *MessageTool) extractFeedPostMedia(ctx context.Context, message string) 
 }
 
 func (t *MessageTool) resolveFeedPostMediaPath(ctx context.Context, s string) (string, error) {
+	return t.resolvePublishMediaPath(ctx, s, "image/")
+}
+
+// resolvePublishMediaPath resolves a MEDIA token to a workspace-owned regular
+// file whose type starts with mimePrefix: "image/" for feed posts, "video/" for Reels.
+func (t *MessageTool) resolvePublishMediaPath(ctx context.Context, s, mimePrefix string) (string, error) {
 	filePath, ok := t.resolveMediaPath(ctx, s)
 	if !ok {
 		return "", fmt.Errorf("invalid MEDIA path")
 	}
 	contentType := mimeFromPath(filePath)
-	if !strings.HasPrefix(contentType, "image/") {
-		return "", fmt.Errorf("feed posts only support image media, got %s", contentType)
+	if !strings.HasPrefix(contentType, mimePrefix) {
+		if mimePrefix == "image/" {
+			return "", fmt.Errorf("feed posts only support image media, got %s", contentType)
+		}
+		return "", fmt.Errorf("this post needs %s media, got %s", strings.TrimSuffix(mimePrefix, "/"), contentType)
 	}
 	info, err := os.Lstat(filePath)
 	if err != nil {

@@ -313,6 +313,14 @@
       "label": "Người dùng được duyệt",
       "help": "ID người dùng được phép duyệt các hành động công khai không thể hoàn tác (ví dụ đăng bài lên trang Facebook). Tách riêng khỏi Người dùng được phép — để trống nghĩa là không ai được duyệt."
     },
+    "reels_review_chat_ids": {
+      "label": "Kênh duyệt Reels",
+      "help": "ID các kênh Discord mà bản nháp đã được duyệt (một video + khối [caption]) được phép đăng thành Reels trên Facebook. Để trống nghĩa là không kênh nào đăng Reels."
+    },
+    "publishers": {
+      "label": "Agent đồng đăng bài",
+      "help": "Agent key, ngoài agent gắn với trang này, được phép đăng bài và Reels đã được người duyệt lên trang."
+    },
     "domain": { "label": "Tên miền" },
     "connection_mode": { "label": "Chế độ kết nối", "help": "WebSocket không cần IP công khai — chỉ kết nối ra ngoài" },
     "webhook_port": { "label": "Cổng webhook", "help": "0 = chia sẻ cổng gateway chính (khuyến nghị)" },

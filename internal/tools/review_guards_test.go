@@ -74,14 +74,15 @@ func TestReviewOversizeError_StatesHowMuchToRemove(t *testing.T) {
 // had actually succeeded.
 func TestReviewTerminalDuplicate_EndsRunWithNoReply(t *testing.T) {
 	mb := bus.New()
-	tool := NewMessageTool(t.TempDir(), false)
+	workspace := t.TempDir()
+	tool := NewMessageTool(workspace, false)
 	tool.SetMessageBus(mb)
 	ctx := contentFactoryWakeCtx()
 
-	if res := tool.Execute(ctx, contentFactoryTerminalArgs("the review draft")); res == nil || res.IsError {
+	if res := tool.Execute(ctx, contentFactoryDraftArgs(t, workspace, "the review draft")); res == nil || res.IsError {
 		t.Fatalf("first send failed: %+v", res)
 	}
-	second := tool.Execute(ctx, contentFactoryTerminalArgs("a second send after the terminal action"))
+	second := tool.Execute(ctx, contentFactoryDraftArgs(t, workspace, "a second send after the terminal action"))
 
 	if second == nil || !second.EndRun {
 		t.Fatalf("duplicate terminal send must end the run, got: %+v", second)

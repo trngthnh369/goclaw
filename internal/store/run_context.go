@@ -41,6 +41,7 @@ type RunContext struct {
 	ReplyToAuthorID       string // author ID of the replied-to message
 	ChannelBotUserID      string // authenticated bot user ID for the source channel instance
 	ApprovalSenderAllowed bool   // sender is explicitly allowlisted for public-post approval
+	ApprovalPublishTarget string // publish target the channel instance binds to this chat ("reels"), empty when none
 
 	// Flags
 	SelfEvolve          bool

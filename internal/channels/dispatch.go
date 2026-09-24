@@ -203,36 +203,73 @@ func (m *Manager) DispatchOutbound(ctx context.Context, msg bus.OutboundMessage)
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("channel %s not found", msg.Channel)
+		return &notSentError{fmt.Errorf("channel %s not found", msg.Channel)}
 	}
-	if msg.Metadata != nil && msg.Metadata["fb_mode"] == "feed_post" {
-		if channel.Type() != TypeFacebook {
-			return fmt.Errorf("channel %s is %s, not a facebook feed publisher", msg.Channel, channel.Type())
-		}
-		if msg.ChatID != "feed" {
-			return fmt.Errorf("facebook feed publisher destination must be feed")
-		}
-		publisherAgentID := strings.TrimSpace(msg.Metadata["publisher_agent_id"])
-		owner, ok := channel.(interface{ AgentID() string })
-		if !ok || publisherAgentID == "" || strings.TrimSpace(owner.AgentID()) == "" {
-			return fmt.Errorf("facebook feed publisher ownership metadata missing")
-		}
-		if publisherAgentID != strings.TrimSpace(owner.AgentID()) {
-			return fmt.Errorf("facebook feed publisher is not owned by calling agent")
-		}
-		tenantOwner, ok := channel.(interface{ TenantID() uuid.UUID })
-		if !ok || msg.TenantID == uuid.Nil || tenantOwner.TenantID() == uuid.Nil {
-			return fmt.Errorf("facebook feed publisher tenant metadata missing")
-		}
-		if msg.TenantID != tenantOwner.TenantID() {
-			return fmt.Errorf("facebook feed publisher tenant mismatch")
-		}
-		if expectedMediaSHA := msg.Metadata["approved_media_sha256"]; len(msg.Media) == 1 && expectedMediaSHA == "" {
-			return fmt.Errorf("facebook feed publisher media approval digest missing")
+	if mode := msg.Metadata["fb_mode"]; msg.Metadata != nil && (mode == "feed_post" || mode == "reels_post") {
+		if err := checkPagePublisher(channel, msg, mode); err != nil {
+			return &notSentError{err}
 		}
 	}
 
 	return channel.Send(ctx, msg)
+}
+
+// notSentError is a dispatch refused before the channel's Send ran. Nothing
+// reached the platform, so a caller holding a publish reservation may release it.
+type notSentError struct{ err error }
+
+func (e *notSentError) Error() string      { return e.err.Error() }
+func (e *notSentError) Unwrap() error      { return e.err }
+func (e *notSentError) NotPublished() bool { return true }
+
+// checkPagePublisher decides whether a feed post or reel may go to channel:
+// the right destination, an allowed publisher, the same tenant, and an
+// approval digest for any media.
+func checkPagePublisher(channel Channel, msg bus.OutboundMessage, mode string) error {
+	if channel.Type() != TypeFacebook {
+		return fmt.Errorf("channel %s is %s, not a facebook feed publisher", msg.Channel, channel.Type())
+	}
+	if mode == "feed_post" && msg.ChatID != "feed" {
+		return fmt.Errorf("facebook feed publisher destination must be feed")
+	}
+	if mode == "reels_post" && msg.ChatID != "reels" {
+		return fmt.Errorf("facebook reels publisher destination must be reels")
+	}
+	publisherAgentID := strings.TrimSpace(msg.Metadata["publisher_agent_id"])
+	owner, ok := channel.(interface{ AgentID() string })
+	if !ok || publisherAgentID == "" || strings.TrimSpace(owner.AgentID()) == "" {
+		return fmt.Errorf("facebook feed publisher ownership metadata missing")
+	}
+	if !publisherAllowed(channel, strings.TrimSpace(owner.AgentID()), publisherAgentID) {
+		return fmt.Errorf("facebook feed publisher is not owned by calling agent")
+	}
+	if mode == "reels_post" && (len(msg.Media) != 1 || msg.Metadata["approved_media_sha256"] == "") {
+		return fmt.Errorf("facebook reels publisher needs exactly one approved video")
+	}
+	tenantOwner, ok := channel.(interface{ TenantID() uuid.UUID })
+	if !ok || msg.TenantID == uuid.Nil || tenantOwner.TenantID() == uuid.Nil {
+		return fmt.Errorf("facebook feed publisher tenant metadata missing")
+	}
+	if msg.TenantID != tenantOwner.TenantID() {
+		return fmt.Errorf("facebook feed publisher tenant mismatch")
+	}
+	if expectedMediaSHA := msg.Metadata["approved_media_sha256"]; len(msg.Media) == 1 && expectedMediaSHA == "" {
+		return fmt.Errorf("facebook feed publisher media approval digest missing")
+	}
+	return nil
+}
+
+// publisherAllowed reports whether agentKey may publish through a page channel:
+// the agent the channel instance is bound to, plus any agent the instance's own
+// config names as a co-publisher (facebook "publishers").
+func publisherAllowed(channel Channel, owner, agentKey string) bool {
+	if agentKey == owner {
+		return true
+	}
+	if pub, ok := channel.(interface{ AllowsPublisher(string) bool }); ok {
+		return pub.AllowsPublisher(agentKey)
+	}
+	return false
 }
 
 // --- Send error notification helpers ---

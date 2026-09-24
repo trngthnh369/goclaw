@@ -313,6 +313,14 @@
       "label": "允许审批的用户",
       "help": "允许批准不可撤销的公开操作（例如发布到 Facebook 主页）的用户 ID。与「允许的用户」分开配置——留空表示无人可以批准。"
     },
+    "reels_review_chat_ids": {
+      "label": "Reels 审核频道",
+      "help": "其已批准的审核草稿（一个视频 + [caption] 块）可以发布为 Facebook Reels 的 Discord 频道 ID。留空表示没有频道发布 Reels。"
+    },
+    "publishers": {
+      "label": "共同发布的智能体",
+      "help": "除本主页绑定的智能体外，可以将经人工批准的帖子和 Reels 发布到主页的智能体 key。"
+    },
     "domain": { "label": "域名" },
     "connection_mode": { "label": "连接模式", "help": "WebSocket 无需公网 IP — 仅需出站连接" },
     "webhook_port": { "label": "Webhook 端口", "help": "0 = 共享主网关端口（推荐）" },

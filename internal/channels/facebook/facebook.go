@@ -3,9 +3,11 @@ package facebook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -262,6 +264,22 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			ch.afterPublish(ctx, msg, postID)
 		}
 
+	case "reels_post":
+		if len(msg.Media) != 1 || msg.Media[0].URL == "" {
+			return reelFailed("prepare", errors.New("a reel needs exactly one video"))
+		}
+		videoID, err := ch.graphClient.CreateReelVerified(ctx, msg.Content, msg.Media[0].URL,
+			msg.Metadata["approved_media_sha256"])
+		if err != nil {
+			// A video id with an error means Facebook accepted the publish but
+			// did not confirm it in time; the id is what an operator needs.
+			slog.Warn("facebook: reel publish failed", "video_id", videoID, "page_id", ch.graphClient.pageID)
+			ch.handleAPIError(err)
+			return err
+		}
+		slog.Info("facebook: reel published", "video_id", videoID, "page_id", ch.graphClient.pageID)
+		ch.afterPublishReel(ctx, msg, videoID)
+
 	default: // "comment"
 		commentID := msg.Metadata["reply_to_comment_id"]
 		if commentID == "" {
@@ -283,6 +301,22 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	}
 
 	return nil
+}
+
+// AllowsPublisher reports whether agentKey may publish approved posts and reels
+// through this page besides the agent the instance is bound to: the config's
+// "publishers" list. The dispatcher checks the bound agent itself.
+func (ch *Channel) AllowsPublisher(agentKey string) bool {
+	agentKey = strings.TrimSpace(agentKey)
+	if agentKey == "" {
+		return false
+	}
+	for _, allowed := range ch.config.Publishers {
+		if strings.TrimSpace(allowed) == agentKey {
+			return true
+		}
+	}
+	return false
 }
 
 // WebhookHandler returns the shared webhook path and the global router as handler.

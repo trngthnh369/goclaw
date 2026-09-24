@@ -146,18 +146,22 @@ type DiscordConfig struct {
 	// only decides who may talk to the bot — chat access must not imply publish
 	// authority. Empty (default) = nobody may approve.
 	ApprovalAllowFrom FlexibleStringSlice `json:"approval_allow_from,omitempty"`
-	DMPolicy          string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
-	GroupPolicy       string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
-	RequireMention    *bool               `json:"require_mention,omitempty"` // require @bot mention in groups (default true)
-	HistoryLimit      int                 `json:"history_limit,omitempty"`   // max pending group messages for context (default 50, 0=disabled)
-	BlockReply        *bool               `json:"block_reply,omitempty"`     // override gateway block_reply (nil = inherit)
-	ChatBehavior      *ChatBehaviorConfig `json:"chat_behavior,omitempty"`   // override gateway chat behavior (nil = inherit)
-	MediaMaxBytes     int64               `json:"media_max_bytes,omitempty"` // max media download size (default 25MB)
-	STTProxyURL       string              `json:"stt_proxy_url,omitempty"`
-	STTAPIKey         string              `json:"stt_api_key,omitempty"`
-	STTTenantID       string              `json:"stt_tenant_id,omitempty"`
-	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"`
-	VoiceAgentID      string              `json:"voice_agent_id,omitempty"`
+	// ReelsReviewChatIDs names the channels whose approved review drafts may be
+	// published as Facebook Reels. An approval anywhere else can never reach the
+	// Reels publisher. Empty (default) = no chat publishes Reels.
+	ReelsReviewChatIDs FlexibleStringSlice `json:"reels_review_chat_ids,omitempty"`
+	DMPolicy           string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
+	GroupPolicy        string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
+	RequireMention     *bool               `json:"require_mention,omitempty"` // require @bot mention in groups (default true)
+	HistoryLimit       int                 `json:"history_limit,omitempty"`   // max pending group messages for context (default 50, 0=disabled)
+	BlockReply         *bool               `json:"block_reply,omitempty"`     // override gateway block_reply (nil = inherit)
+	ChatBehavior       *ChatBehaviorConfig `json:"chat_behavior,omitempty"`   // override gateway chat behavior (nil = inherit)
+	MediaMaxBytes      int64               `json:"media_max_bytes,omitempty"` // max media download size (default 25MB)
+	STTProxyURL        string              `json:"stt_proxy_url,omitempty"`
+	STTAPIKey          string              `json:"stt_api_key,omitempty"`
+	STTTenantID        string              `json:"stt_tenant_id,omitempty"`
+	STTTimeoutSeconds  int                 `json:"stt_timeout_seconds,omitempty"`
+	VoiceAgentID       string              `json:"voice_agent_id,omitempty"`
 }
 
 type SlackConfig struct {

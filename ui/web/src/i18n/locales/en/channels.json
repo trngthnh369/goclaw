@@ -350,6 +350,14 @@
       "label": "Approval Allowed Users",
       "help": "User IDs allowed to approve irreversible public actions (e.g. publishing to a Facebook page). Separate from Allowed Users — empty means nobody can approve."
     },
+    "reels_review_chat_ids": {
+      "label": "Reels Review Channels",
+      "help": "Discord channel IDs whose approved review drafts (one video + a [caption] block) may be published as Facebook Reels. Empty means no channel publishes Reels."
+    },
+    "publishers": {
+      "label": "Co-publisher Agents",
+      "help": "Agent keys, besides the agent this page is bound to, that may publish human-approved posts and reels to the page."
+    },
     "domain": { "label": "Domain" },
     "connection_mode": {
       "label": "Connection Mode",

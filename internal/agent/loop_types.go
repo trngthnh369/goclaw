@@ -617,6 +617,7 @@ type RunRequest struct {
 	ReplyToAuthorID       string             // author ID of the replied-to message
 	ChannelBotUserID      string             // authenticated bot user ID for the source channel instance
 	ApprovalSenderAllowed bool               // sender is explicitly allowlisted for public-post approval
+	ApprovalPublishTarget string             // publish target the channel instance binds to this chat ("reels"), empty when none
 	Media                 []bus.MediaFile    // local media files with MIME types
 	ForwardMedia          []bus.MediaFile    // media files to forward to output (from delegation results)
 	Channel               string             // source channel instance name (e.g. "my-telegram-bot")

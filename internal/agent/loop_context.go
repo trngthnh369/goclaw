@@ -399,6 +399,7 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		ReplyToAuthorID:       req.ReplyToAuthorID,
 		ChannelBotUserID:      req.ChannelBotUserID,
 		ApprovalSenderAllowed: req.ApprovalSenderAllowed,
+		ApprovalPublishTarget: req.ApprovalPublishTarget,
 		SelfEvolve:            l.selfEvolve,
 		SharedMemory:          store.IsSharedMemory(ctx),
 		SharedKG:              store.IsSharedKG(ctx),

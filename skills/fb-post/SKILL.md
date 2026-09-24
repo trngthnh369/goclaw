@@ -30,6 +30,8 @@ Publish approved content (article + optional image) to a Facebook Fanpage feed. 
 ## When to Use
 
 - User replies "duyệt" (or variants) to a ContentFactory article delivered on Discord
+- User types "duyệt" in the review channel without replying, or reacts ✅ on a draft (👍 does NOT approve): the gateway binds the approval to that draft itself, so the turn arrives with the same `[Replying to]` block as a real reply. Accepted commands are short: an approval word (duyệt/đăng/approve/post) plus politeness words ("duyệt nhé em", "ok đăng luôn"). Anything else, including questions and edit requests, is not an approval.
+- If several drafts are pending, the gateway itself asks the approver to reply to or react on the right one; do not guess.
 - User explicitly asks to post a specific article to the fanpage by replying to reviewed ContentFactory content
 
 Do not use this skill for cron/scheduled publishing; feed posts require a live user approval reply.
@@ -70,9 +72,12 @@ Call the message tool:
   "target": "feed",
   "forward": true,
   "forward_reason": "User replied 'duyệt' to this ContentFactory article",
-  "message": "<article content>\nMEDIA:<image path>"
+  "message": "APPROVED_REPLY"
 }
 ```
+
+- `message="APPROVED_REPLY"` — ALWAYS use this for a draft whose article text is the Discord review message itself. The gateway publishes that message's full text and its image verbatim; never retype the article (a retyped copy is discarded anyway).
+- Only for the digest modes (`[Article SHA-256: …]` tag or attached `.md`) pass the article text plus `MEDIA:<image path>` instead, since the review message does not contain the article.
 
 - `action="post"` — triggers feed posting mode (NOT DM/comment)
 - `channel="fb-page"` — the Facebook channel instance name

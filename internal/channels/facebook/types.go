@@ -29,6 +29,10 @@ type facebookInstanceConfig struct {
 	// Defaults to Vietnamese if empty. Operators should set this to match their page language.
 	FirstInboxMessage string   `json:"first_inbox_message,omitempty"`
 	AllowFrom         []string `json:"allow_from,omitempty"`
+	// Publishers are agent keys, besides the agent this instance is bound to,
+	// that may publish approved posts and reels to the page (for example the
+	// Video Factory director next to the ContentFactory director).
+	Publishers []string `json:"publishers,omitempty"`
 }
 
 // --- Webhook payloads ---

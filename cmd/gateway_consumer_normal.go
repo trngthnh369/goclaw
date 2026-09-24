@@ -455,6 +455,7 @@ func processNormalMessage(
 		ReplyToAuthorID:       msg.Metadata["reply_to_author_id"],
 		ChannelBotUserID:      msg.Metadata["channel_bot_user_id"],
 		ApprovalSenderAllowed: msg.Metadata["approval_sender_allowed"] == "true",
+		ApprovalPublishTarget: msg.Metadata["approval_publish_target"],
 		Media:                 reqMedia,
 		ForwardMedia:          fwdMedia,
 		Channel:               msg.Channel,
