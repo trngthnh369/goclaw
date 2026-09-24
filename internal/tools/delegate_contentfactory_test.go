@@ -217,3 +217,52 @@ func TestDelegateOtherParentsRemainUnrestricted(t *testing.T) {
 		t.Fatalf("non-ContentFactory run calls = %d, want 2", runCalls)
 	}
 }
+
+// The auditor's verdict line carries a trailing note often enough that a gate
+// demanding an exact line cost real runs their image. The line must still
+// START with the verdict, and the value must still be the whole word.
+func TestDelegateContentFactoryDesignerVerdictLineVariants(t *testing.T) {
+	cases := map[string]struct {
+		task    string
+		wantErr bool
+	}{
+		"exact":             {task: "AUDIT_VERDICT: PASS\nSAFE_TO_SEND_DISCORD: yes\nCreate visual"},
+		"trailing note":     {task: "AUDIT_VERDICT: PASS (round 2, revision 1)\nSAFE_TO_SEND_DISCORD: yes — READER_VALUE: PASS\nCreate visual"},
+		"indented":          {task: "  AUDIT_VERDICT: PASS\n\tSAFE_TO_SEND_DISCORD: yes\nCreate visual"},
+		"passive spoof":     {task: "AUDIT_VERDICT: PASSIVE\nSAFE_TO_SEND_DISCORD: yes", wantErr: true},
+		"yesterday spoof":   {task: "AUDIT_VERDICT: PASS\nSAFE_TO_SEND_DISCORD: yesterday", wantErr: true},
+		"inline not line":   {task: "The auditor said AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes", wantErr: true},
+		"verdict missing":   {task: "SAFE_TO_SEND_DISCORD: yes\nCreate visual", wantErr: true},
+		"safe send missing": {task: "AUDIT_VERDICT: PASS\nCreate visual", wantErr: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			img := fakeDesignerImage(t)
+			runCalls := 0
+			tool := NewDelegateTool(noopAgentLink{}, noopAgentCRUD{}, nil, func(context.Context, DelegateRequest) (DelegateResult, error) {
+				runCalls++
+				return DelegateResult{
+					Content: "DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1",
+					Media:   []bus.MediaFile{{Path: img, MimeType: "image/png", Filename: "test-image.png"}},
+				}, nil
+			})
+			result := tool.Execute(contentFactoryDirectorDelegateCtx(t), map[string]any{
+				"agent_key": "cf-designer",
+				"task":      tc.task,
+				"mode":      "sync",
+			})
+			if tc.wantErr {
+				if result == nil || !result.IsError {
+					t.Fatalf("expected rejection, got: %+v", result)
+				}
+				if runCalls != 0 {
+					t.Fatalf("designer run calls = %d, want 0", runCalls)
+				}
+				return
+			}
+			if result == nil || result.IsError {
+				t.Fatalf("expected the delegation to pass the gate, got: %+v", result)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -168,8 +169,8 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 	}
 	isContentFactoryDesignerDelegation := fromAgentKey == contentFactoryDirectorAgentKey && agentKey == contentFactoryDesignerAgentKey
 	if isContentFactoryDesignerDelegation {
-		if !hasAnchoredLine(task, "AUDIT_VERDICT: PASS") || !hasAnchoredLine(task, "SAFE_TO_SEND_DISCORD: yes") {
-			return ErrorResult("cf-designer delegation requires line-anchored AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes")
+		if !auditVerdictPassLine.MatchString(task) || !safeToSendLine.MatchString(task) {
+			return ErrorResult("cf-designer delegation requires AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes, each at the start of its own line (a trailing note such as \"(round 2)\" is fine)")
 		}
 		if mode != "sync" {
 			return ErrorResult("cf-designer delegation must use sync mode")
@@ -512,14 +513,12 @@ func (t *DelegateTool) emitEvent(ctx context.Context, eventType eventbus.EventTy
 	})
 }
 
-// hasAnchoredLine checks whether marker appears as a complete line (possibly
-// with leading whitespace) in text. Prevents substring spoofing like
-// "AUDIT_VERDICT: PASSIVE" matching "AUDIT_VERDICT: PASS".
-func hasAnchoredLine(text, marker string) bool {
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == marker {
-			return true
-		}
-	}
-	return false
-}
+// The designer gate reads the auditor's verdict off its own line. The word
+// boundary is what stops substring spoofing ("PASSIVE", "yesterday"); the rest
+// of the line is free text, because the director routinely annotates the
+// verdict ("PASS (round 2)") and a gate that rejected that cost the run its
+// image — the draft then went out as text only.
+var (
+	auditVerdictPassLine = regexp.MustCompile(`(?m)^[ \t]*AUDIT_VERDICT:[ \t]*PASS\b`)
+	safeToSendLine       = regexp.MustCompile(`(?m)^[ \t]*SAFE_TO_SEND_DISCORD:[ \t]*yes\b`)
+)
