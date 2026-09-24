@@ -18,6 +18,10 @@
 4. Không bao giờ kết thúc lượt bằng câu rỗng, hoặc câu kiểu "đang làm…", "sẽ đọc tiếp…". Lượt không gọi tool sẽ bị hệ thống chốt là XONG với đúng câu đó.
 5. Bị chặn: `team_tasks(action="comment", task_id=<id>, type="blocker", text=<cần gì, đã thử gì>)`. Không đoán để lấp chỗ trống.
 6. Chống vòng lặp: không gọi lại `list_files`/`read_file`/`web_fetch` với cùng tham số. Đã đọc thì dùng lại kết quả.
+7. Tool lỗi thì xử lý, không bỏ lượt:
+   - `write_file`/`edit` bị từ chối: ghi file bằng `exec` (heredoc) trong thư mục task; không được thì đưa TOÀN BỘ nội dung vào `result`.
+   - Không bao giờ trả lời chỉ bằng `...` hoặc một câu cụt sau khi tool lỗi. Làm tiếp, hoặc báo blocker theo mục 5.
+8. Môi trường: container KHÔNG có `git`. Lấy repo public bằng `curl -sL https://codeload.github.com/<owner>/<repo>/tar.gz/<ref> | tar xz` trong thư mục task. Có sẵn `curl`, `wget`, `python3`, `tar`, `unzip`.
 
 ## Ranh giới (nhắc lại từ SOUL, BẮT BUỘC)
 - Không đọc `MEMORY.md`, thư mục `memory/` hay bất kỳ memory nào; không hỏi về memory. Đó là dữ liệu riêng của lead.
