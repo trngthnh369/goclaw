@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -84,6 +85,17 @@ func WithRunContext(ctx context.Context, rc *RunContext) context.Context {
 }
 
 // RunContextFromCtx extracts RunContext from context. Returns nil if not set.
+// IsAllowlistedReplyToBot reports whether the turn that started this run is an
+// explicitly allowlisted person replying to a message this channel's bot wrote.
+// Public-post approval checks the same facts, one by one, for its error text.
+func (rc *RunContext) IsAllowlistedReplyToBot() bool {
+	return rc != nil && rc.ApprovalSenderAllowed &&
+		strings.TrimSpace(rc.SenderID) != "" &&
+		strings.TrimSpace(rc.ReplyToMessageID) != "" &&
+		strings.TrimSpace(rc.ChannelBotUserID) != "" &&
+		rc.ReplyToAuthorID == rc.ChannelBotUserID
+}
+
 func RunContextFromCtx(ctx context.Context) *RunContext {
 	rc, _ := ctx.Value(runContextKey{}).(*RunContext)
 	return rc

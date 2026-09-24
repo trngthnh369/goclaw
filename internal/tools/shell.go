@@ -579,6 +579,11 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 		dynKeys = staticCredentialEnvKeys
 	}
 	cmd.Env = scrubCredentialEnv(os.Environ(), dynKeys)
+	// Appended after the scrub, so an inherited variable of the same name is
+	// replaced by this run's own token.
+	if tok := RunReceiptToken(ctx); tok != "" {
+		cmd.Env = append(cmd.Env, RunReceiptEnv+"="+tok)
+	}
 
 	// Place the child in its own process group so killProcessGroup(-pgid, sig)
 	// reaches the shell and all of its forked children.
