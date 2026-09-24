@@ -93,11 +93,13 @@ try {
   # Query luon chay day du; viec gate theo gio nam o cho ALERT, khong o cho query.
   $rows = Invoke-Psql ("SELECT 'hb|' || a.agent_key || ':' || COALESCE(h.last_status,'never') FROM agent_heartbeats h JOIN agents a ON a.id = h.agent_id WHERE h.enabled AND (now() > h.next_run_at + (h.interval_sec * interval '1 second') OR h.last_status = 'error')" +
     " UNION ALL SELECT 'stale|' || j.name || ' (' || round(extract(epoch FROM now() - s.last_ok) / 3600) || 'h khong success)' FROM cron_jobs j JOIN LATERAL (SELECT max(ran_at) AS last_ok FROM cron_run_logs l WHERE l.job_id = j.id AND l.error IS NULL) s ON true WHERE j.enabled AND j.schedule_kind IN ('cron','every') AND j.next_run_at IS NOT NULL AND j.last_run_at IS NOT NULL AND j.next_run_at > j.last_run_at AND s.last_ok IS NOT NULL AND now() - s.last_ok > (j.next_run_at - j.last_run_at) + interval '90 minutes'" +
-    " UNION ALL SELECT 'claim|' || name FROM cron_jobs WHERE enabled AND schedule_kind IN ('cron','every') AND next_run_at IS NULL")
+    " UNION ALL SELECT 'claim|' || name FROM cron_jobs WHERE enabled AND schedule_kind IN ('cron','every') AND next_run_at IS NULL" +
+    " UNION ALL SELECT 'tierdrop|' || a.agent_key || ' -> ' || (s.metadata->'model_fallback'->>'selected_provider_name') || '/' || (s.metadata->'model_fallback'->>'selected_model') FROM spans s JOIN agents a ON a.id = s.agent_id WHERE s.metadata ? 'model_fallback' AND s.created_at > now() - interval '35 minutes' AND jsonb_array_length(s.metadata->'model_fallback'->'attempts') > 1")
 
   $hb = @($rows | Where-Object { $_ -like 'hb|*' }    | ForEach-Object { $_.Substring(3) })
   $stale = @($rows | Where-Object { $_ -like 'stale|*' } | ForEach-Object { $_.Substring(6) })
   $claimed = @($rows | Where-Object { $_ -like 'claim|*' } | ForEach-Object { $_.Substring(6) })
+  $tierdrops = @($rows | Where-Object { $_ -like 'tierdrop|*' } | ForEach-Object { $_.Substring(9) })
 
   # Check A - heartbeat overdue/error. CHI alert trong 09:00-23:00 ICT. 0 heartbeat enabled -> rong.
   if ($hb -and $hm -ge 540 -and $hm -le 1380) {
@@ -139,9 +141,17 @@ try {
     Send-Alert 'cron' ("GoClaw cron im lang - " + ($msgs -join ' | ') + ".")
   }
 
+  # Check C - tier-drop: model_fallback da kich hoat (attempts > 1 trong 35p qua).
+  # Quan trong cho nhom M (daily-reporter, wave-*) vi output bi MAY tieu thu - rot tier
+  # am tham co the ghi sai format vao Sheet/webhook nhieu ngay ma khong ai biet.
+  # Re-alert 6h (cung $ReAlertHours) - khong spam nhung cung khong bo lot ca ngay.
+  if ($tierdrops) {
+    Send-Alert 'tierdrop' ("GoClaw TIER-DROP: " + ($tierdrops -join '; ') + " - primary model loi, dang dung fallback. Kiem tra output format cua agent co consumer la may.")
+  }
+
   if ($state['db-unreachable']) { $state.Remove('db-unreachable') }  # recovery - reset de lan sau alert lai
 } catch {
-  # Check C - DB/docker unreachable: chinh deadman cung phai len tieng.
+  # Check D - DB/docker unreachable: chinh deadman cung phai len tieng.
   Send-Alert 'db-unreachable' "deadman khong query duoc goclaw-postgres-1 (docker/pg down?) - moi giam sat in-band dang mu."
 }
 
