@@ -3,7 +3,7 @@
 
 Routing: `openai-codex/gpt-6-sol` -> `antigravity/ag-pro` -> `antigravity/ag-flash-38` (see `tier-policy.json`, group X).
 Codex quota is reserved for this agent only; every other agent and cron runs on Gemini.
-`exec` is DENIED. Env secrets are scrubbed since binary `v3.14.0-hotfix.env-scrub` (2026-09-23), but exec can still read mounted OAuth files (`/app/.codex-host/auth.json`, `/app/.claude/.credentials.json`); enable only after those are out of reach.
+`exec` is enabled since 2026-09-23, after env scrubbing (binary `env-scrub3`) and the mount cleanup: no gateway secret in the exec env, no OAuth file or raw transcript in the container. `/app/workspace/_daily-report/.gwtoken` is still readable by exec; it holds an operator.write API key, not the admin token.
 Discord: its own bot (channel instance `codex-discord`), `allow_from` = owner user ID only (DM and any channel the bot can see; allowlist matches chat OR sender, so channel scoping is done via Discord permissions).
 
 Token handover rule: the ChatGPT OAuth identity is shared with the host Codex CLI.
