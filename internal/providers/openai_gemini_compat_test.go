@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-// TestBuildRequestBody_GeminiCompatCollapseToolCalls verifies that a provider
-// with geminiCompat=true collapses tool_call cycles missing thought_signature,
-// exactly like a native Gemini provider would.
-func TestBuildRequestBody_GeminiCompatCollapseToolCalls(t *testing.T) {
+// TestBuildRequestBody_GeminiCompatReplaysUnsignedToolCalls verifies that a
+// geminiCompat proxy keeps tool_call cycles without thought_signature as real
+// tool calls. The proxy never returns a signature and accepts the replay; folding
+// the cycles away hides the model's own calls and it repeats them.
+func TestBuildRequestBody_GeminiCompatReplaysUnsignedToolCalls(t *testing.T) {
 	p := NewOpenAIProvider("cliproxy", "key", "http://cliproxy:8317/v1", "ag-pro").
 		WithProviderType("openrouter").
 		WithGeminiCompat()
@@ -22,8 +23,32 @@ func TestBuildRequestBody_GeminiCompatCollapseToolCalls(t *testing.T) {
 		{Role: "tool", Content: "search result here", ToolCallID: "tc1"},
 		{Role: "user", Content: "thanks"},
 	}
+	body := p.buildRequestBody("ag-pro", ChatRequest{Messages: msgs}, false)
+
+	rawMsgs, _ := json.Marshal(body["messages"])
+	wireStr := string(rawMsgs)
+	if !strings.Contains(wireStr, `"tool_calls"`) || !strings.Contains(wireStr, `"tool_call_id":"tc1"`) {
+		t.Errorf("geminiCompat proxy must replay unsigned tool calls as tool calls; body=%s", wireStr)
+	}
+}
+
+// TestBuildRequestBody_NativeGeminiCollapseToolCalls verifies that an endpoint
+// enforcing thought_signature still folds unsigned tool_call cycles, with or
+// without geminiCompat.
+func TestBuildRequestBody_NativeGeminiCollapseToolCalls(t *testing.T) {
+	p := NewOpenAIProvider("google", "key", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3-pro").
+		WithGeminiCompat()
+
+	msgs := []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "", ToolCalls: []ToolCall{
+			{ID: "tc1", Name: "web_search", Arguments: map[string]any{"q": "test"}},
+		}},
+		{Role: "tool", Content: "search result here", ToolCallID: "tc1"},
+		{Role: "user", Content: "thanks"},
+	}
 	req := ChatRequest{Messages: msgs}
-	body := p.buildRequestBody("ag-pro", req, false)
+	body := p.buildRequestBody("gemini-3-pro", req, false)
 
 	rawMsgs, _ := json.Marshal(body["messages"])
 	wireStr := string(rawMsgs)
@@ -31,10 +56,10 @@ func TestBuildRequestBody_GeminiCompatCollapseToolCalls(t *testing.T) {
 	// After collapse, the tool_calls assistant message should be stripped
 	// and the tool result folded into a user message.
 	if strings.Contains(wireStr, `"tool_calls"`) {
-		t.Errorf("geminiCompat provider should collapse tool_calls without sig; got tool_calls in wire body")
+		t.Errorf("native Gemini endpoint should collapse tool_calls without sig; got tool_calls in wire body")
 	}
 	if strings.Contains(wireStr, `"tool_call_id"`) {
-		t.Errorf("geminiCompat provider should collapse tool results; got tool_call_id in wire body")
+		t.Errorf("native Gemini endpoint should collapse tool results; got tool_call_id in wire body")
 	}
 }
 
