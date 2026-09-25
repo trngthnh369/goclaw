@@ -519,6 +519,21 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(jobs.escalation_ref_ok(jobs.load_meta(paths)))
         self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
 
+    def test_receipt_is_never_fetched_through_a_proxy_from_the_environment(self):
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": "forged",
+                               "current_message": "tiếp tục"})
+        proxy = studio.RECEIPT_URL.rsplit("/v1/", 1)[0]    # a server that would answer anything
+        self.addCleanup(setattr, studio, "RECEIPT_URL", studio.RECEIPT_URL)
+        studio.RECEIPT_URL = "http://127.0.0.1:9/v1/runs/receipt"            # nothing listens here
+        for name in ("http_proxy", "HTTP_PROXY"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ[name] = proxy
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        with self.assertRaises(StudioError) as caught:
+            studio.human_reply_for("vf-x", "vf-discord", None)
+        self.assertIn("did not confirm", str(caught.exception))
+
     def test_voice_change_does_not_reopen_fact_check(self):
         job, paths = self._job_at_video_review()
         state = jobs.load_state(paths)
@@ -787,9 +802,12 @@ class MediaLibraryTests(unittest.TestCase):
         sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()   # noqa: E731
         items = [{"file": "w.wav", "dir": "sfx", "kind": "whoosh", "url": broken.as_uri(), "sha256": sha(broken)},
                  {"file": "t.mp3", "dir": "music", "mood": "calm", "url": track.as_uri(), "sha256": sha(track)}]
-        with self.assertRaises(StudioError):
+        with self.assertRaises(StudioError) as caught:
             medialib.sync(self.studio, items)
+        self.assertIn("w.wav: ffmpeg", str(caught.exception))        # the decode failed, not the download
         self.assertTrue((self.studio.music / "t.mp3").exists())
+        music = json.loads((self.studio.music / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual([e["file"] for e in music], ["t.mp3"])
         self.assertEqual(os.listdir(self.studio.sfx), ["library.json"])
 
     def test_manifest_refuses_paths_and_plain_http(self):
@@ -802,6 +820,8 @@ class MediaLibraryTests(unittest.TestCase):
             path.write_text(json.dumps({"items": [good | bad]}), encoding="utf-8")
             with self.assertRaises(StudioError, msg=bad):
                 medialib.load_manifest(path)
+        path.write_text(json.dumps({"items": [good | {"file": "a.mp3"}]}), encoding="utf-8")
+        self.assertEqual(len(medialib.load_manifest(path)), 1)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
     def test_transitions_mix_into_a_soundtrack_of_the_voice_length(self):

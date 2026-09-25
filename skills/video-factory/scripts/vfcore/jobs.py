@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import re
 import secrets
 from dataclasses import dataclass, field
 from typing import Any
@@ -301,8 +302,10 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
         # Escalated before refs had a random tail (or with none): ask again with a fresh
         # ref, so the question the person answers is one the director could not forge.
         kind = meta.get("escalated_stage", "video")
-        past = reviews(paths, kind)
-        return _escalate(base, paths, kind, past[-1] if past else {})
+        revise = [r for r in reviews(paths, kind) if r.get("verdict") == "REVISE"]
+        target = (script_review_sha(state.research, state.script) if kind == "script"
+                  else (read_json(paths.manifest) or {}).get("master_sha", ""))
+        return _escalate(base, paths, kind, {**(revise[-1] if revise else {}), "_target_sha": target})
     if meta.get("status") == "escalated":
         return {**base, "stage": "escalated", "owner": "human", "action": "stop",
                 "say": f"Job {job_id} waits for the human's decision on the {meta.get('escalated_stage')} review. "
@@ -427,9 +430,12 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
             "then": f"{cmd} delivered --job {job_id} --status sent"}
 
 
+ESCALATION_REF_RE = re.compile(r"(script|video)-[0-9a-f]{16}-\d+-[0-9a-f]{8}")
+
+
 def escalation_ref_ok(meta: dict) -> bool:
     """A ref minted by _escalate: kind, target sha, count and a random tail."""
-    return len(str(meta.get("escalation_ref") or "").split("-")) == 4
+    return bool(ESCALATION_REF_RE.fullmatch(str(meta.get("escalation_ref") or "")))
 
 
 def _escalate(base: dict, paths: JobPaths, kind: str, review: dict) -> dict:

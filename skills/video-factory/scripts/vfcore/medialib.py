@@ -37,6 +37,8 @@ def load_manifest(path: Path = MANIFEST) -> list[dict]:
         items = json.loads(path.read_text(encoding="utf-8")).get("items", [])
     except (OSError, ValueError, AttributeError) as exc:
         raise StudioError(f"media_library.json is unreadable: {exc}") from None
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        raise StudioError("media_library.json: items must be a list of objects")
     for item in items:
         name = str(item.get("file", ""))
         if (item.get("dir") not in ("music", "sfx") or name in ("", ".", "..")
@@ -64,7 +66,10 @@ def _max_volume_db(path: Path) -> float:
                timeout=60)
     for line in proc.stderr.decode("utf-8", "replace").splitlines():
         if "max_volume:" in line:
-            level = float(line.split("max_volume:")[1].split("dB")[0])
+            try:
+                level = float(line.split("max_volume:")[1].split("dB")[0])
+            except ValueError:
+                raise StudioError(f"volumedetect printed an unreadable level for {path.name}") from None
             if not math.isfinite(level):
                 raise StudioError(f"{path.name} is silent")
             return level
@@ -89,14 +94,12 @@ def prepare_sfx(source: Path, out: Path) -> None:
     would be picked as a transition sound.
     """
     trimmed = source.with_name("trimmed.wav")
-    ready = source.with_name("ready.wav")
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-af",
          "silenceremove=start_periods=1:start_threshold=-50dB", "-ac", "2", "-ar", str(SFX_RATE), str(trimmed)],
         timeout=60)
     gain = SFX_PEAK_DB - _max_volume_db(trimmed)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(trimmed), "-af", f"volume={gain:.2f}dB",
-         "-c:a", "pcm_s16le", str(ready)], timeout=60)
-    out.write_bytes(ready.read_bytes())
+         "-c:a", "pcm_s16le", str(out)], timeout=60)
 
 
 @dataclass
@@ -115,10 +118,10 @@ def _install(item: dict, folder_name: str, target: Path) -> dict:
             raise StudioError(f"the source changed (sha256 {got[:12]}), not installed")
         entry = {k: item[k] for k in item if k not in ("dir", "url")} | {"source_url": item["url"]}
         if folder_name == "sfx":
-            ready = Path(tmp) / "out.wav"
-            prepare_sfx(raw, ready)
-            entry["peak_s"] = peak_offset(ready)
-            target.write_bytes(ready.read_bytes())
+            sound = Path(tmp) / "sound.wav"
+            prepare_sfx(raw, sound)
+            entry["peak_s"] = peak_offset(sound)
+            target.write_bytes(sound.read_bytes())
         else:
             target.write_bytes(raw.read_bytes())
     return entry

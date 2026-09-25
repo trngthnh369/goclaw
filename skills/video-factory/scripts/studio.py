@@ -524,6 +524,7 @@ RECEIPT_ENV = "GOCLAW_RUN_RECEIPT"
 # Fixed on purpose: an env override let a run point this at a file:// receipt it wrote
 # itself and pass every check below (security review, 2026-09-25). Tests patch the name.
 RECEIPT_URL = "http://127.0.0.1:18790/v1/runs/receipt"
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 CONTINUE_WORDS = ("cứ làm tiếp", "làm tiếp", "tiếp tục", "cứ đăng", "đồng ý", "được", "duyệt", "ok", "continue")
 # Checked first: "không được" contains "được", and a reply asking for changes or
 # a stop must never pass a review.
@@ -542,7 +543,9 @@ def human_reply_for(job_id: str, review_channel: str, ref: str | None) -> str:
         raise StudioError("no run receipt: this runs only in the reply to a person's answer in the review channel")
     request = urllib.request.Request(RECEIPT_URL, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        # No proxy: urlopen's default opener honours http_proxy, which a command can set
+        # to a server of its own that answers with a made-up receipt (review, 2026-09-25).
+        with _NO_PROXY.open(request, timeout=10) as response:
             receipt = json.load(response)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise StudioError(f"the gateway did not confirm this run: {exc}") from None
