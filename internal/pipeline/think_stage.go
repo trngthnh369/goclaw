@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -59,6 +61,9 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		Options: map[string]any{
 			providers.OptMaxTokens: s.deps.Config.MaxTokens,
 		},
+	}
+	if state.Input != nil && state.Input.SessionKey != "" {
+		req.Options[providers.OptPromptCacheKey] = promptCacheKey(state.Input.SessionKey)
 	}
 
 	// 4. Call LLM (stream or sync — delegated to callback)
@@ -280,4 +285,11 @@ func isContextOverflowErr(err error) bool {
 	}
 	lower := strings.ToLower(err.Error())
 	return providers.IsContextOverflowMessage(lower)
+}
+
+// promptCacheKey derives a stable per-session prompt cache key. The session key
+// embeds user and chat IDs, so only a hash of it leaves the gateway.
+func promptCacheKey(sessionKey string) string {
+	sum := sha256.Sum256([]byte(sessionKey))
+	return "goclaw-" + hex.EncodeToString(sum[:16])
 }

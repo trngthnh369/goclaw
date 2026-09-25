@@ -319,6 +319,10 @@ func (p *CodexProvider) processSSEEvent(event *codexSSEEvent, result *ChatRespon
 					CompletionTokens: u.OutputTokens,
 					TotalTokens:      u.TotalTokens,
 				}
+				if u.InputTokensDetails != nil {
+					result.Usage.CacheReadTokens = u.InputTokensDetails.CachedTokens
+					result.Usage.PromptTokensIncludeCachedSegments = true
+				}
 				if u.OutputTokensDetails != nil {
 					result.Usage.ThinkingTokens = u.OutputTokensDetails.ReasoningTokens
 				}

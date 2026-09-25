@@ -194,3 +194,37 @@ func TestLookupPricing_ProviderQualified(t *testing.T) {
 		t.Errorf("expected nil for nil map, got %+v", p)
 	}
 }
+
+func TestCalculateCost_CachedInsidePrompt_NotDoubleCounted(t *testing.T) {
+	pricing := &config.ModelPricing{
+		InputPerMillion:     3.0,
+		OutputPerMillion:    15.0,
+		CacheReadPerMillion: 0.3,
+	}
+	// OpenAI/Codex shape: 1M input of which 800K came from cache.
+	usage := &providers.Usage{
+		PromptTokens:                      1_000_000,
+		CompletionTokens:                  0,
+		CacheReadTokens:                   800_000,
+		PromptTokensIncludeCachedSegments: true,
+	}
+	// 0.2M*3 + 0.8M*0.3 = 0.6 + 0.24 = 0.84
+	want := 0.84
+	if got := CalculateCost(pricing, usage); !floatEquals(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestCalculateCost_CachedInsidePromptNoCacheRate_FallsBackToInputRate(t *testing.T) {
+	pricing := &config.ModelPricing{InputPerMillion: 3.0}
+	usage := &providers.Usage{
+		PromptTokens:                      1_000_000,
+		CacheReadTokens:                   800_000,
+		PromptTokensIncludeCachedSegments: true,
+	}
+	// No cache rate: the cached share is priced like fresh input, never free.
+	want := 3.0
+	if got := CalculateCost(pricing, usage); !floatEquals(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

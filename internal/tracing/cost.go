@@ -23,7 +23,13 @@ func CalculateCost(pricing *config.ModelPricing, usage *providers.Usage) float64
 	if pricing == nil || usage == nil {
 		return 0
 	}
-	cost := float64(usage.PromptTokens) * pricing.InputPerMillion / 1_000_000
+	// OpenAI-style providers (openai, codex) report cached input inside PromptTokens;
+	// Anthropic reports it separately. Price only the fresh share at the input rate.
+	freshInput := usage.PromptTokens
+	if usage.PromptTokensIncludeCachedSegments {
+		freshInput = max(freshInput-usage.CacheReadTokens-usage.CacheCreationTokens, 0)
+	}
+	cost := float64(freshInput) * pricing.InputPerMillion / 1_000_000
 
 	// Split completion tokens into visible output + thinking only when a distinct
 	// ReasoningPerMillion rate is set. Otherwise price the full CompletionTokens
@@ -39,12 +45,8 @@ func CalculateCost(pricing *config.ModelPricing, usage *providers.Usage) float64
 		cost += float64(usage.CompletionTokens) * pricing.OutputPerMillion / 1_000_000
 	}
 
-	if pricing.CacheReadPerMillion > 0 && usage.CacheReadTokens > 0 {
-		cost += float64(usage.CacheReadTokens) * pricing.CacheReadPerMillion / 1_000_000
-	}
-	if pricing.CacheCreatePerMillion > 0 && usage.CacheCreationTokens > 0 {
-		cost += float64(usage.CacheCreationTokens) * pricing.CacheCreatePerMillion / 1_000_000
-	}
+	cost += cacheSegmentCost(usage.CacheReadTokens, pricing.CacheReadPerMillion, pricing.InputPerMillion, usage.PromptTokensIncludeCachedSegments)
+	cost += cacheSegmentCost(usage.CacheCreationTokens, pricing.CacheCreatePerMillion, pricing.InputPerMillion, usage.PromptTokensIncludeCachedSegments)
 	return cost
 }
 
@@ -61,4 +63,19 @@ func LookupPricing(pricingMap map[string]*config.ModelPricing, provider, model s
 		return p
 	}
 	return nil
+}
+
+// cacheSegmentCost prices one cache segment. A segment carved out of PromptTokens
+// with no cache rate configured falls back to the input rate, so it is never free.
+func cacheSegmentCost(tokens int, rate, inputRate float64, carvedFromPrompt bool) float64 {
+	if tokens <= 0 {
+		return 0
+	}
+	if rate <= 0 {
+		if !carvedFromPrompt {
+			return 0
+		}
+		rate = inputRate
+	}
+	return float64(tokens) * rate / 1_000_000
 }

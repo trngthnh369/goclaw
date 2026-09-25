@@ -1083,3 +1083,60 @@ func TestCodexProviderBuildRequestBodyWithImages(t *testing.T) {
 		t.Errorf("content[1] type = %v, want input_text", content[1]["type"])
 	}
 }
+
+func TestCodexProviderChatStreamReadsCachedInputTokens(t *testing.T) {
+	cases := []struct {
+		name      string
+		usage     string
+		wantCache int
+	}{
+		{"with cached share", `{"input_tokens":28534,"input_tokens_details":{"cached_tokens":27904},"output_tokens":105,"total_tokens":28639}`, 27904},
+		{"without details", `{"input_tokens":12097,"output_tokens":40,"total_tokens":12137}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"ok"}`)
+				fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":`+tc.usage+`}}`)
+				fmt.Fprint(w, "data: [DONE]\n\n")
+			}))
+			defer server.Close()
+
+			p := NewCodexProvider("openai-codex", &staticTokenSource{token: "test"}, server.URL, "gpt-6-sol")
+			p.retryConfig.Attempts = 1
+
+			result, err := p.ChatStream(context.Background(), ChatRequest{
+				Messages: []Message{{Role: "user", Content: "Hi"}},
+			}, func(StreamChunk) {})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			if result.Usage == nil {
+				t.Fatal("Usage is nil")
+			}
+			if result.Usage.CacheReadTokens != tc.wantCache {
+				t.Errorf("CacheReadTokens = %d, want %d", result.Usage.CacheReadTokens, tc.wantCache)
+			}
+			// input_tokens already contains the cached share; billing must not add it twice.
+			if got, want := result.Usage.PromptTokensIncludeCachedSegments, tc.wantCache > 0; got != want {
+				t.Errorf("PromptTokensIncludeCachedSegments = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexProviderBuildRequestBodyPromptCacheKey(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	msgs := []Message{{Role: "user", Content: "Hi"}}
+
+	withKey := p.buildRequestBody(ChatRequest{Messages: msgs, Options: map[string]any{OptPromptCacheKey: "goclaw-abc"}}, true)
+	if withKey["prompt_cache_key"] != "goclaw-abc" {
+		t.Errorf("prompt_cache_key = %v, want goclaw-abc", withKey["prompt_cache_key"])
+	}
+
+	withoutKey := p.buildRequestBody(ChatRequest{Messages: msgs}, true)
+	if _, ok := withoutKey["prompt_cache_key"]; ok {
+		t.Errorf("prompt_cache_key present without the option: %v", withoutKey["prompt_cache_key"])
+	}
+}

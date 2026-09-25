@@ -45,7 +45,14 @@ type codexUsage struct {
 	InputTokens         int                 `json:"input_tokens"`
 	OutputTokens        int                 `json:"output_tokens"`
 	TotalTokens         int                 `json:"total_tokens"`
+	InputTokensDetails  *codexInputDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *codexTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+// codexInputDetails carries the cached share of input_tokens. ChatGPT plan
+// quota bills cached input at a fraction of fresh input, so it must be traced.
+type codexInputDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type codexTokensDetails struct {

@@ -140,6 +140,12 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 		body["reasoning"] = map[string]any{"effort": level}
 	}
 
+	// Routes every call of one session to the same prompt cache, so the
+	// repeated system prompt + history prefix is billed as cached input.
+	if key, ok := req.Options[OptPromptCacheKey].(string); ok && key != "" {
+		body["prompt_cache_key"] = key
+	}
+
 	return body
 }
 
