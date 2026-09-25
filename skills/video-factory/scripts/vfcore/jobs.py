@@ -298,14 +298,13 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
     cmd = studio_cmd()
     base = {"job": job_id, "format": state.fmt.name, "status": meta.get("status")}
 
-    if meta.get("status") == "escalated" and not escalation_ref_ok(meta):
+    if meta.get("status") == "escalated" and not escalation_ref_ok(meta) and _current_target(state, paths):
         # Escalated before refs had a random tail (or with none): ask again with a fresh
         # ref, so the question the person answers is one the director could not forge.
         kind = meta.get("escalated_stage", "video")
         revise = [r for r in reviews(paths, kind) if r.get("verdict") == "REVISE"]
-        target = (script_review_sha(state.research, state.script) if kind == "script"
-                  else (read_json(paths.manifest) or {}).get("master_sha", ""))
-        return _escalate(base, paths, kind, {**(revise[-1] if revise else {}), "_target_sha": target})
+        return _escalate(base, paths, kind, {**(revise[-1] if revise else {}),
+                                             "_target_sha": _current_target(state, paths)})
     if meta.get("status") == "escalated":
         return {**base, "stage": "escalated", "owner": "human", "action": "stop",
                 "say": f"Job {job_id} waits for the human's decision on the {meta.get('escalated_stage')} review. "
@@ -428,6 +427,13 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
             "say": "Package the deliverables, send the review message exactly as printed, then record it.",
             "exec": f"{cmd} package --job {job_id}",
             "then": f"{cmd} delivered --job {job_id} --status sent"}
+
+
+def _current_target(state: "JobState", paths: JobPaths) -> str:
+    """What an escalated review is about now: the script's review sha or the rendered master's."""
+    if state.meta.get("escalated_stage") == "script":
+        return script_review_sha(state.research, state.script)
+    return str((read_json(paths.manifest) or {}).get("master_sha") or "")
 
 
 ESCALATION_REF_RE = re.compile(r"(script|video)-[0-9a-f]{16}-\d+-[0-9a-f]{8}")

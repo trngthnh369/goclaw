@@ -524,7 +524,12 @@ RECEIPT_ENV = "GOCLAW_RUN_RECEIPT"
 # Fixed on purpose: an env override let a run point this at a file:// receipt it wrote
 # itself and pass every check below (security review, 2026-09-25). Tests patch the name.
 RECEIPT_URL = "http://127.0.0.1:18790/v1/runs/receipt"
-_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # the gateway never redirects; a redirect would carry the token
+        return None
+
+
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 CONTINUE_WORDS = ("cứ làm tiếp", "làm tiếp", "tiếp tục", "cứ đăng", "đồng ý", "được", "duyệt", "ok", "continue")
 # Checked first: "không được" contains "được", and a reply asking for changes or
 # a stop must never pass a review.

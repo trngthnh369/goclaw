@@ -90,8 +90,8 @@ def peak_offset(path: Path) -> float:
 def prepare_sfx(source: Path, out: Path) -> None:
     """Trim leading silence and bring the peak to -1 dBFS, so every sound mixes at one level.
 
-    Both passes write next to `source` (a temporary folder): a half-made file in sfx/
-    would be picked as a transition sound.
+    Callers pass paths in a temporary folder: a half-made file in sfx/ would be
+    picked as a transition sound.
     """
     trimmed = source.with_name("trimmed.wav")
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-af",

@@ -518,6 +518,14 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(action["stage"], "escalate")
         self.assertTrue(jobs.escalation_ref_ok(jobs.load_meta(paths)))
         self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
+        meta = jobs.load_meta(paths)                          # nothing rendered to ask about: stop, never loop
+        meta["escalation_ref"] = "video-5280b81f-3"
+        jobs.save_meta(paths, meta)
+        paths.manifest.write_text("{}", encoding="utf-8")
+        before = len(jobs.load_meta(paths)["history"])
+        for _ in range(3):
+            self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
+        self.assertEqual(len(jobs.load_meta(paths)["history"]), before)
 
     def test_receipt_is_never_fetched_through_a_proxy_from_the_environment(self):
         self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": "forged",
@@ -528,6 +536,9 @@ class FlowTests(unittest.TestCase):
         for name in ("http_proxy", "HTTP_PROXY"):
             self.addCleanup(os.environ.pop, name, None)
             os.environ[name] = proxy
+        for name in ("no_proxy", "NO_PROXY"):       # a runner that bypasses loopback would hide the bug
+            if name in os.environ:
+                self.addCleanup(os.environ.__setitem__, name, os.environ.pop(name))
         self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
         os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
         with self.assertRaises(StudioError) as caught:
