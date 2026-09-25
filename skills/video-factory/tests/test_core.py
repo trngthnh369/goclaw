@@ -29,6 +29,7 @@ from vfcore.paths import Studio  # noqa: E402
 from vfcore.schema import validate_research, validate_review, validate_script  # noqa: E402
 from vfcore.textutil import syllable_count  # noqa: E402
 from vfcore.themes import get_theme  # noqa: E402
+from vfcore.util import StudioError, read_json  # noqa: E402
 
 SHORT = get_format("short")
 HAS_FFPROBE = shutil.which("ffprobe") is not None
@@ -320,8 +321,28 @@ class FlowTests(unittest.TestCase):
         last = text.rstrip().splitlines()[-1]
         self.assertTrue(last.startswith("NEXT: in one turn, call read_image once for each of"), last)
 
+    def _as_person(self, job: str, paths, words: str = "sửa ảnh") -> None:
+        """The gateway reports that a person replied to this job's current message."""
+        run_cli("--workspace", self.ws, "config", "set", "delivery.channel=vf-discord")
+        ref = jobs.load_meta(paths).get("escalation_ref")
+        replied = f"⚠️ Video Factory · x\njob: {job}" + (f"\nref: {ref}" if ref else "")
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": replied,
+                               "current_message": words})
+
+    def test_feedback_needs_a_persons_reply_confirmed_by_the_gateway(self):
+        job, paths = self._job_at_video_review()
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
+                             "--scene", "s1", "--text", "director's own idea")
+        self.assertEqual(code, 1, text)
+        self.assertIn("no run receipt", text)
+        self.assertEqual(len(jobs.reviews(paths, "video")), 0)
+
     def test_consecutive_feedback_on_one_cut_adds_up(self):
         job, paths = self._job_at_video_review()
+        self._as_person(job, paths)
         for scene in ("s1", "s2"):
             code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
                                  "--scene", scene, "--text", f"ảnh {scene} bị lồng khung")
@@ -350,6 +371,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual((action["stage"], action["action"]), ("escalated", "stop"))
         self.assertNotIn("--quote", action["human_commands"]["continue anyway"])   # the gateway supplies the words
         # The same situation raised by a person is never capped.
+        self._as_person(job, paths, "sửa: ảnh cảnh 2 tối quá")
         code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
                              "--scene", "s2", "--text", "ảnh cảnh 2 tối quá")
         self.assertEqual(code, 0, text)
@@ -381,6 +403,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(cfg["delivery"]["target"], "1552695501751586918")   # never a rounded number
         message = package.escalation_message(paths, action["issues"])
         self.assertIn(f"job: {job}", message)
+        self.assertIn(f"ref: video-{read_json(paths.manifest)['master_sha']}-1-", message)
         self.assertIn("[s1] bàn tay sáu ngón", message)
         self.assertIn("cứ làm tiếp", message)
 
@@ -433,17 +456,24 @@ class FlowTests(unittest.TestCase):
         code, text = run_cli(*override)
         self.assertEqual(code, 1, text)                       # nothing escalated: nothing to override
         self.assertIn("only answers an escalated review", text)
+        ref = f"video-{read_json(paths.manifest)['master_sha']}-2-0123abcd"
         meta = jobs.load_meta(paths)
-        meta["status"], meta["escalated_stage"] = "escalated", "video"
+        meta["status"], meta["escalated_stage"], meta["escalation_ref"] = "escalated", "video", ref
         jobs.save_meta(paths, meta)
         self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
         os.environ.pop("GOCLAW_RUN_RECEIPT", None)
         code, text = run_cli(*override)                       # a cron run: no receipt at all
         self.assertEqual(code, 1, text)
-        question = f"⚠️ Video Factory · x\njob: {job}\n\nReview video vẫn chưa đạt"
+        question = f"⚠️ Video Factory · x\njob: {job}\nref: {ref}\n\nReview video vẫn chưa đạt"
+        earlier = f"⚠️ Video Factory · x\njob: {job}\nref: script-0badc0de-1\n\nReview kịch bản vẫn chưa đạt"
+        planted = question.replace(f"ref: {ref}", f"ref: script-0badc0de-1\nref: {ref}")
         cases = [({"human_reply": False}, "not started by an allowlisted person"),
+                 ({"human_reply": True, "reply_to_content": planted, "current_message": "tiếp tục"},
+                  "not a Video Factory message"),
+                 ({"human_reply": True, "reply_to_content": earlier, "current_message": "tiếp tục"},
+                  "answered an earlier question"),
                  ({"human_reply": True, "reply_to_content": "⚠️ Video Factory\njob: vf-other",
-                   "current_message": "cứ làm tiếp"}, "not the escalation question"),
+                   "current_message": "cứ làm tiếp"}, "not a Video Factory message"),
                  ({"human_reply": True, "reply_to_content": question, "current_message": "không được, làm lại"},
                   "does not say to continue")]
         cases.insert(1, ({"human_reply": True, "channel": "telegram-main", "reply_to_content": question,
@@ -458,12 +488,23 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(code, 1, text)
             self.assertIn(reason, text)
         self.assertEqual(jobs.load_meta(paths)["status"], "escalated")
+        manifest = read_json(paths.manifest)                  # a manifest edited to name another cut
+        paths.manifest.write_text(json.dumps(manifest | {"master_sha": "f" * 16}), encoding="utf-8")
+        code, text = run_cli(*override)
+        self.assertIn("does not match its manifest", text)
+        paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
         self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": question,
                                "current_message": "cứ làm tiếp"})
         code, text = run_cli(*override)
         self.assertEqual(code, 0, text)
         self.assertEqual(jobs.load_meta(paths)["status"], "active")
         self.assertEqual(jobs.reviews(paths, "video")[-1]["_human_quote"], "cứ làm tiếp")
+        meta = jobs.load_meta(paths)                          # a new question: the old reply is spent
+        meta["status"], meta["escalated_stage"] = "escalated", "video"
+        jobs.save_meta(paths, meta)
+        code, text = run_cli(*override)
+        self.assertEqual(code, 1, text)
+        self.assertIn("ask the person again", text)
         message = package.review_message(*PackageTests.ARGS, "Caption.", [], "/tmp/p.mp4", publishable=False,
                                          overrides=["cứ làm tiếp"])
         self.assertIn("theo lời bạn: «cứ làm tiếp»", message)
@@ -578,6 +619,15 @@ class PronunciationTests(unittest.TestCase):
         errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
         self.assertEqual(errors, [])
 
+    def test_foreign_syllable_left_in_tts_text_names_tts_text_not_add_it(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][1]["narration"] = "Microsoft cũng trì hoãn như bạn."
+        doc["scenes"][1]["emphasis"] = []
+        doc["scenes"][1]["tts_text"] = "Mai crô xốp cũng trì hoãn như bạn."
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("tts_text still has crô" in e for e in errors), errors)
+        self.assertFalse(any('add "tts_text"' in e for e in errors), errors)
+
     def test_video_review_cannot_argue_facts(self):
         review = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE", "checked_scenes": ["s1"],
                   "issues": [{"scene": "s1", "severity": "blocker", "type": "fact",
@@ -629,6 +679,122 @@ class RenderPaceTests(unittest.TestCase):
             self.assertEqual((cut["width"], cut["height"]), (1080, 1920))
             self.assertEqual(cut["bytes"], paths.preview.stat().st_size)
             self.assertFalse(list(paths.render.glob("reviewcut-*")))
+
+
+class MediaLibraryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.studio = Studio(Path(self.tmp.name))
+
+    def _library(self, folder: str, items: list[dict]) -> None:
+        root = self.studio.root / folder
+        root.mkdir(parents=True, exist_ok=True)
+        for item in items:
+            (root / item["file"]).write_bytes(b"x")
+        (root / "library.json").write_text(json.dumps({"items": items}), encoding="utf-8")
+
+    def test_track_of_the_asked_mood_is_picked_and_any_track_when_none_matches(self):
+        from vfcore import audio
+        self._library("music", [{"file": "a.mp3", "mood": "calm"}, {"file": "b.mp3", "mood": "upbeat"}])
+        for seed in ("j1", "j2", "j3", "j4"):
+            self.assertEqual(audio.pick_library_track(self.studio, seed, "calm").name, "a.mp3")
+        self.assertIsNotNone(audio.pick_library_track(self.studio, "j1", "tech"))
+        self.assertIsNone(audio.pick_library_track(Studio(self.studio.root / "empty"), "j1", "calm"))
+
+    def test_transitions_are_whooshes_only_repeatable_and_carry_their_peak(self):
+        from vfcore import audio
+        self._library("sfx", [{"file": "w1.wav", "kind": "whoosh", "peak_s": 0.2},
+                              {"file": "w2.wav", "kind": "whoosh", "peak_s": 0.3},
+                              {"file": "p.wav", "kind": "pop", "peak_s": 0.0}])
+        picks = audio.pick_transitions(self.studio, "job-1", 5)
+        self.assertEqual(len(picks), 5)
+        self.assertEqual({p.name for p, _ in picks}, {"w1.wav", "w2.wav"})
+        self.assertEqual(picks, audio.pick_transitions(self.studio, "job-1", 5))
+        self.assertEqual(dict((p.name, peak) for p, peak in picks), {"w1.wav": 0.2, "w2.wav": 0.3})
+
+    def test_sound_choices_are_validated_and_do_not_reopen_the_fact_check(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["music_mood"], doc["sfx"] = "sad", "loud"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("music_mood" in e for e in errors), errors)
+        self.assertTrue(any("script.sfx" in e for e in errors), errors)
+        plain = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        styled = copy.deepcopy(plain) | {"music_mood": "calm", "sfx": "none"}
+        self.assertEqual(jobs.script_review_sha({}, plain), jobs.script_review_sha({}, styled))
+
+    def test_committed_manifest_is_valid(self):
+        from vfcore import medialib
+        items = medialib.load_manifest()
+        self.assertTrue(any(i["dir"] == "music" for i in items))
+        self.assertTrue(any(i["dir"] == "sfx" for i in items))
+        self.assertTrue(all(i["license"] == "cc0" and len(i["sha256"]) == 64 for i in items))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_sync_installs_verified_files_keeps_a_persons_own_and_refuses_changed_ones(self):
+        import hashlib
+        import subprocess
+
+        from vfcore import medialib
+        src = self.studio.root / "src"
+        src.mkdir()
+        click = src / "click.wav"      # 0.3 s of silence, then a short loud burst
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                        "aevalsrc='if(between(t,0.3,0.32),0.5*sin(2*PI*800*t),0)':d=0.6:s=48000", str(click)],
+                       check=True, timeout=60, stdin=subprocess.DEVNULL)
+        track = src / "t.mp3"
+        track.write_bytes(b"not really audio")
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()   # noqa: E731
+        self._library("music", [{"file": "mine.mp3", "mood": "calm"}])
+        items = [{"file": "t.mp3", "dir": "music", "mood": "calm", "license": "cc0", "url": track.as_uri(),
+                  "sha256": sha(track)},
+                 {"file": "w.wav", "dir": "sfx", "kind": "whoosh", "license": "cc0", "url": click.as_uri(),
+                  "sha256": sha(click)}]
+        done = medialib.sync(self.studio, items)
+        self.assertEqual(done["fetched"], 2)
+        music = json.loads((self.studio.music / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual([e["file"] for e in music], ["mine.mp3", "t.mp3"])
+        sfx = json.loads((self.studio.sfx / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertLess(sfx[0]["peak_s"], 0.1)            # leading silence trimmed, peak near the start
+        self.assertEqual(medialib.sync(self.studio, items)["kept"], 2)
+        items[0]["sha256"] = "0" * 64
+        (self.studio.music / "t.mp3").unlink()
+        with self.assertRaises(StudioError) as caught:
+            medialib.sync(self.studio, items)
+        self.assertIn("the source changed", str(caught.exception))
+        self.assertFalse((self.studio.music / "t.mp3").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_transitions_mix_into_a_soundtrack_of_the_voice_length(self):
+        import subprocess
+
+        from vfcore import audio
+        root = self.studio.root
+        voice, whoosh, fx, out = root / "v.wav", root / "w.wav", root / "fx.wav", root / "o.m4a"
+        for path, spec in ((voice, "sine=frequency=300:duration=3"), (whoosh, "anoisesrc=d=0.4:a=0.5")):
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", spec, "-ar", "48000",
+                            str(path)], check=True, timeout=60, stdin=subprocess.DEVNULL)
+        audio.transition_track([(0.8, whoosh), (2.0, whoosh)], fx, 3.0)
+        self.assertAlmostEqual(tts.probe_duration(fx), 3.0, delta=0.05)
+        audio.mix_and_normalize(voice, None, out, music_db=-20, transitions=fx, sfx_db=-14)
+        self.assertAlmostEqual(tts.probe_duration(out), 3.0, delta=0.1)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_bed_sits_the_asked_distance_under_the_voice_whatever_its_own_level(self):
+        import subprocess
+
+        from vfcore import audio
+        root = self.studio.root
+        voice, loud, quiet = root / "v.wav", root / "loud.wav", root / "quiet.wav"
+        for path, spec in ((voice, "sine=frequency=300:duration=6,volume=-6dB"),
+                           (loud, "sine=frequency=500:duration=6,volume=-3dB"),
+                           (quiet, "sine=frequency=500:duration=6,volume=-30dB")):
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", spec, "-ar", "48000",
+                            str(path)], check=True, timeout=60, stdin=subprocess.DEVNULL)
+        voice_i = audio.integrated_loudness(voice)
+        for bed in (loud, quiet):
+            gain = audio.bed_gain(voice, bed, 12)
+            self.assertAlmostEqual(audio.integrated_loudness(bed) + gain, voice_i - 12, delta=0.3)
 
 
 class ContactSheetTests(unittest.TestCase):

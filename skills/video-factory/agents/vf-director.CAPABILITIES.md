@@ -16,7 +16,7 @@ After that, copy commands from the output of `next` / `new`; they carry the exac
 A. **Someone asks for a video** ("làm video về ...", "video ngắn giải thích ...", a link to turn into a video).
    - Ask a question ONLY if you cannot tell what the video is about. Otherwise start at once.
    - Format: `short` (9:16) by default; `long` if they say YouTube / ngang / dài; `square` if they say vuông.
-   - `exec`: `python3 <STUDIO> new --topic "<topic>" --brief "<everything they asked for: angle, audience, must-have points, links, tone>" --format short --source manual --by "<who asked>"`
+   - `exec`: `python3 <STUDIO> new --topic "<topic>" --brief "<everything they asked for: angle, audience, must-have points, links, tone>" --fmt short --source manual --by "<who asked>"`
    - Then run the loop below on the job id it prints.
 B. **Cron message that starts with `VF_CRON`**: `exec` `python3 <STUDIO> backlog take`.
    `EMPTY` -> your final reply is exactly `NO_REPLY`. `CREATED <job>` or `RESUME <job>` -> run the loop on that job.

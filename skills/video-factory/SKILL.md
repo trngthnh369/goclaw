@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.2.0"
-  bundle_revision: "2026-09-24-017"
+  bundle_revision: "2026-09-25-023"
   runtime: python3
   forked_from: comingwave-study
 ---
@@ -53,7 +53,7 @@ Agents `write_file` into `<workspace>/inbox/<job>/<kind>.json` and run `submit -
 | `render` | vf-director | `out/master.mp4` for the current inputs, hard QA passed |
 | `review_video` | vf-reviewer | a verdict bound to the master sha; REVISE -> `fix_visuals` (director) or `script_revise` |
 | `deliver` | vf-director | `deliver/delivery.json` status `sent` for the current master |
-| `escalated` | human | `override` (gateway-confirmed reply), `feedback` or `cancel` on the human's word |
+| `escalated` | human | `override` or `feedback` (both need the gateway-confirmed reply to the current ⚠️ question), or `cancel` on the human's word |
 | `awaiting_approval` | human | - |
 | `published` | gateway | `published --job J` after the `message` tool answered `posted` |
 
@@ -72,8 +72,8 @@ python3 $SKILLDIR/scripts/studio.py <command>
 Every `next` / `emit` output already contains the absolute, version-pinned command to use, so agents copy commands from there.
 
 ```
-init | doctor | list | status --job J | config show | config set key=value
-new --topic T [--brief B] [--format short|long|square] [--source manual|cron] [--by WHO]
+init | doctor | media-sync | list | status --job J | config show | config set key=value
+new --topic T [--brief B] [--fmt short|long|square] [--source manual|cron] [--by WHO]
 next [--job J]
 emit --job J --stage script|script_revise|review_script|review_video|assets
 submit --job J --kind research|script|review_script|review_video --file <workspace>/inbox/<job>/<kind>.json
@@ -96,7 +96,7 @@ config set publish.facebook_reels.enabled=true   (review messages carry the [cap
 - **Pictures**: `ai_image` = the director's `create_image` output (Nano Banana 2 via `ag-image`), cover-cropped to 1.5x the frame and moved with `zoompan`; `card` = HTML rendered on the Chrome sidecar in an incognito context (fonts inlined as data URIs); `screenshot` = a public URL (resolved and refused if it points at a private address).
 - **Clips**: one per scene with identical x264 settings, joined by the concat demuxer without re-encoding. Resumable, keyed by a hash of everything that shapes the clip.
 - **Resumable to the end**: the soundtrack and the master are keyed the same way, and the review cut keeps its pass-1 statistics (`render/reviewcut.json`), so every `render` call finishes at least one step and none is redone. Each step is estimated from its measured normal cost times the slowdown last observed (`render/pace.json`); a step that would not fit the call's budget is left for the next call (`PARTIAL`). A host short of memory once made a render 5-8x slower, and the old all-at-once tail never fit the 600 s exec timeout.
-- **Sound**: narration on the frame-exact timeline; optional music only from `<workspace>/music/` (tracks the human holds a licence for), ducked with `sidechaincompress`; two-pass `loudnorm` to -14 LUFS / -1.5 dBTP.
+- **Sound**: narration on the frame-exact timeline; optional music only from `<workspace>/music/` (tracks the human holds a licence for, plus the CC0 tracks `media-sync` installs from `deploy/media_library.json`, chosen by the script's `music_mood`), set `music.below_voice_lu` (default 12) under the measured voice and ducked with `sidechaincompress`; a CC0 whoosh from `<workspace>/sfx/` peaks on every scene cut (`sfx: auto|none`, `sfx.volume_db`); two-pass `loudnorm` to -14 LUFS / -1.5 dBTP.
 - **Out**: `master.mp4` (H.264 High, yuv420p, BT.709, 30 fps, AAC stereo 48 kHz, faststart); `preview.mp4` = the review cut, which is also the published Reel: two-pass H.264 to <= 9.5 MB (one Discord upload), 1080x1920 when the budget allows >= 1.3 Mbps else 720x1280, fixed 30 fps, 2 s closed GOP, AAC-LC stereo 48 kHz 128 kbps; `captions.srt`, `cover.jpg`, `contact.jpg`, per-scene frames, `qa.json`.
 - **Images**: the prompt asks for a full-bleed 9:16 picture. Asking for "calm empty areas at top and bottom" made the model draw blurred bands with hard seams on every picture.
 

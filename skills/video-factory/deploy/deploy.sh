@@ -31,4 +31,6 @@ find . -name __pycache__ -type d -prune -exec rm -rf {} +
 mv "$staging/video-factory" "$store/$next"
 rm -rf "$staging"
 echo "DEPLOYED video-factory version $next (tests passed); agents use it from their next run"
+# The CC0 media library lives in the studio, not the skill; fetch only what is missing.
+python3 -X utf8 "$store/$next/scripts/studio.py" media-sync || echo "WARNING: media-sync failed - videos render without the missing tracks/sounds"
 '

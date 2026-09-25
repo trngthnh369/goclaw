@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import fontmetrics
+from .audio import MOODS
 from .formats import FormatSpec
 from .textutil import SYLLABLES_PER_SECOND, fold_ascii, has_emoji, nfc, syllable_count
 from .themes import THEMES
@@ -34,6 +35,7 @@ ROLES = ("hook", "body", "cta")
 SEVERITIES = ("blocker", "major", "minor")
 ISSUE_TYPES = ("fact", "clarity", "visual", "text", "audio", "timing", "policy", "other")
 MUSIC_MODES = ("auto", "none", "library")
+SFX_MODES = ("auto", "none")
 # The Reels caption travels inside ONE Discord review message (2000-byte cap) next
 # to the title, sources and instructions, and is published byte for byte from it.
 REELS_CAPTION_MAX_BYTES = 1200
@@ -369,6 +371,10 @@ def validate_script(doc: Any, fmt: FormatSpec, fact_ids: set[str], *, rate_perce
         errors.append(f"script.theme must be one of {', '.join(THEMES)}")
     if doc.get("music") is not None and doc.get("music") not in MUSIC_MODES:
         errors.append(f"script.music must be one of {', '.join(MUSIC_MODES)}")
+    if doc.get("music_mood") is not None and doc.get("music_mood") not in MOODS:
+        errors.append(f"script.music_mood must be one of {', '.join(MOODS)}")
+    if doc.get("sfx") is not None and doc.get("sfx") not in SFX_MODES:
+        errors.append(f"script.sfx must be one of {', '.join(SFX_MODES)}")
     _text(doc, "image_style", "script", errors, required=False, max_len=300)
 
     scenes = doc.get("scenes")
@@ -416,7 +422,14 @@ def validate_script(doc: Any, fmt: FormatSpec, fact_ids: set[str], *, rate_perce
         tts_text = _text(scene, "tts_text", where, errors, required=False, max_len=600, no_emoji=True)
         spoken = spoken_text(narration, tts_text or None, lexicon)
         foreign = foreign_tokens(spoken) if voice.startswith("vi-") else []
-        if foreign:
+        if foreign and tts_text:
+            # Telling a script that already has tts_text to "add tts_text" made the writer resubmit
+            # the same respelling until the loop detector stopped it.
+            errors.append(
+                f"{where}: tts_text still has {', '.join(foreign[:8])}, which the Vietnamese voice cannot say - "
+                "every spoken word must be a real Vietnamese syllable: no consonant clusters like \"cr\", \"bl\", "
+                "\"st\" and no final \"s\", \"k\", \"l\" (e.g. \"crô\" -> \"cơ rô\", \"Microsoft\" -> \"mai cơ rô xóp\").")
+        elif foreign:
             errors.append(
                 f"{where}: the Vietnamese voice would misread {', '.join(foreign[:8])} - add \"tts_text\": the whole "
                 "narration as it should be SPOKEN, with each of these written as Vietnamese syllables "

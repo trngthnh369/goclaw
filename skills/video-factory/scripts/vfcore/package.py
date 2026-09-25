@@ -104,7 +104,8 @@ def escalation_message(paths: JobPaths, issues: list[str]) -> str:
     media = (f"\nMEDIA:{stage_for_chat(paths)}"
              if kind == "video" and manifest.get("review_cut") and paths.preview.exists() else "")
     for count in (6, 3, 1):   # drop issues before ever dropping the question or the video
-        text = "\n".join([f"⚠️ Video Factory · {title}", f"job: {paths.job_id}", "",
+        text = "\n".join([f"⚠️ Video Factory · {title}", f"job: {paths.job_id}",
+                          f"ref: {meta.get('escalation_ref', '')}", "",
                           f"Review {'kịch bản' if kind == 'script' else 'video'} vẫn chưa đạt sau nhiều vòng sửa:",
                           *[f"- {issue[:300]}" for issue in issues[:count]], "",
                           "Bạn quyết định (trả lời tin này): \"cứ làm tiếp\" để bỏ qua review, "

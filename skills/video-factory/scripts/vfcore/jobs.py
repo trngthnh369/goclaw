@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -94,7 +95,7 @@ def script_review_sha(research: Any, script: Any) -> str:
     """Hash of what the fact-check covers: everything except image prompts/motion."""
     stripped = copy.deepcopy(script) if isinstance(script, dict) else script
     if isinstance(stripped, dict):
-        for key in ("image_style", "voice", "rate", "theme", "music"):   # presentation, not claims
+        for key in ("image_style", "voice", "rate", "theme", "music", "music_mood", "sfx"):   # presentation
             stripped.pop(key, None)
         for scene in stripped.get("scenes", []):
             if isinstance(scene, dict) and isinstance(scene.get("visual"), dict):
@@ -432,9 +433,16 @@ def _escalate(base: dict, paths: JobPaths, kind: str, review: dict) -> dict:
     rounds = MAX_SCRIPT_REVISIONS if kind == "script" else MAX_VIDEO_REVISIONS
     meta = load_meta(paths)
     if meta.get("status") != "escalated":
+        # One ref per question, naming what was reviewed: a person's "continue" answers
+        # this question only. A director once reused the reply to an earlier question to
+        # pass a new one, in the same run, twelve seconds after asking (2026-09-25).
+        count = sum(1 for h in meta.get("history", []) if h.get("event") == "escalated") + 1
         meta["status"] = "escalated"
         meta["escalated_stage"] = kind
-        log_event(paths, meta, "escalated", stage=kind, issues=issues[:6])
+        # The random tail does not exist before this moment, so no earlier message the
+        # director wrote can already carry it (it could predict every other part).
+        meta["escalation_ref"] = f"{kind}-{review.get('_target_sha', '')}-{count}-{secrets.token_hex(4)}"
+        log_event(paths, meta, "escalated", stage=kind, ref=meta["escalation_ref"], issues=issues[:6])
     return {**base, "status": "escalated", "stage": "escalate", "owner": "vf-director", "action": "ask_human",
             "say": f"The {kind} review still says REVISE after {rounds} rounds, so the job now waits for the human. "
                    "Tell the human, in Vietnamese, what is unresolved (issues) and the choices: continue anyway, "
@@ -526,7 +534,7 @@ def note_render(paths: JobPaths, master_sha: str) -> None:
     log_event(paths, meta, "rendered", master_sha=master_sha)
 
 
-def record_human_feedback(paths: JobPaths, kind: str, scene: str, text: str) -> None:
+def record_human_feedback(paths: JobPaths, kind: str, scene: str, text: str, *, quote: str = "") -> None:
     """Turn a person's change request on a delivered video into a REVISE review.
 
     kind "visual" re-rolls or re-prompts pictures (director); kind "script" sends
@@ -557,4 +565,5 @@ def record_human_feedback(paths: JobPaths, kind: str, scene: str, text: str) -> 
             "_target_sha": manifest["master_sha"], "_submitted_at": utc_now()})
     meta = load_meta(paths)
     meta["status"] = "active"
-    log_event(paths, meta, "human_feedback", kind=kind, scene=scene, text=text[:300])
+    meta.pop("escalation_ref", None)
+    log_event(paths, meta, "human_feedback", kind=kind, scene=scene, text=text[:300], quote=quote[:300])

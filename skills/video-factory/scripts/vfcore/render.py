@@ -42,10 +42,12 @@ def render_config(studio_cfg: dict) -> dict:
     """The part of studio.json that changes pixels or sound (part of the render hash)."""
     return {
         "brand": (studio_cfg.get("brand") or {}).get("handle", "") if (studio_cfg.get("brand") or {}).get("show") else "",
-        "music_db": (studio_cfg.get("music") or {}).get("volume_db", -20),
+        "music_below_voice": (studio_cfg.get("music") or {}).get("below_voice_lu", 12),
         "lexicon": studio_cfg.get("lexicon") or {},
         "default_theme": (studio_cfg.get("defaults") or {}).get("theme", "midnight"),
         "default_music": (studio_cfg.get("defaults") or {}).get("music", "auto"),
+        "sfx_db": (studio_cfg.get("sfx") or {}).get("volume_db", -14),
+        "default_sfx": (studio_cfg.get("defaults") or {}).get("sfx", "auto"),
     }
 
 
@@ -274,12 +276,19 @@ def render(studio: Studio, paths: JobPaths, studio_cfg: dict, *, budget_seconds:
 
     # 4. soundtrack (kept across calls, keyed by what it is made of) ------------------------
     music_mode = script.get("music") or cfg["default_music"]
-    pick = audio.pick_library_track(studio, paths.job_id) if music_mode in ("auto", "library") else None
+    pick = (audio.pick_library_track(studio, paths.job_id, script.get("music_mood"))
+            if music_mode in ("auto", "library") else None)
     music_used = f"library:{pick.name}" if pick is not None else "none"
+    cuts = [t["start"] for t in timeline[1:]]
+    sounds = (audio.pick_transitions(studio, paths.job_id, len(cuts))
+              if (script.get("sfx") or cfg["default_sfx"]) == "auto" else [])
+    transitions = [(max(0.0, cut - peak), sound) for cut, (sound, peak) in zip(cuts, sounds)]
+    sfx_used = [f"{round(start, 3)}:{sound.name}" for start, sound in transitions]
     soundtrack = paths.render / "soundtrack.m4a"
     sound_file = paths.render / "soundtrack.key.json"
     sound_key = sha256_text(canonical_json({
-        "v": RENDERER_VERSION, "voice": voice, "rate": rate, "music": music_used, "music_db": cfg["music_db"],
+        "v": RENDERER_VERSION, "voice": voice, "rate": rate, "music": music_used, "music_below_voice": cfg["music_below_voice"],
+        "sfx": sfx_used, "sfx_db": cfg["sfx_db"],
         "slots": [[t["id"], t["spoken"], t["frames"]] for t in timeline]}))[:16]
     sound = read_json(sound_file, {}) or {}
     if not (soundtrack.exists() and sound.get("key") == sound_key):
@@ -297,7 +306,13 @@ def render(studio: Studio, paths: JobPaths, studio_cfg: dict, *, budget_seconds:
         if pick is not None:
             bed = paths.render / "bed.wav"
             audio.music_bed(pick, bed, total)
-        measured = audio.mix_and_normalize(voice_track, bed, soundtrack, music_db=cfg["music_db"])
+        fx = None
+        if transitions:
+            fx = paths.render / "transitions.wav"
+            audio.transition_track(transitions, fx, total)
+        music_db = audio.bed_gain(voice_track, bed, cfg["music_below_voice"]) if bed is not None else 0.0
+        measured = audio.mix_and_normalize(voice_track, bed, soundtrack, music_db=music_db,
+                                           transitions=fx, sfx_db=cfg["sfx_db"])
         sound = {"key": sound_key, "measured": {k: measured.get(k) for k in ("input_i", "input_tp")}}
         write_json(sound_file, sound)
         pace.done(STEP_COST["audio"] * total, time.monotonic() - step_started)
@@ -329,6 +344,7 @@ def render(studio: Studio, paths: JobPaths, studio_cfg: dict, *, budget_seconds:
     timer.lap("qa")
     report["timings"] = timer.phases
     report["music"] = music_used
+    report["sfx"] = len(sfx_used)
     report["pre_normalization"] = sound.get("measured", {})
     write_json(paths.qa, report)
     master_sha = sha256_file(paths.master)[:16]

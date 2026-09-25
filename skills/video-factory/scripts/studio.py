@@ -6,7 +6,7 @@ the errors to fix, and what to run next. Artifacts reach agents through this
 stdout (exec), never through read_file.
 
     studio.py init | doctor | list | config show
-    studio.py new --topic T [--brief B] [--format short|long|square] [--source manual|cron]
+    studio.py new --topic T [--brief B] [--fmt short|long|square] [--source manual|cron]
     studio.py next [--job J]              the single decision point
     studio.py emit --job J --stage S      material for a stage
     studio.py submit --job J --kind research|script|review_script|review_video --file <job inbox>/<kind>.json
@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from vfcore import backlog, briefs, jobs, package, render  # noqa: E402
+from vfcore import backlog, briefs, jobs, medialib, package, render  # noqa: E402
 from vfcore.formats import FORMATS  # noqa: E402
 from vfcore.paths import CDP_RENDER_JS, FONTS_DIR, JobPaths, Studio, default_workspace, studio_cmd  # noqa: E402
 from vfcore.schema import MOTIONS, validate_research  # noqa: E402
@@ -48,8 +48,9 @@ DEFAULT_CONFIG = {
     "schema": "vf.studio.v1",
     "brand": {"handle": "", "show": False},
     "defaults": {"format": "short", "voice": "vi-VN-HoaiMyNeural", "rate": 5, "theme": "midnight",
-                 "music": "auto"},
-    "music": {"volume_db": -20},
+                 "music": "auto", "sfx": "auto"},
+    "music": {"below_voice_lu": 12},
+    "sfx": {"volume_db": -14},
     "lexicon": {},
     "delivery": {"channel": "", "target": ""},
     "publish": {"facebook_reels": {"enabled": False}},
@@ -526,15 +527,16 @@ CONTINUE_WORDS = ("cứ làm tiếp", "làm tiếp", "tiếp tục", "cứ đăn
 STOP_WORDS = ("không", "khong", "chưa", "đừng", "huỷ", "hủy", "bỏ", "sửa", "dừng", "làm lại", "no", "cancel", "stop")
 
 
-def human_reply_for(job_id: str, review_channel: str) -> str:
-    """The person's own words answering this job's escalation question, from the gateway.
+def human_reply_for(job_id: str, review_channel: str, ref: str | None) -> str:
+    """The person's own words replying to this job's message, from the gateway.
 
     The reply must come through the configured review channel: other channels
-    have their own allowlists, and none of them approves videos.
+    have their own allowlists, and none of them approves videos. With `ref`, it
+    must answer that exact escalation question.
     """
     token = os.environ.get(RECEIPT_ENV, "").strip()
     if not token:
-        raise StudioError("no run receipt: override runs only in the reply to a person's answer in the review channel")
+        raise StudioError("no run receipt: this runs only in the reply to a person's answer in the review channel")
     request = urllib.request.Request(RECEIPT_URL, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -548,8 +550,14 @@ def human_reply_for(job_id: str, review_channel: str) -> str:
         raise StudioError(f"the reply came through {receipt.get('channel')!r}, not the review channel "
                           f"{review_channel!r} (config delivery.channel)")
     replied = receipt.get("reply_to_content", "")
-    if "Video Factory" not in replied or f"job: {job_id}" not in replied.splitlines():
-        raise StudioError(f"the person replied to a message that is not the escalation question of {job_id}")
+    lines = replied.splitlines()
+    job_lines = [line for line in lines if line.startswith("job: ")]
+    ref_lines = [line for line in lines if line.startswith("ref: ")]
+    if "Video Factory" not in replied or job_lines != [f"job: {job_id}"] or len(ref_lines) > 1:
+        raise StudioError(f"the person replied to a message that is not a Video Factory message of {job_id}")
+    if ref is not None and ref_lines != [f"ref: {ref}"]:
+        raise StudioError(f"the person answered an earlier question of {job_id}, not the current one (ref {ref}); "
+                          "send the escalation question and wait for their reply to it")
     return receipt.get("current_message", "").strip()
 
 
@@ -564,10 +572,11 @@ def cmd_override(args: argparse.Namespace) -> int:
     status = jobs.load_meta(paths).get("status")
     if status != "escalated":
         raise StudioError(f"job {args.job} is {status}; override only answers an escalated review")
-    quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""))
-    words = quote.lower()
-    if any(word in words for word in STOP_WORDS) or not any(word in words for word in CONTINUE_WORDS):
-        raise StudioError(f"the person's reply does not say to continue: {quote[:200]!r}")
+    meta = jobs.load_meta(paths)
+    ref = meta.get("escalation_ref", "")
+    if not ref or meta.get("escalated_stage") != args.stage:
+        raise StudioError(f"job {args.job} escalated its {meta.get('escalated_stage')} review; "
+                          "ask the person again with the escalation question (it carries the ref they reply to)")
     state = jobs.load_state(paths)
     if args.stage == "script":
         target = jobs.script_review_sha(state.research, state.script)
@@ -575,13 +584,26 @@ def cmd_override(args: argparse.Namespace) -> int:
         target = (read_json(paths.manifest) or {}).get("master_sha")
         if not target:
             raise StudioError("nothing rendered to override")
+        if sha256_file(paths.master)[:16] != target:
+            raise StudioError("master.mp4 does not match its manifest; render again")
+    parts = ref.split("-")
+    # Three parts: a question asked by v20 (2026-09-25), before refs had a full sha and a
+    # random tail; jobs escalated then still answer with it.
+    same = (len(parts) == 4 and parts[1] == target) or (len(parts) == 3 and parts[1] == target[:8])
+    if not same:
+        raise StudioError(f"the {args.stage} changed after the question was asked (ref {ref}); ask the person again")
+    quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""), ref)
+    words = quote.lower()
+    if any(word in words for word in STOP_WORDS) or not any(word in words for word in CONTINUE_WORDS):
+        raise StudioError(f"the person's reply does not say to continue: {quote[:200]!r}")
     write_json_numbered(paths.reviews, args.stage, len(jobs.reviews(paths, args.stage)) + 1, {
         "schema": "vf.review.v1", "stage": args.stage, "verdict": "PASS", "issues": [],
         "notes": f"HUMAN OVERRIDE: {quote}", "_override": True, "_human_quote": quote,
         "_target_sha": target, "_submitted_at": utc_now()})
     meta = jobs.load_meta(paths)
     meta["status"] = "active"
-    jobs.log_event(paths, meta, "override", stage=args.stage, quote=quote[:300])
+    meta.pop("escalation_ref", None)          # answered: the same reply cannot answer again
+    jobs.log_event(paths, meta, "override", stage=args.stage, ref=ref, quote=quote[:300])
     out(f"OK {args.stage} review passed on the person's word; run: {studio_cmd()} next --job {args.job}")
     return 0
 
@@ -589,10 +611,18 @@ def cmd_override(args: argparse.Namespace) -> int:
 def cmd_feedback(args: argparse.Namespace) -> int:
     studio = studio_from(args)
     paths = job_paths(studio, args.job)
-    status = jobs.load_meta(paths).get("status")
+    meta = jobs.load_meta(paths)
+    status = meta.get("status")
     if status in ("cancelled", "published"):     # an escalated job takes direction and carries on
         raise StudioError(f"job {args.job} is {status}; nothing more can change in it")
-    jobs.record_human_feedback(paths, args.type, args.scene, args.text)
+    # Feedback is a person's request: it resets the revision count and, on an escalated
+    # job, ends the wait. The director once filed its own fix as "human feedback"
+    # (2026-09-25), so the gateway must confirm a person replied to this job's message.
+    ref = meta.get("escalation_ref") if status == "escalated" else None
+    if status == "escalated" and not ref:
+        raise StudioError("ask the person again with the escalation question (it carries the ref they reply to)")
+    quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""), ref)
+    jobs.record_human_feedback(paths, args.type, args.scene, args.text, quote=quote)
     out(f"OK feedback recorded ({args.type}, {args.scene}); run: {studio_cmd()} next --job {args.job}")
     return 0
 
@@ -701,7 +731,7 @@ def cmd_backlog(args: argparse.Namespace) -> int:
 # publish switch accepts only true/false: "no" used to be stored as a string, and
 # a non-empty string is truthy, so it switched publishing ON.
 CONFIG_TYPES = {"publish.facebook_reels.enabled": bool, "brand.show": bool,
-                "defaults.rate": int, "music.volume_db": float}
+                "defaults.rate": int, "music.below_voice_lu": float, "sfx.volume_db": float}
 
 
 def _config_value(key: str, value: str) -> object:
@@ -724,7 +754,8 @@ def cmd_config(args: argparse.Namespace) -> int:
         return 0
     key, _, value = (args.assign or "").partition("=")
     allowed = {"brand.handle", "brand.show", "defaults.format", "defaults.voice", "defaults.rate",
-               "defaults.theme", "defaults.music", "music.volume_db", "delivery.channel", "delivery.target",
+               "defaults.theme", "defaults.music", "music.below_voice_lu", "defaults.sfx", "sfx.volume_db",
+               "delivery.channel", "delivery.target",
                "publish.facebook_reels.enabled"}
     if key not in allowed:
         raise StudioError(f"settable keys: {', '.join(sorted(allowed))}")
@@ -733,12 +764,22 @@ def cmd_config(args: argparse.Namespace) -> int:
     parsed = _config_value(key, value)
     if key == "defaults.format" and value not in FORMATS:
         raise StudioError(f"format must be one of {', '.join(FORMATS)}")
+    if key == "defaults.sfx" and value not in ("auto", "none"):
+        raise StudioError("defaults.sfx must be auto or none")
     node = raw
     for part in parents:
         node = node.setdefault(part, {})
     node[name] = parsed
     write_json(studio.config, raw)
     out(f"OK {key} = {parsed!r}")
+    return 0
+
+
+def cmd_media_sync(args: argparse.Namespace) -> int:
+    """Install the CC0 tracks and transition sounds listed in deploy/media_library.json."""
+    studio = studio_from(args)
+    done = medialib.sync(studio, medialib.load_manifest())
+    out(f"OK media library: {done['fetched']} fetched, {done['kept']} already there")
     return 0
 
 
@@ -750,10 +791,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("doctor")
+    sub.add_parser("media-sync")
     p = sub.add_parser("new")
     p.add_argument("--topic", required=True)
     p.add_argument("--brief")
-    p.add_argument("--format", choices=sorted(FORMATS))
+    # --fmt first: the gateway's shell guard denies "format " (it looks like a disk format command).
+    p.add_argument("--fmt", "--format", dest="format", choices=sorted(FORMATS))
     p.add_argument("--voice")
     p.add_argument("--rate", type=int)
     p.add_argument("--theme")
@@ -818,7 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["add", "list", "take", "remove"])
     p.add_argument("--topic")
     p.add_argument("--brief")
-    p.add_argument("--format", choices=sorted(FORMATS))
+    # --fmt first: the gateway's shell guard denies "format " (it looks like a disk format command).
+    p.add_argument("--fmt", "--format", dest="format", choices=sorted(FORMATS))
     p.add_argument("--id")
     p = sub.add_parser("config")
     p.add_argument("action", choices=["show", "set"])
@@ -827,7 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {
-    "init": cmd_init, "doctor": cmd_doctor, "new": cmd_new, "next": cmd_next, "emit": cmd_emit,
+    "init": cmd_init, "doctor": cmd_doctor, "media-sync": cmd_media_sync, "new": cmd_new, "next": cmd_next, "emit": cmd_emit,
     "submit": cmd_submit, "validate": cmd_validate, "attach": cmd_attach, "redo": cmd_redo,
     "revise-visual": cmd_revise_visual, "render": cmd_render, "package": cmd_package,
     "delivered": cmd_delivered, "published": cmd_published, "override": cmd_override, "cancel": cmd_cancel,

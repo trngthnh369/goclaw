@@ -70,6 +70,10 @@ class Studio:
     def music(self) -> Path:
         return self.root / "music"
 
+    @property
+    def sfx(self) -> Path:
+        return self.root / "sfx"
+
     def job(self, job_id: str) -> "JobPaths":
         return JobPaths(self.jobs / job_id)
 

@@ -198,6 +198,8 @@ def emit_script(state: JobState, revise: bool) -> str:
             "quote{quote,author?} steps{title?,steps[2-5]} compare{left{title,items[1-4]},right{...}} code{title?,code}.",
             "Motions: auto, zoom_in, zoom_out, pan_left, pan_right, pan_up, pan_down, still (screenshots: scroll or still).",
             "Themes: midnight, ocean, sunset, forest, paper. Music: auto (a licensed track from the studio library when one exists, otherwise voice only) or none.",
+            "Optional sound: \"music_mood\": upbeat|calm|inspiring|tech picks the kind of background track (match the topic's tone); "
+            "\"sfx\": auto (a soft whoosh on every scene cut, the default) or none.",
             "social.facebook is required (it becomes the Reels caption); tiktok/instagram/youtube are optional.",
         ]
     parts += [
@@ -274,7 +276,7 @@ def emit_review_video(state: JobState) -> str:
     sheet = qa.get("contact_sheet") or str(state.paths.contact)
     lines = [f"# Video review - job {state.meta['id']} (master sha {manifest.get('master_sha')})",
              f"Duration {qa.get('duration')}s, {qa.get('resolution')} @ {qa.get('fps')} fps, "
-             f"loudness {qa.get('loudness_lufs')} LUFS, music: {qa.get('music')}",
+             f"loudness {qa.get('loudness_lufs')} LUFS, music: {qa.get('music')}, transition sounds: {qa.get('sfx', 0)}",
              "Automatic findings: " + ("; ".join(qa.get("soft", [])) or "none"),
              "",
              f"Contact sheet (every scene, one frame each): {sheet}",
