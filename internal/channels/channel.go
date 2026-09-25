@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -679,10 +680,18 @@ type PendingCompactable interface {
 	SetPendingCompaction(cfg *CompactionConfig)
 }
 
-// Truncate shortens a string to maxLen, appending "..." if truncated.
+// Truncate shortens a string to at most maxLen bytes, appending "..." if truncated.
+//
+// The cut lands on a rune boundary. A byte cut inside a multi-byte character (every
+// accented Vietnamese letter is 2-3 bytes) left invalid UTF-8 that Postgres refuses,
+// so a reply quoting a long bot message was dropped from group history.
 func Truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	cut := max(maxLen, 0)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
