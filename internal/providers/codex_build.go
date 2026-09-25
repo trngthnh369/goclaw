@@ -169,6 +169,14 @@ func (p *CodexProvider) doRequest(ctx context.Context, body any) (io.ReadCloser,
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("OpenAI-Beta", "responses=v1")
+	// The ChatGPT backend keys prompt-cache affinity on the session_id header;
+	// the body prompt_cache_key alone is ignored there (membrane#77 measured
+	// 0 cached tokens with body-only, ~99% with the header).
+	if m, ok := body.(map[string]any); ok {
+		if key, ok := m["prompt_cache_key"].(string); ok && key != "" {
+			httpReq.Header.Set("session_id", key)
+		}
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

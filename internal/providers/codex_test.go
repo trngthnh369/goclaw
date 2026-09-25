@@ -1140,3 +1140,38 @@ func TestCodexProviderBuildRequestBodyPromptCacheKey(t *testing.T) {
 		t.Errorf("prompt_cache_key present without the option: %v", withoutKey["prompt_cache_key"])
 	}
 }
+
+func TestCodexProviderChatStreamSendsSessionIDHeaderFromCacheKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		options map[string]any
+		want    string
+	}{
+		{"with cache key", map[string]any{OptPromptCacheKey: "goclaw-abc"}, "goclaw-abc"},
+		{"without cache key", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("session_id")
+				writeSSEDone(w)
+			}))
+			defer server.Close()
+
+			p := NewCodexProvider("openai-codex", &staticTokenSource{token: "test"}, server.URL, "gpt-6-sol")
+			p.retryConfig.Attempts = 1
+
+			_, err := p.ChatStream(context.Background(), ChatRequest{
+				Messages: []Message{{Role: "user", Content: "Hi"}},
+				Options:  tc.options,
+			}, func(StreamChunk) {})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("session_id header = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
