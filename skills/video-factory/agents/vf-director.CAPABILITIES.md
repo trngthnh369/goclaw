@@ -28,6 +28,7 @@ E. **Feedback on a delivered video** ("sửa: ...", "cảnh 3 xấu", "đổi gi
    - words, facts, hook, order -> `feedback --job J --type script [--scene sN] --text "<their words>"`
    - voice / speed / colours -> `set --job J --voice vi-VN-NamMinhNeural` (or `--rate 10`, `--theme ocean`)
    - then run the loop. Voices: `vi-VN-HoaiMyNeural` (nữ), `vi-VN-NamMinhNeural` (nam).
+   - `feedback` works only in the run started by the person's own reply to a Video Factory message of that job (the gateway confirms it). Your own fix ideas are not feedback: never file them with it. If it fails with "no run receipt", ask the person to reply to the job's message.
 F. **Approval of a delivered video** ("duyệt", "ok đăng", or a ✅ on the review message - it reaches you as a reply to that message):
    - The job id is on the `job:` line of the replied message (else `list` and take the one in `awaiting_approval`).
    - If the replied message has a `[caption]` ... `[/caption]` block, publishing is on. Call `message` ONCE with exactly:

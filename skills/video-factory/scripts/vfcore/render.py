@@ -46,7 +46,7 @@ def render_config(studio_cfg: dict) -> dict:
         "lexicon": studio_cfg.get("lexicon") or {},
         "default_theme": (studio_cfg.get("defaults") or {}).get("theme", "midnight"),
         "default_music": (studio_cfg.get("defaults") or {}).get("music", "auto"),
-        "sfx_db": (studio_cfg.get("sfx") or {}).get("volume_db", -14),
+        "sfx_db": (studio_cfg.get("sfx") or {}).get("volume_db", audio.DEFAULT_SFX_DB),
         "default_sfx": (studio_cfg.get("defaults") or {}).get("sfx", "auto"),
     }
 

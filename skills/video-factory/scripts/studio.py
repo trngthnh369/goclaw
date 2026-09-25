@@ -38,9 +38,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from vfcore import backlog, briefs, jobs, medialib, package, render  # noqa: E402
+from vfcore.audio import DEFAULT_SFX_DB  # noqa: E402
 from vfcore.formats import FORMATS  # noqa: E402
 from vfcore.paths import CDP_RENDER_JS, FONTS_DIR, JobPaths, Studio, default_workspace, studio_cmd  # noqa: E402
-from vfcore.schema import MOTIONS, validate_research  # noqa: E402
+from vfcore.schema import MOTIONS, SFX_MODES, validate_research  # noqa: E402
 from vfcore.util import (StudioError, append_ndjson, read_json, sha256_file, utc_now,  # noqa: E402
                          write_json, write_json_numbered)
 
@@ -50,7 +51,7 @@ DEFAULT_CONFIG = {
     "defaults": {"format": "short", "voice": "vi-VN-HoaiMyNeural", "rate": 5, "theme": "midnight",
                  "music": "auto", "sfx": "auto"},
     "music": {"below_voice_lu": 12},
-    "sfx": {"volume_db": -14},
+    "sfx": {"volume_db": DEFAULT_SFX_DB},
     "lexicon": {},
     "delivery": {"channel": "", "target": ""},
     "publish": {"facebook_reels": {"enabled": False}},
@@ -520,7 +521,9 @@ def cmd_published(args: argparse.Namespace) -> int:
 # that started it is an allowlisted person replying to this bot (see
 # internal/http/run_receipt.go). Nothing the model writes can stand in for it.
 RECEIPT_ENV = "GOCLAW_RUN_RECEIPT"
-RECEIPT_URL = os.environ.get("VF_RECEIPT_URL", "http://127.0.0.1:18790/v1/runs/receipt")
+# Fixed on purpose: an env override let a run point this at a file:// receipt it wrote
+# itself and pass every check below (security review, 2026-09-25). Tests patch the name.
+RECEIPT_URL = "http://127.0.0.1:18790/v1/runs/receipt"
 CONTINUE_WORDS = ("cứ làm tiếp", "làm tiếp", "tiếp tục", "cứ đăng", "đồng ý", "được", "duyệt", "ok", "continue")
 # Checked first: "không được" contains "được", and a reply asking for changes or
 # a stop must never pass a review.
@@ -569,14 +572,14 @@ def cmd_override(args: argparse.Namespace) -> int:
     """
     studio = studio_from(args)
     paths = job_paths(studio, args.job)
-    status = jobs.load_meta(paths).get("status")
+    meta = jobs.load_meta(paths)
+    status = meta.get("status")
     if status != "escalated":
         raise StudioError(f"job {args.job} is {status}; override only answers an escalated review")
-    meta = jobs.load_meta(paths)
     ref = meta.get("escalation_ref", "")
-    if not ref or meta.get("escalated_stage") != args.stage:
-        raise StudioError(f"job {args.job} escalated its {meta.get('escalated_stage')} review; "
-                          "ask the person again with the escalation question (it carries the ref they reply to)")
+    if not jobs.escalation_ref_ok(meta) or meta.get("escalated_stage") != args.stage:
+        raise StudioError(f"job {args.job} escalated its {meta.get('escalated_stage')} review with no current "
+                          f"question; run {studio_cmd()} next --job {args.job} to send it again")
     state = jobs.load_state(paths)
     if args.stage == "script":
         target = jobs.script_review_sha(state.research, state.script)
@@ -586,11 +589,7 @@ def cmd_override(args: argparse.Namespace) -> int:
             raise StudioError("nothing rendered to override")
         if sha256_file(paths.master)[:16] != target:
             raise StudioError("master.mp4 does not match its manifest; render again")
-    parts = ref.split("-")
-    # Three parts: a question asked by v20 (2026-09-25), before refs had a full sha and a
-    # random tail; jobs escalated then still answer with it.
-    same = (len(parts) == 4 and parts[1] == target) or (len(parts) == 3 and parts[1] == target[:8])
-    if not same:
+    if ref.split("-")[1] != target:
         raise StudioError(f"the {args.stage} changed after the question was asked (ref {ref}); ask the person again")
     quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""), ref)
     words = quote.lower()
@@ -619,8 +618,8 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     # job, ends the wait. The director once filed its own fix as "human feedback"
     # (2026-09-25), so the gateway must confirm a person replied to this job's message.
     ref = meta.get("escalation_ref") if status == "escalated" else None
-    if status == "escalated" and not ref:
-        raise StudioError("ask the person again with the escalation question (it carries the ref they reply to)")
+    if status == "escalated" and not jobs.escalation_ref_ok(meta):
+        raise StudioError(f"no current escalation question; run {studio_cmd()} next --job {args.job} to send it again")
     quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""), ref)
     jobs.record_human_feedback(paths, args.type, args.scene, args.text, quote=quote)
     out(f"OK feedback recorded ({args.type}, {args.scene}); run: {studio_cmd()} next --job {args.job}")
@@ -764,8 +763,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     parsed = _config_value(key, value)
     if key == "defaults.format" and value not in FORMATS:
         raise StudioError(f"format must be one of {', '.join(FORMATS)}")
-    if key == "defaults.sfx" and value not in ("auto", "none"):
-        raise StudioError("defaults.sfx must be auto or none")
+    if key == "defaults.sfx" and value not in SFX_MODES:
+        raise StudioError(f"defaults.sfx must be one of {', '.join(SFX_MODES)}")
     node = raw
     for part in parents:
         node = node.setdefault(part, {})
@@ -779,7 +778,7 @@ def cmd_media_sync(args: argparse.Namespace) -> int:
     """Install the CC0 tracks and transition sounds listed in deploy/media_library.json."""
     studio = studio_from(args)
     done = medialib.sync(studio, medialib.load_manifest())
-    out(f"OK media library: {done['fetched']} fetched, {done['kept']} already there")
+    out(f"OK media library: {done.fetched} fetched, {done.kept} already there")
     return 0
 
 

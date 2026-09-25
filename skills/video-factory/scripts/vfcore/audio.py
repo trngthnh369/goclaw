@@ -49,6 +49,7 @@ def concat_tracks(tracks: list[Path], list_file: Path, out: Path) -> None:
 
 
 MOODS = ("upbeat", "calm", "inspiring", "tech")
+DEFAULT_SFX_DB = -14.0          # transition sounds (peak -1 dBFS) land about 8 LU under the voice
 LIBRARY_FILE = "library.json"
 
 
@@ -125,6 +126,7 @@ def _measure(graph_in: list[str], graph: str) -> dict:
 
 
 def integrated_loudness(path: Path) -> float:
+    """Integrated loudness (LUFS) of a whole file."""
     return float(_measure(["-i", str(path)], "[0:a]loudnorm=print_format=json")["input_i"])
 
 
@@ -139,7 +141,7 @@ def bed_gain(voice: Path, bed: Path, below_voice_lu: float) -> float:
 
 
 def mix_and_normalize(voice: Path, bed: Path | None, out: Path, *, music_db: float,
-                      transitions: Path | None = None, sfx_db: float = -14.0) -> dict:
+                      transitions: Path | None = None, sfx_db: float = DEFAULT_SFX_DB) -> dict:
     """Duck the bed under the voice, then two-pass loudnorm to -14 LUFS. Returns the measurement.
 
     Transition sounds join the voice before the ducking, so the bed also dips under them.

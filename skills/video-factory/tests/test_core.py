@@ -504,10 +504,20 @@ class FlowTests(unittest.TestCase):
         jobs.save_meta(paths, meta)
         code, text = run_cli(*override)
         self.assertEqual(code, 1, text)
-        self.assertIn("ask the person again", text)
+        self.assertIn("to send it again", text)
         message = package.review_message(*PackageTests.ARGS, "Caption.", [], "/tmp/p.mp4", publishable=False,
                                          overrides=["cứ làm tiếp"])
         self.assertIn("theo lời bạn: «cứ làm tiếp»", message)
+
+    def test_a_question_without_a_random_ref_is_asked_again(self):
+        job, paths = self._job_at_video_review()
+        meta = jobs.load_meta(paths)                          # asked by v20: kind-sha8-count
+        meta["status"], meta["escalated_stage"], meta["escalation_ref"] = "escalated", "video", "video-5280b81f-3"
+        jobs.save_meta(paths, meta)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "escalate")
+        self.assertTrue(jobs.escalation_ref_ok(jobs.load_meta(paths)))
+        self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
 
     def test_voice_change_does_not_reopen_fact_check(self):
         job, paths = self._job_at_video_review()
@@ -751,18 +761,47 @@ class MediaLibraryTests(unittest.TestCase):
                  {"file": "w.wav", "dir": "sfx", "kind": "whoosh", "license": "cc0", "url": click.as_uri(),
                   "sha256": sha(click)}]
         done = medialib.sync(self.studio, items)
-        self.assertEqual(done["fetched"], 2)
+        self.assertEqual(done.fetched, 2)
         music = json.loads((self.studio.music / "library.json").read_text(encoding="utf-8"))["items"]
         self.assertEqual([e["file"] for e in music], ["mine.mp3", "t.mp3"])
         sfx = json.loads((self.studio.sfx / "library.json").read_text(encoding="utf-8"))["items"]
         self.assertLess(sfx[0]["peak_s"], 0.1)            # leading silence trimmed, peak near the start
-        self.assertEqual(medialib.sync(self.studio, items)["kept"], 2)
+        self.assertEqual(medialib.sync(self.studio, items).kept, 2)
         items[0]["sha256"] = "0" * 64
         (self.studio.music / "t.mp3").unlink()
         with self.assertRaises(StudioError) as caught:
             medialib.sync(self.studio, items)
         self.assertIn("the source changed", str(caught.exception))
         self.assertFalse((self.studio.music / "t.mp3").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_one_broken_sound_neither_stops_the_rest_nor_leaves_a_half_made_file(self):
+        import hashlib
+
+        from vfcore import medialib
+        src = self.studio.root / "src"
+        src.mkdir()
+        broken, track = src / "broken.mp3", src / "t.mp3"
+        broken.write_bytes(b"not audio at all")
+        track.write_bytes(b"a track")
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()   # noqa: E731
+        items = [{"file": "w.wav", "dir": "sfx", "kind": "whoosh", "url": broken.as_uri(), "sha256": sha(broken)},
+                 {"file": "t.mp3", "dir": "music", "mood": "calm", "url": track.as_uri(), "sha256": sha(track)}]
+        with self.assertRaises(StudioError):
+            medialib.sync(self.studio, items)
+        self.assertTrue((self.studio.music / "t.mp3").exists())
+        self.assertEqual(os.listdir(self.studio.sfx), ["library.json"])
+
+    def test_manifest_refuses_paths_and_plain_http(self):
+        from vfcore import medialib
+        good = {"dir": "music", "mood": "calm", "url": "https://x/a.mp3", "sha256": "0" * 64}
+        for bad in ({"file": ".."}, {"file": "a/b.mp3"}, {"file": "a" + chr(92) + "b.mp3"},
+                    {"file": "a.mp3", "url": "http://x/a.mp3"}):
+            path = self.studio.root / "m.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"items": [good | bad]}), encoding="utf-8")
+            with self.assertRaises(StudioError, msg=bad):
+                medialib.load_manifest(path)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
     def test_transitions_mix_into_a_soundtrack_of_the_voice_length(self):
@@ -777,6 +816,10 @@ class MediaLibraryTests(unittest.TestCase):
         audio.transition_track([(0.8, whoosh), (2.0, whoosh)], fx, 3.0)
         self.assertAlmostEqual(tts.probe_duration(fx), 3.0, delta=0.05)
         audio.mix_and_normalize(voice, None, out, music_db=-20, transitions=fx, sfx_db=-14)
+        self.assertAlmostEqual(tts.probe_duration(out), 3.0, delta=0.1)
+        bed = root / "bed.wav"                                # the usual case: voice, whooshes and a bed
+        audio.music_bed(whoosh, bed, 3.0)
+        audio.mix_and_normalize(voice, bed, out, music_db=-10, transitions=fx, sfx_db=-14)
         self.assertAlmostEqual(tts.probe_duration(out), 3.0, delta=0.1)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")

@@ -297,6 +297,12 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
     cmd = studio_cmd()
     base = {"job": job_id, "format": state.fmt.name, "status": meta.get("status")}
 
+    if meta.get("status") == "escalated" and not escalation_ref_ok(meta):
+        # Escalated before refs had a random tail (or with none): ask again with a fresh
+        # ref, so the question the person answers is one the director could not forge.
+        kind = meta.get("escalated_stage", "video")
+        past = reviews(paths, kind)
+        return _escalate(base, paths, kind, past[-1] if past else {})
     if meta.get("status") == "escalated":
         return {**base, "stage": "escalated", "owner": "human", "action": "stop",
                 "say": f"Job {job_id} waits for the human's decision on the {meta.get('escalated_stage')} review. "
@@ -421,6 +427,11 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
             "then": f"{cmd} delivered --job {job_id} --status sent"}
 
 
+def escalation_ref_ok(meta: dict) -> bool:
+    """A ref minted by _escalate: kind, target sha, count and a random tail."""
+    return len(str(meta.get("escalation_ref") or "").split("-")) == 4
+
+
 def _escalate(base: dict, paths: JobPaths, kind: str, review: dict) -> dict:
     """Stop the job until a person decides.
 
@@ -432,7 +443,7 @@ def _escalate(base: dict, paths: JobPaths, kind: str, review: dict) -> dict:
               if i.get("severity") in ("blocker", "major")]
     rounds = MAX_SCRIPT_REVISIONS if kind == "script" else MAX_VIDEO_REVISIONS
     meta = load_meta(paths)
-    if meta.get("status") != "escalated":
+    if meta.get("status") != "escalated" or not escalation_ref_ok(meta):
         # One ref per question, naming what was reviewed: a person's "continue" answers
         # this question only. A director once reused the reply to an earlier question to
         # pass a new one, in the same run, twelve seconds after asking (2026-09-25).
