@@ -10,8 +10,25 @@ export type ParamField = {
   description?: string;
 };
 
+// The gateway sends image_size only on the chat image endpoint, which it picks for
+// providers named "openrouter"; "auto" leaves the size to the provider.
+const IMAGE_SIZE_FIELD: ParamField = {
+  key: "image_size",
+  label: "Image size",
+  type: "select",
+  default: "auto",
+  options: [
+    { value: "auto", label: "Provider default" },
+    { value: "1K", label: "1K" },
+    { value: "2K", label: "2K" },
+  ],
+  description: "Used by the OpenRouter-style chat image endpoint (provider named openrouter); other providers ignore it. The create_image image_size argument overrides it.",
+};
+
 export const MEDIA_PARAMS_SCHEMA: Record<string, Record<string, ParamField[]>> = {
   create_image: {
+    openrouter: [IMAGE_SIZE_FIELD],
+    openai_compat: [IMAGE_SIZE_FIELD],
     chatgpt_oauth: [
       {
         key: "image_model",

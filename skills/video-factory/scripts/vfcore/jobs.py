@@ -32,6 +32,8 @@ from .util import (StudioError, canonical_json, read_json, sha256_file, sha256_t
 
 MAX_SCRIPT_REVISIONS = 2
 MAX_VIDEO_REVISIONS = 2
+# ag-image returns 1536x2752 for 9:16 at 2K, 768x1376 by default (measured 2026-09-28).
+IMAGE_SIZE = "2K"
 VN_TZ = dt.timezone(dt.timedelta(hours=7))
 
 TERMINAL = ("cancelled", "published", "escalated")
@@ -363,14 +365,14 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
             calls.append({
                 "scene": item["scene"],
                 "create_image": {"prompt": item["prompt"], "aspect_ratio": state.fmt.image_aspect,
-                                 "filename_hint": f"{job_id}-{item['scene']}"},
+                                 "image_size": IMAGE_SIZE, "filename_hint": f"{job_id}-{item['scene']}"},
                 "then_exec": f"{cmd} attach --job {job_id} --scene {item['scene']} --file <MEDIA path returned by create_image>",
             })
         return {**base, "stage": "assets", "owner": "vf-director", "action": "run",
                 "say": f"Generate {len(todo)} image(s): one create_image call per item, then attach it. "
                        f"Look at each picture with read_image first; if it has garbled text, extra limbs, "
                        f"does not match the scene, or is a picture inside a picture (blurred or different "
-                       f"bands at the edges), re-roll it (same prompt) before attaching.",
+                       f"bands at the edges), re-roll it (the same create_image arguments) before attaching.",
                 "calls": calls, "then": f"{cmd} next --job {job_id}"}
 
     # 3. render ------------------------------------------------------------------

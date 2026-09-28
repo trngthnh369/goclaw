@@ -57,6 +57,8 @@ DEFAULT_CONFIG = {
     "publish": {"facebook_reels": {"enabled": False}},
 }
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+# A 2K 9:16 image is 1536 px on its short side; below 1080 the frame is upscaled.
+MIN_IMAGE_SHORT_SIDE = 1080
 # create_image saves into <director workspace>/.../generated/<date>/; attach takes
 # only those files, so a scene can never be pointed at some other file the
 # gateway can read and have it rendered into a public video.
@@ -384,7 +386,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     write_json(paths.assets / f"{args.scene}.json", {
         "file": dest.name, "sha256": sha256_file(dest)[:16], "prompt_sha": jobs.prompt_sha(prompt),
         "source": str(src), "width": width, "height": height, "attached_at": utc_now()})
-    note = "" if min(width, height) >= 700 else f" WARN low resolution {width}x{height}"
+    note = "" if min(width, height) >= MIN_IMAGE_SHORT_SIDE else f" WARN low resolution {width}x{height}"
     remaining = len(jobs.missing_images(jobs.load_state(paths)))
     out(f"ATTACHED {args.scene} {width}x{height}{note}; images still missing: {remaining}")
     return 0

@@ -246,6 +246,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(len(action["calls"]), 6)
         call = action["calls"][0]
         self.assertEqual(call["create_image"]["aspect_ratio"], "9:16")
+        self.assertEqual(call["create_image"]["image_size"], "2K")
         self.assertIn("no text", call["create_image"]["prompt"])
 
         # A prompt-only change must not reopen the fact check.

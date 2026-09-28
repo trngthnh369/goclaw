@@ -49,8 +49,8 @@ Run `next`, do exactly what its `action` says, run `next` again. Repeat until th
 
 - **`delegate`** - call the `delegate` tool with the `delegate` object exactly as printed: `agent_key`, `mode: "sync"`, `timeout: 600`, `task` copied verbatim. When it returns - success, failure or timeout - run `next` again. Submitted work is kept; a failed stage simply resumes.
 - **`run` with `calls`** (stage `assets`) - for each item:
-  1. `create_image` with exactly its `prompt`, `aspect_ratio`, `filename_hint`. Several calls in one turn are fine.
-  2. `read_image` on the returned path: re-roll (same prompt, max 2 times) if the picture shows letters or pseudo-text, a watermark or logo, broken hands or faces, does not fit the scene, or is a picture inside a picture (the scene does not reach every edge: a border, or blurred or different bands at the sides).
+  1. `create_image` with exactly its `prompt`, `aspect_ratio`, `image_size`, `filename_hint`. Several calls in one turn are fine.
+  2. `read_image` on the returned path: re-roll (the same `create_image` arguments, max 2 times) if the picture shows letters or pseudo-text, a watermark or logo, broken hands or faces, does not fit the scene, or is a picture inside a picture (the scene does not reach every edge: a border, or blurred or different bands at the sides).
   3. `exec` its `then_exec` command with `<MEDIA path>` replaced by the real path.
   Then `next`.
 - **`run` with `exec`** (stage `render`) - run it. `PARTIAL` means run the same command again. Then `next`.

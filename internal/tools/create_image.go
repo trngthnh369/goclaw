@@ -79,6 +79,11 @@ func (t *CreateImageTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Aspect ratio: '1:1' (default), '3:4', '4:3', '9:16', '16:9'.",
 			},
+			"image_size": map[string]any{
+				"type":        "string",
+				"enum":        []string{"1K", "2K"},
+				"description": "Resolution tier. Honoured by OpenRouter-style chat image endpoints; other providers ignore it. Omit for the provider default.",
+			},
 			"filename_hint": map[string]any{
 				"type":        "string",
 				"description": "Short descriptive filename (no extension). Example: 'sunset-beach', 'company-logo'.",
@@ -86,6 +91,43 @@ func (t *CreateImageTool) Parameters() map[string]any {
 		},
 		"required": []string{"prompt"},
 	}
+}
+
+// imageSizeParam is the chain/request param carrying the resolution tier.
+const imageSizeParam = "image_size"
+
+// normalizeImageSize maps a tool arg or chain value to "1K", "2K" or "" (provider
+// default). ok is false for anything else. 4K is deliberately absent: a 3072x5504
+// image is decoded and copied inside the gateway process.
+func normalizeImageSize(raw string) (size string, ok bool) {
+	switch v := strings.ToUpper(strings.TrimSpace(raw)); v {
+	case "", "AUTO":
+		return "", true
+	case "1K", "2K":
+		return v, true
+	default:
+		return "", false
+	}
+}
+
+// resolveImageSize applies the precedence tool arg > chain entry value > none to
+// one chain entry's params. The chain value comes from admin config, so an invalid
+// one is dropped with a warning rather than failing every image call.
+func resolveImageSize(params map[string]any, argSize string) {
+	if argSize != "" {
+		params[imageSizeParam] = argSize
+		return
+	}
+	raw, _ := params[imageSizeParam].(string)
+	size, ok := normalizeImageSize(raw)
+	if !ok {
+		slog.Warn("create_image: invalid image_size in provider chain, ignored", "value", raw)
+	}
+	if size == "" {
+		delete(params, imageSizeParam)
+		return
+	}
+	params[imageSizeParam] = size
 }
 
 func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Result {
@@ -98,6 +140,11 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		aspectRatio = "1:1"
 	}
 	filenameHint, _ := args["filename_hint"].(string)
+	rawSize, _ := args[imageSizeParam].(string)
+	imageSize, ok := normalizeImageSize(rawSize)
+	if !ok {
+		return ErrorResult(fmt.Sprintf("image_size must be 1K or 2K, got %q", rawSize))
+	}
 
 	isContentFactoryDesigner := ToolAgentKeyFromCtx(ctx) == "cf-designer"
 	if isContentFactoryDesigner {
@@ -134,13 +181,14 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		chain[0].MaxRetries = 1
 	}
 
-	// Inject prompt and aspect_ratio into each chain entry's params
+	// Inject prompt, aspect_ratio and the resolved image_size into each chain entry's params
 	for i := range chain {
 		if chain[i].Params == nil {
 			chain[i].Params = make(map[string]any)
 		}
 		chain[i].Params["prompt"] = prompt
 		chain[i].Params["aspect_ratio"] = aspectRatio
+		resolveImageSize(chain[i].Params, imageSize)
 	}
 
 	var chainResult *ChainResult
@@ -264,6 +312,10 @@ func (t *CreateImageTool) callProvider(ctx context.Context, cp credentialProvide
 			prompt := GetParamString(params, "prompt", "")
 			aspectRatio := GetParamString(params, "aspect_ratio", "1:1")
 			imageModel := GetParamString(params, "image_model", "")
+			if size := GetParamString(params, imageSizeParam, ""); size != "" {
+				slog.Warn("create_image: image_size ignored by this provider",
+					"provider", providerName, "provider_type", "native", "image_size", size)
+			}
 			result, err := np.GenerateImage(ctx, providers.NativeImageRequest{
 				Model:        model,
 				ImageModel:   imageModel,
@@ -283,11 +335,19 @@ func (t *CreateImageTool) callProvider(ctx context.Context, cp credentialProvide
 	}
 	prompt := GetParamString(params, "prompt", "")
 	aspectRatio := GetParamString(params, "aspect_ratio", "1:1")
+	imageSize := GetParamString(params, imageSizeParam, "")
+	providerType := GetParamString(params, "_provider_type", providerTypeFromName(providerName))
 
 	slog.Info("create_image: calling image generation API",
-		"provider", providerName, "model", model, "aspect_ratio", aspectRatio)
+		"provider", providerName, "model", model, "aspect_ratio", aspectRatio, "image_size", imageSize)
+	if imageSize != "" && providerType != "openrouter" {
+		// Only the chat image endpoint takes image_config; a silent downgrade (for
+		// example after the chain fell back to another provider) should be visible.
+		slog.Warn("create_image: image_size ignored by this provider",
+			"provider", providerName, "provider_type", providerType, "image_size", imageSize)
+	}
 
-	switch GetParamString(params, "_provider_type", providerTypeFromName(providerName)) {
+	switch providerType {
 	case "gemini":
 		return t.callGeminiNativeImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
 	case "openrouter":
@@ -313,10 +373,15 @@ func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, 
 		},
 		"modalities": []string{"image", "text"},
 	}
+	imageConfig := map[string]any{}
 	if aspectRatio != "" && aspectRatio != "1:1" {
-		body["image_config"] = map[string]any{
-			"aspect_ratio": aspectRatio,
-		}
+		imageConfig["aspect_ratio"] = aspectRatio
+	}
+	if size := GetParamString(params, imageSizeParam, ""); size != "" {
+		imageConfig["image_size"] = size
+	}
+	if len(imageConfig) > 0 {
+		body["image_config"] = imageConfig
 	}
 
 	jsonBody, err := json.Marshal(body)
