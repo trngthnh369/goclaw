@@ -425,3 +425,51 @@ func TestCreate(t *testing.T) {
 		}
 	})
 }
+
+func TestCreate_StoresOriginUserForDispatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		userID string
+	}{
+		{"lead turn with user scope", "guild:1487758328577921066:user:896694335670726676"},
+		{"no user in context", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mb, tool, _, _, ctx := newTestTeamSetup()
+			ptd := NewPendingTeamDispatch()
+			ptd.MarkListed()
+			ctx = WithPendingTeamDispatch(ctx, ptd)
+			if tc.userID != "" {
+				ctx = store.WithUserID(ctx, tc.userID)
+			}
+
+			result := tool.Execute(ctx, map[string]any{
+				"action":   "create",
+				"subject":  "Scoped task",
+				"assignee": "member-agent",
+			})
+			if result.IsError {
+				t.Fatalf("unexpected error: %s", result.ForLLM)
+			}
+
+			mb.taskStore.mu.Lock()
+			var task *store.TeamTaskData
+			for _, v := range mb.taskStore.tasks {
+				task = v
+			}
+			mb.taskStore.mu.Unlock()
+
+			got, has := task.Metadata[MetaOriginUserID]
+			if tc.userID == "" {
+				if has {
+					t.Errorf("origin_user_id = %v, want absent", got)
+				}
+				return
+			}
+			if got != tc.userID {
+				t.Errorf("origin_user_id = %v, want %q", got, tc.userID)
+			}
+		})
+	}
+}

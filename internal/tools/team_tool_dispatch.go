@@ -149,12 +149,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		fromAgent = leadAg.AgentKey
 	}
 
-	// Resolve user ID: prefer context (available during leader's turn),
-	// fall back to task's chat ID (stable for dispatches from consumer/ticker context).
-	originUserID := store.UserIDFromContext(ctx)
-	if originUserID == "" {
-		originUserID = originChatID
-	}
+	originUserID := resolveDispatchOriginUserID(ctx, task, originChatID)
 
 	// Preserve real acting sender so permission checks on the teammate's
 	// turn (e.g. write_file in group chat) attribute to the original user
@@ -434,4 +429,20 @@ func (m *TeamToolManager) DispatchUnblockedTasks(ctx context.Context, teamID uui
 		dispatchCtx := m.restoreTraceContext(ctx, task)
 		m.dispatchTaskToAgent(dispatchCtx, task, team, ownerID)
 	}
+}
+
+// resolveDispatchOriginUserID picks the user scope the lead runs in when the
+// member's result is announced back. Order: the lead's turn context, then the
+// user stored at task creation (post-turn and ticker dispatches carry no user
+// in ctx), then the chat ID for tasks created before that key existed. The
+// chat-ID fallback puts the lead in the wrong scope: another workspace dir,
+// another USER.md, another memory.
+func resolveDispatchOriginUserID(ctx context.Context, task *store.TeamTaskData, originChatID string) string {
+	if uid := store.UserIDFromContext(ctx); uid != "" {
+		return uid
+	}
+	if uid, ok := task.Metadata[MetaOriginUserID].(string); ok && uid != "" {
+		return uid
+	}
+	return originChatID
 }

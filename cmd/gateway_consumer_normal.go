@@ -258,12 +258,7 @@ func processNormalMessage(
 	// Group-aware system prompt: help the LLM adapt tone and behavior for group chats.
 	var extraPrompt string
 	if peerKind == string(sessions.PeerGroup) {
-		extraPrompt = "You are in a GROUP chat (multiple participants), not a private 1-on-1 DM.\n" +
-			"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
-			"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
-			"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
-			"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
-			"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
+		extraPrompt = groupChatExtraPrompt()
 	}
 
 	// Append per-topic system prompt (from group/topic config hierarchy).
@@ -711,4 +706,15 @@ func isSafeBitrixEntityToken(s string, maxLen int) bool {
 		}
 	}
 	return true
+}
+
+// groupChatExtraPrompt is the group-chat guidance every run of a group
+// session gets, the user's turn and the lead's team announce turn alike.
+func groupChatExtraPrompt() string {
+	return "You are in a GROUP chat (multiple participants), not a private 1-on-1 DM.\n" +
+		"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
+		"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
+		"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
+		"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
+		"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
 }

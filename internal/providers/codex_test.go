@@ -1175,3 +1175,88 @@ func TestCodexProviderChatStreamSendsSessionIDHeaderFromCacheKey(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexBuildRequestBody_DynamicPromptMovesBeforeCurrentTurn(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	system := "Stable persona and tools.\n\n" + CacheBoundaryMarker + "\n\n- User: Turti (ID: 1)\nCurrent date: 2026-09-28"
+
+	req := ChatRequest{Messages: []Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+		{Role: "user", Content: "current question"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "exec", Arguments: map[string]any{"command": "ls"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "file.txt"},
+	}}
+
+	body := p.buildRequestBody(req, true)
+
+	if got := body["instructions"]; got != "Stable persona and tools." {
+		t.Errorf("instructions = %q, want only the stable part", got)
+	}
+	input := body["input"].([]any)
+	var roles []string
+	for _, it := range input {
+		m := it.(map[string]any)
+		if r, ok := m["role"].(string); ok {
+			roles = append(roles, r)
+		} else {
+			roles = append(roles, m["type"].(string))
+		}
+	}
+	want := []string{"user", "assistant", "developer", "user", "function_call", "function_call_output"}
+	if strings.Join(roles, ",") != strings.Join(want, ",") {
+		t.Fatalf("input order = %v, want %v", roles, want)
+	}
+	dev := input[2].(map[string]any)["content"].(string)
+	if !strings.Contains(dev, "- User: Turti") || strings.Contains(dev, CacheBoundaryMarker) {
+		t.Errorf("developer content = %q, want the dynamic part without the marker", dev)
+	}
+}
+
+func TestCodexBuildRequestBody_NoBoundaryKeepsInstructions(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	body := p.buildRequestBody(ChatRequest{Messages: []Message{
+		{Role: "system", Content: "Plain prompt."},
+		{Role: "user", Content: "Hi"},
+	}}, true)
+
+	if body["instructions"] != "Plain prompt." {
+		t.Errorf("instructions = %q, want unchanged", body["instructions"])
+	}
+	if n := len(body["input"].([]any)); n != 1 {
+		t.Errorf("input len = %d, want 1 (no developer message)", n)
+	}
+}
+
+func TestCodexBuildRequestBody_MidTurnUserWarningKeepsDynamicPromptAtTurnStart(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\nper-turn context"
+	base := []Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+		{Role: "user", Content: "current question"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "read_file", Arguments: map[string]any{"path": "a"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "a"},
+	}
+	withWarning := append(append([]Message{}, base...), Message{Role: "user", Content: "[loop detector] stop re-reading the same file"})
+
+	devIndex := func(msgs []Message) int {
+		input := p.buildRequestBody(ChatRequest{Messages: msgs}, true)["input"].([]any)
+		for i, it := range input {
+			if it.(map[string]any)["role"] == "developer" {
+				return i
+			}
+		}
+		return -1
+	}
+
+	before, after := devIndex(base), devIndex(withWarning)
+	if before != 2 {
+		t.Fatalf("developer message at %d, want 2 (right before the current question)", before)
+	}
+	if after != before {
+		t.Errorf("developer message moved from %d to %d after a mid-turn user warning", before, after)
+	}
+}

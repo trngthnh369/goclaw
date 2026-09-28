@@ -355,6 +355,8 @@ func handleTeammateMessage(
 			MemberDisplayName: inMeta[tools.MetaToAgentDisplay],
 			Content:           announceContent,
 			Media:             announceMedia,
+			OriginSenderID:    announceSenderID(inMeta[tools.MetaOriginSenderID]),
+			OriginRole:        inMeta[tools.MetaOriginRole],
 		}
 		isProcessor := enqueueAnnounce(leadSessionKey, entry)
 		if !isProcessor {
@@ -370,6 +372,7 @@ func handleTeammateMessage(
 			OrigChatID:       origChatID,
 			OrigPeerKind:     origPeerKind,
 			OrigLocalKey:     origLocalKey,
+			OrigChannelType:  resolveChannelType(deps.ChannelMgr, origCh),
 			OriginUserID:     inMeta[tools.MetaOriginUserID],
 			TeamID:           inMeta[tools.MetaTeamID],
 			TeamWorkspace:    inMeta[tools.MetaTeamWorkspace],

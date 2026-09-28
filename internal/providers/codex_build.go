@@ -24,7 +24,13 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 	var instructions string
 	var input []any
 
-	for _, m := range req.Messages {
+	turnStart := currentTurnStartIndex(req.Messages)
+	turnInputAt := -1
+
+	for i, m := range req.Messages {
+		if i == turnStart {
+			turnInputAt = len(input)
+		}
 		switch m.Role {
 		case "system":
 			if instructions == "" {
@@ -96,6 +102,8 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 			})
 		}
 	}
+
+	instructions, input = moveDynamicPromptBeforeTurn(instructions, input, turnInputAt)
 
 	body := map[string]any{
 		"model":  model,
@@ -210,4 +218,57 @@ func toFcID(id string) string {
 	// Replace invalid characters (e.g. colons from session keys) with underscores.
 	id = invalidFcIDChars.ReplaceAllString(id, "_")
 	return "fc_" + id
+}
+
+// moveDynamicPromptBeforeTurn keeps only the stable part of the system prompt
+// (above CacheBoundaryMarker) in instructions and moves the per-turn part
+// (sender, chat, date, runtime) into a developer message placed right before
+// the current turn's opening user message (input index turnAt). Instructions
+// precede the history in the prompt, so leaving the per-turn part there makes
+// every change of sender or run kind re-bill the whole history as fresh input;
+// placed at the turn start it only costs itself once per turn, and everything
+// the turn appends (tool calls, loop warnings, injected messages) comes after
+// it, so its position holds for the whole turn.
+func moveDynamicPromptBeforeTurn(instructions string, input []any, turnAt int) (string, []any) {
+	before, after, ok := strings.Cut(instructions, CacheBoundaryMarker)
+	if !ok {
+		return instructions, input
+	}
+	stable := strings.TrimSpace(before)
+	dynamic := strings.TrimSpace(after)
+	if dynamic == "" {
+		return stable, input
+	}
+
+	msg := map[string]any{"role": "developer", "content": dynamic}
+	if turnAt < 0 || turnAt > len(input) {
+		return stable, append(input, msg)
+	}
+	out := make([]any, 0, len(input)+1)
+	out = append(out, input[:turnAt]...)
+	out = append(out, msg)
+	out = append(out, input[turnAt:]...)
+	return stable, out
+}
+
+// currentTurnStartIndex returns the index in msgs of the user message that
+// opens the current turn: the first user message after the last assistant
+// reply that made no tool calls (the end of the previous turn). User messages
+// added later in the turn (loop-detector warnings, messages injected while the
+// run is busy) sit after it and must not move the anchor. Returns -1 when
+// there is no user message to anchor on.
+func currentTurnStartIndex(msgs []Message) int {
+	from := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) == 0 {
+			from = i + 1
+			break
+		}
+	}
+	for i := from; i < len(msgs); i++ {
+		if msgs[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
 }

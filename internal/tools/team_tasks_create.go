@@ -213,6 +213,11 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]any) 
 	if role := store.RoleFromContext(ctx); role != "" {
 		taskMeta["origin_role"] = role
 	}
+	// Persist the lead's user scope: dispatch runs post-turn without it, and the
+	// completion announce must run the lead in the same scope as this turn.
+	if uid := store.UserIDFromContext(ctx); uid != "" {
+		taskMeta[MetaOriginUserID] = uid
+	}
 
 	task := &store.TeamTaskData{
 		TeamID:           team.ID,
