@@ -1051,6 +1051,57 @@ class PackageTests(unittest.TestCase):
     def test_reels_blockers(self):
         self.assertEqual(package.reels_blockers("short", 42.0, {"width": 1080, "height": 1920}), [])
         self.assertEqual(len(package.reels_blockers("long", 120.0, {"width": 1280, "height": 720})), 3)
+        cut = {"width": 1080, "height": 1920}
+        self.assertEqual(package.reels_blockers("short", 42.0, cut, master_bytes=94_000_000), [])
+        self.assertIn("upload limit", package.reels_blockers("short", 42.0, cut, master_bytes=96_000_000)[0])
+
+    def test_master_mode_message_has_no_media_line_and_room_for_the_gateway_line(self):
+        caption = "Trì hoãn không phải do lười.\n\n#tamly #kienthuc"
+        message = package.review_message(*self.ARGS, caption, briefs.EXAMPLE_RESEARCH["sources"], None,
+                                         publishable=True)
+        self.assertNotIn("MEDIA:", message)
+        self.assertNotIn("master_sha256", message)
+        self.assertLessEqual(len(message.encode("utf-8")), package.MESSAGE_BUDGET - package.MASTER_LINE_BYTES)
+        self.assertIn(f"[caption]\n{caption}\n[/caption]", message)
+
+    def test_stage_master_copies_to_disk_and_clears_stale_staging(self):
+        import time as _time
+        from unittest import mock
+        from vfcore.util import StudioError
+        root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, root, True)
+        paths = Studio(root / "studio").job("vf-260928-0000-x")
+        paths.out.mkdir(parents=True)
+        paths.master.write_bytes(b"master-bytes")
+        stale = root / "director" / "vf-staging" / "vf-old"
+        stale.mkdir(parents=True)
+        old = _time.time() - 2 * package.STAGING_MAX_AGE
+        os.utime(stale, (old, old))
+        staged = package.stage_master(paths, root / "director")
+        self.assertEqual(staged.read_bytes(), b"master-bytes")
+        self.assertEqual(os.stat(staged).st_nlink, 1)          # a copy: the gateway refuses hard links
+        self.assertFalse(stale.exists())
+        package.unstage_master({"staged_master": str(staged)})
+        self.assertFalse(staged.parent.exists())
+        with mock.patch.object(package.shutil, "disk_usage", return_value=mock.Mock(free=10)):
+            with self.assertRaises(StudioError):
+                package.stage_master(paths, root / "director")
+
+    def test_master_staging_root_is_the_runs_own_workspace(self):
+        from vfcore.util import StudioError
+        root = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, root, True)
+        run_ws = root / "director" / "cron" / "someone"
+        run_ws.mkdir(parents=True)
+        self.addCleanup(setattr, studio, "IMAGE_ROOT", studio.IMAGE_ROOT)
+        studio.IMAGE_ROOT = root / "director"
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(run_ws)
+        self.assertEqual(studio.master_staging_root(), run_ws)
+        os.chdir(root)                                          # the workspace root itself
+        with self.assertRaises(StudioError):
+            studio.master_staging_root()
+        os.chdir(tempfile.gettempdir())                         # outside every workspace
+        with self.assertRaises(StudioError):
+            studio.master_staging_root()
 
 
 if __name__ == "__main__":

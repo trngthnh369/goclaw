@@ -21,10 +21,18 @@ from .paths import FONTS_DIR
 from .util import run
 
 OVERSAMPLE = 1.5          # measured: 1.5x renders ~35% faster than 2x; steps stay < 1 px
-X264_COMMON = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-profile:v", "high",
-               "-pix_fmt", "yuv420p", "-g", str(FPS), "-bf", "2", "-r", str(FPS),
-               "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-               "-color_range", "tv", "-threads", "4"]
+# The master is now what Reels publishes: a 2 s closed GOP as Reels asks, and a
+# bitrate ceiling so a 90 s master stays near 70 MB under the 100 MB upload cap.
+# Clips are joined with concat -c copy, so each scene still starts on a keyframe.
+MASTER_GOP = 2 * FPS
+
+
+def x264_args(threads: int = 4) -> list[str]:
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-profile:v", "high",
+            "-pix_fmt", "yuv420p", "-g", str(MASTER_GOP), "-keyint_min", str(MASTER_GOP), "-sc_threshold", "0",
+            "-maxrate", "6M", "-bufsize", "12M", "-bf", "2", "-r", str(FPS),
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-color_range", "tv", "-threads", str(threads)]
 AUTO_IMAGE_MOTIONS = ("zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in", "pan_up")
 
 
@@ -87,7 +95,7 @@ def render_still_clip(prepared: Path, out: Path, ass_path: Path, frames: int, mo
                       fmt: FormatSpec, *, strength: float) -> None:
     graph = f"[0:v]{_zoompan(motion, frames, fmt, strength)},{_ass_filter(ass_path)},{_to_video(fmt)}[v]"
     _ffmpeg(["-i", str(prepared), "-filter_complex", graph, "-map", "[v]", "-frames:v", str(frames),
-             *X264_COMMON, "-an", str(out)])
+             *x264_args(), "-an", str(out)])
 
 
 def render_scroll_clip(tall: Path, out: Path, ass_path: Path, frames: int, fmt: FormatSpec,
@@ -106,7 +114,7 @@ def render_scroll_clip(tall: Path, out: Path, ass_path: Path, frames: int, fmt: 
     graph = (f"[0:v]{fit},loop=loop={frames - 1}:size=1:start=0,setpts=N/{FPS}/TB,"
              f"crop={fmt.width}:{fmt.height}:0:'{y}',{_ass_filter(ass_path)},{_to_video(fmt)}[v]")
     _ffmpeg(["-i", str(tall), "-filter_complex", graph, "-map", "[v]", "-frames:v", str(frames),
-             *X264_COMMON, "-an", str(out)])
+             *x264_args(), "-an", str(out)])
 
 
 def concat_clips(clips: list[Path], list_file: Path, out: Path) -> None:

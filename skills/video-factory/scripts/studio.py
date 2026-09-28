@@ -16,6 +16,7 @@ stdout (exec), never through read_file.
     studio.py render --job J [--budget SECONDS]
     studio.py package --job J | delivered --job J --status sent [--message-id ID] | published --job J
     studio.py config set publish.facebook_reels.enabled=true|false
+    studio.py config set publish.facebook_reels.master=true|false   (publish the master, not the review cut)
     studio.py override --job J --stage script|video (only in the reply to a person) | cancel --job J --reason R
     studio.py feedback --job J --type visual|script [--scene S] --text T   (human change request)
     studio.py set --job J [--voice V] [--rate N] [--theme T]
@@ -55,7 +56,7 @@ DEFAULT_CONFIG = {
     "sfx": {"volume_db": DEFAULT_SFX_DB},
     "lexicon": {},
     "delivery": {"channel": "", "target": ""},
-    "publish": {"facebook_reels": {"enabled": False}},
+    "publish": {"facebook_reels": {"enabled": False, "master": False}},
 }
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 # A 2K 9:16 image is 1536 px on its short side; below 1080 the frame is upscaled.
@@ -64,6 +65,22 @@ MIN_IMAGE_SHORT_SIDE = 1080
 # only those files, so a scene can never be pointed at some other file the
 # gateway can read and have it rendered into a public video.
 IMAGE_ROOT = Path("/app/workspace/vf-director")
+
+
+def master_staging_root() -> Path:
+    """Where a master-mode package stages the master: this run's own workspace.
+
+    The gateway reads reels_master only from the calling run's workspace (per
+    user: cron/<user>/, vf-discord/<chat>/, or a team workspace), and exec
+    starts in exactly that directory, so the current directory is the one place
+    it will accept. The gateway enforces that; this only catches a working_dir
+    that points elsewhere (e.g. /tmp, a small RAM disk) with a clearer message.
+    """
+    cwd = Path.cwd().resolve()
+    root = IMAGE_ROOT.resolve().parent
+    if not cwd.is_relative_to(root) or cwd == root:
+        raise StudioError(f"run package from your own workspace (under {root}/), without working_dir")
+    return cwd
 
 
 # --------------------------------------------------------------------------- helpers
@@ -463,7 +480,9 @@ def cmd_package(args: argparse.Namespace) -> int:
     studio = studio_from(args)
     paths = job_paths(studio, args.job, open_only=True)
     cfg = load_config(studio)
-    record = package.package(paths, publish_enabled=cfg["publish"]["facebook_reels"].get("enabled") is True)
+    reels = cfg["publish"]["facebook_reels"]
+    record = package.package(paths, publish_enabled=reels.get("enabled") is True,
+                             master_root=master_staging_root() if reels.get("master") is True else None)
     channel, target = cfg["delivery"].get("channel"), cfg["delivery"].get("target")
     out(f"PACKAGED {args.job}: {paths.deliver}")
     out("Reels: publishable on approval" if record["reels_publishable"]
@@ -471,6 +490,8 @@ def cmd_package(args: argparse.Namespace) -> int:
     if channel and target:
         call = {"action": "send", "channel": channel, "target": str(target), "message": record["message"],
                 "forward": True, "forward_reason": "Video Factory review delivery to the configured review channel"}
+        if record.get("master_mode"):
+            call["reels_master"] = record["staged_master"]
         out("Send it with ONE message tool call, arguments exactly as below (text unchanged):")
         out(json.dumps(call, ensure_ascii=False))
     else:
@@ -478,7 +499,7 @@ def cmd_package(args: argparse.Namespace) -> int:
         out("-----")
         out(record["message"])
         out("-----")
-    out(f"After it is sent: {studio_cmd()} delivered --job {args.job} --status sent")
+    out(f"Only after the message call succeeded: {studio_cmd()} delivered --job {args.job} --status sent")
     return 0
 
 
@@ -493,6 +514,8 @@ def cmd_delivered(args: argparse.Namespace) -> int:
         raise StudioError("the package is stale (video re-rendered) - run package again")
     record.update({"status": args.status, "sent_at": utc_now(), "message_id": args.message_id or ""})
     write_json(paths.delivery, record)
+    if args.status == "sent":
+        package.unstage_master(record)
     meta = jobs.load_meta(paths)
     if args.status == "sent":
         meta["status"] = "awaiting_approval"
@@ -511,7 +534,8 @@ def cmd_published(args: argparse.Namespace) -> int:
         raise StudioError("only a delivered job (delivered --status sent) can be marked published")
     if not record.get("reels_publishable"):
         raise StudioError("this delivery was not a publishable Reels draft; nothing was published")
-    record.update({"status": "published", "published_at": utc_now()})
+    record.update({"status": "published", "published_at": utc_now(),
+                   "published_source": "master" if record.get("master_mode") else "review_cut"})
     write_json(paths.delivery, record)
     meta = jobs.load_meta(paths)
     meta["status"] = "published"
@@ -768,7 +792,7 @@ def cmd_backlog(args: argparse.Namespace) -> int:
 # and a JSON reader using doubles (the gateway's tool arguments) rounds them. A
 # publish switch accepts only true/false: "no" used to be stored as a string, and
 # a non-empty string is truthy, so it switched publishing ON.
-CONFIG_TYPES = {"publish.facebook_reels.enabled": bool, "brand.show": bool,
+CONFIG_TYPES = {"publish.facebook_reels.enabled": bool, "publish.facebook_reels.master": bool, "brand.show": bool,
                 "defaults.rate": int, "music.below_voice_lu": float, "sfx.volume_db": float}
 
 
@@ -795,7 +819,7 @@ def cmd_config(args: argparse.Namespace) -> int:
                "defaults.theme", "defaults.music", "music.below_voice_lu", "defaults.sfx", "sfx.volume_db",
                "defaults.style",
                "delivery.channel", "delivery.target",
-               "publish.facebook_reels.enabled"}
+               "publish.facebook_reels.enabled", "publish.facebook_reels.master"}
     if key not in allowed:
         raise StudioError(f"settable keys: {', '.join(sorted(allowed))}")
     raw = read_json(studio.config) or {}

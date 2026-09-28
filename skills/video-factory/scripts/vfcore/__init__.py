@@ -5,4 +5,4 @@ validation, text-to-speech, caption timing, rendering, loudness, QA, packaging -
 is done here, so no published artifact depends on what a model remembered to do.
 """
 
-RENDERER_VERSION = "vf-render-2"   # 2: stereo soundtrack, publishable review cut, vi lexicon
+RENDERER_VERSION = "vf-render-3"   # 3: master is published: 2 s GOP, 6 Mbps ceiling (2: stereo, review cut, lexicon)

@@ -5,7 +5,7 @@ license: Internal
 metadata:
   author: trngthnh369
   version: "0.2.0"
-  bundle_revision: "2026-09-28-028"
+  bundle_revision: "2026-09-28-029"
   runtime: python3
   forked_from: comingwave-study
 ---
