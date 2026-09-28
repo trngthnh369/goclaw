@@ -95,3 +95,16 @@ func TestLoadPublications_EmptyWhenNothingPublished(t *testing.T) {
 		t.Errorf("got %d records, want none", len(got))
 	}
 }
+
+func TestPublicationRecord_ReelSourceRoundTrips(t *testing.T) {
+	t.Setenv("GOCLAW_DATA_DIR", t.TempDir())
+	rec := PublicationRecord{Version: 1, PostID: "1_300", PageID: "1", PublishedAt: time.Now().UTC(),
+		Kind: "reel", Source: "master"}
+	if err := SavePublication(rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadPublications()
+	if err != nil || len(got) != 1 || got[0].Source != "master" || got[0].Kind != "reel" {
+		t.Fatalf("loaded %+v (%v), want the reel's source kept", got, err)
+	}
+}

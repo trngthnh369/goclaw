@@ -108,6 +108,13 @@ RUN set -eux; \
         npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@^2.1.91; \
         rm -rf /tmp/npm-cache; \
     fi; \
+    # Execute-only ffmpeg/ffprobe for the gateway's Reels review cuts: exec'ing an \
+    # unreadable binary makes the child non-dumpable (see docker-entrypoint.sh). \
+    if [ -f /usr/bin/ffmpeg ] && [ -f /usr/bin/ffprobe ]; then \
+        install -d -o root -g root -m 0755 /usr/libexec/goclaw; \
+        install -o root -g root -m 0111 /usr/bin/ffmpeg /usr/libexec/goclaw/ffmpeg; \
+        install -o root -g root -m 0111 /usr/bin/ffprobe /usr/libexec/goclaw/ffprobe; \
+    fi; \
     rm -f /tmp/requirements-base.txt /tmp/requirements-skills.txt
 
 # Non-root user

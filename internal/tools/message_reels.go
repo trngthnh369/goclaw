@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -16,6 +18,10 @@ import (
 // attachment plus a caption between a [caption] and a [/caption] line - and
 // the gateway publishes that attachment's exact bytes with that caption. The
 // model only says "APPROVED_REPLY"; it never supplies the text or the file.
+
+// MaxReelUploadBytes caps a published Reel file; the facebook channel applies
+// the same cap when it opens the file for upload.
+const MaxReelUploadBytes = int64(100 << 20)
 
 const (
 	reelsTarget       = "reels"
@@ -94,20 +100,50 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 	if rc.ReplyToMediaCount != 1 || len(rc.ReplyToMediaPaths) != 1 {
 		return ErrorResult("the approved review message must carry exactly one video")
 	}
-	videoPath, err := t.resolvePublishMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0], "video/")
-	if err != nil {
-		slog.Warn("message.reels_post_media_rejected", "reason", err.Error())
-		return ErrorResult("the approved video is unavailable or is not a video file")
-	}
 	approvedSHA, err := approvedFeedPostMediaSHA(rc.ReplyToMedia, rc.ReplyToMediaCount)
 	if err != nil || approvedSHA == "" {
 		slog.Warn("message.reels_post_reply_media_rejected", "error", err)
 		return ErrorResult("approved Discord media metadata is invalid")
 	}
-	media := []bus.MediaAttachment{{URL: videoPath, ContentType: mimeFromPath(videoPath)}}
-	cleanupMedia, err := t.bindFeedPostMedia(ctx, media, approvedSHA)
+
+	// A master_sha256 line (written only by the gateway) marks a master-mode
+	// draft: publish the signed master, never the attached review cut. A draft
+	// without the line is a legacy one: publish the attachment's exact bytes.
+	source, publishSHA, ledgerMediaSHA := "review_cut", approvedSHA, approvedSHA
+	var media []bus.MediaAttachment
+	var draftDir string
+	switch masterLines := reelsMasterSHALines(rc.ReplyToContent); len(masterLines) {
+	case 0:
+		videoPath, err := t.resolvePublishMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0], "video/")
+		if err != nil {
+			slog.Warn("message.reels_post_media_rejected", "reason", err.Error())
+			return ErrorResult("the approved video is unavailable or is not a video file")
+		}
+		media = []bus.MediaAttachment{{URL: videoPath, ContentType: mimeFromPath(videoPath)}}
+	case 1:
+		rec, dir, err := t.loadReelsDraft(ctx, approvedSHA)
+		if err == nil {
+			err = checkReelsDraftScope(ctx, rec, caption, masterLines[0])
+		}
+		if err != nil {
+			// A posted draft is removed, so a second approval of the same message
+			// lands here: say it was published, never "re-package" (a duplicate).
+			if t.feedPostReserved(ctx, rc, channel, reelsTarget) {
+				return ErrorResult("this review message was already published or is being published; operator reconciliation is required")
+			}
+			// Swept, lost or not matching: refuse; never fall back to the review cut.
+			slog.Warn("security.reels_master_draft_rejected", "reason", err.Error(), "review_sha256", approvedSHA)
+			return ErrorResult("this review expired or does not match its record; re-package the video and send a new review message")
+		}
+		source, publishSHA, draftDir = "master", rec.MasterSHA256, dir
+		ledgerMediaSHA = approvedSHA + "\x00" + rec.MasterSHA256
+		media = []bus.MediaAttachment{{URL: filepath.Join(dir, "master.mp4"), ContentType: "video/mp4"}}
+	default:
+		return ErrorResult("the approved message has more than one master_sha256 line")
+	}
+	cleanupMedia, err := t.bindFeedPostMedia(ctx, media, publishSHA, MaxReelUploadBytes)
 	if err != nil {
-		slog.Warn("message.reels_post_media_mismatch", "reason", "binding_failed")
+		slog.Warn("message.reels_post_media_mismatch", "reason", "binding_failed", "source", source)
 		return ErrorResult("the video does not match the approved Discord attachment")
 	}
 	defer cleanupMedia()
@@ -122,7 +158,9 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 		Metadata: map[string]string{
 			"fb_mode":               "reels_post",
 			"publisher_agent_id":    rc.AgentKey,
-			"approved_media_sha256": approvedSHA,
+			"approved_media_sha256": publishSHA,
+			"review_media_sha256":   approvedSHA,
+			"reels_source":          source,
 		},
 	}
 	if origCh, origChat := ToolChannelFromCtx(ctx), ToolChatIDFromCtx(ctx); origCh != "" && origChat != "" {
@@ -131,7 +169,7 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 		outMsg.Metadata["review_message_id"] = rc.ReplyToMessageID
 	}
 
-	reservation, err := t.reserveFeedPost(ctx, rc, channel, reelsTarget, feedPostPayloadSHA(caption, approvedSHA))
+	reservation, err := t.reserveFeedPost(ctx, rc, channel, reelsTarget, feedPostPayloadSHA(caption, ledgerMediaSHA))
 	if err != nil {
 		slog.Warn("message.reels_post_reservation_rejected", "error_type", fmt.Sprintf("%T", err))
 		return ErrorResult("this review message was already published or is being published; operator reconciliation is required")
@@ -141,6 +179,8 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 		"reply_to_message_id", rc.ReplyToMessageID,
 		"publisher_agent_id", rc.AgentKey,
 		"media_sha256", approvedSHA,
+		"source", source,
+		"publish_sha256", publishSHA,
 		"reason", reason,
 	)
 	if err := t.outboundDispatcher(ctx, outMsg); err != nil {
@@ -164,5 +204,30 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 	if err := reservation.mark("posted"); err != nil {
 		slog.Error("message.reels_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", err))
 	}
+	if draftDir != "" {
+		t.removeReelsDraft(ctx, draftDir, approvedSHA)
+	}
 	return SilentResult(fmt.Sprintf(`{"status":"posted","channel":"%s","target":"%s"}`, channel, reelsTarget))
+}
+
+// checkReelsDraftScope ties a master-mode record to the approval at hand: the
+// same tenant, the chat the review was sent to, the approved caption and the
+// master named on the message's own line.
+func checkReelsDraftScope(ctx context.Context, rec reelsDraftRecord, caption, lineSHA string) error {
+	if rec.TenantID != reelsTenant(ctx) {
+		return fmt.Errorf("draft belongs to another tenant")
+	}
+	if ch, chat := ToolChannelFromCtx(ctx), ToolChatIDFromCtx(ctx); rec.Channel != ch || rec.ChatID != chat {
+		return fmt.Errorf("draft was sent to another chat")
+	}
+	if rec.CaptionSHA256 != sha256Hex(normalizeApprovalContent(caption)) {
+		return fmt.Errorf("caption differs from the draft's")
+	}
+	if rec.MasterSHA256 != lineSHA {
+		return fmt.Errorf("master_sha256 line differs from the draft's")
+	}
+	if age := time.Since(rec.CreatedAt); age < 0 || age > reelsDraftMaxAge {
+		return fmt.Errorf("draft expired")
+	}
+	return nil
 }

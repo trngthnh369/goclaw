@@ -36,12 +36,21 @@ import (
 // at an httptest server; the host is never taken from an API response.
 var ruploadBase = "https://rupload.facebook.com"
 
+// reelVerifiedHook runs after the pre-upload digest check; tests use it to change
+// the file in place before the upload reads it. Always nil in production.
+var reelVerifiedHook func(path string)
+
 // reelStatusInterval is how often step 4 polls. A variable so tests do not wait.
 var reelStatusInterval = 5 * time.Second
 
+// maxReelUploadBytes is shared with the approval path in tools, which snapshots
+// the file under the same cap. A variable so tests can shrink it.
+var maxReelUploadBytes = tools.MaxReelUploadBytes
+
 const (
-	maxReelUploadBytes = 100 << 20
-	reelUploadTimeout  = 3 * time.Minute
+	// reelUploadTimeout is the base; reelUploadTimeoutFor adds a minute per 20 MB
+	// so a 90 s master does not time out on a slow uplink.
+	reelUploadTimeout = 3 * time.Minute
 	// reelStatusTimeout bounds step 4. Past it the reel may still go live, so
 	// the outcome is reported as unknown rather than failed.
 	reelStatusTimeout = 4 * time.Minute
@@ -84,6 +93,9 @@ func (g *GraphClient) CreateReelVerified(ctx context.Context, caption, filePath,
 		return "", reelFailed("prepare", err)
 	}
 	defer file.Close()
+	if reelVerifiedHook != nil {
+		reelVerifiedHook(filePath)
+	}
 
 	slots := g.getUploadSlots()
 	select {
@@ -97,8 +109,15 @@ func (g *GraphClient) CreateReelVerified(ctx context.Context, caption, filePath,
 	if err != nil {
 		return "", reelFailed("start", err)
 	}
-	if err := g.uploadReel(ctx, videoID, file, size); err != nil {
+	// Hash the bytes actually sent: the file was verified before the upload, but
+	// an in-place write to it during the upload would otherwise go out unchecked.
+	// A mismatch stops before finish, so nothing is published.
+	sent := sha256.New()
+	if err := g.uploadReel(ctx, videoID, io.TeeReader(file, sent), size); err != nil {
 		return "", reelFailed("upload", err)
+	}
+	if hex.EncodeToString(sent.Sum(nil)) != strings.ToLower(strings.TrimSpace(expectedSHA256)) {
+		return "", reelFailed("upload", fmt.Errorf("uploaded bytes do not match the approved video digest"))
 	}
 	if err := g.finishReel(ctx, videoID, caption); err != nil {
 		return "", reelFailed("finish", err)
@@ -186,7 +205,7 @@ func (g *GraphClient) uploadReel(ctx context.Context, videoID string, file io.Re
 	req.Header.Set("file_size", strconv.FormatInt(size, 10))
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := (&http.Client{Timeout: reelUploadTimeout}).Do(req)
+	resp, err := (&http.Client{Timeout: reelUploadTimeoutFor(size)}).Do(req)
 	if err != nil {
 		// *url.Error carries the URL, which holds no credential here.
 		return fmt.Errorf("upload request: %w", err)
@@ -346,4 +365,8 @@ func ProbeReelsPublishing(ctx context.Context, pageAccessToken, pageID string) (
 		return videoID, "", fmt.Errorf("status of new session: %w", err)
 	}
 	return videoID, status.VideoStatus, nil
+}
+
+func reelUploadTimeoutFor(size int64) time.Duration {
+	return reelUploadTimeout + time.Duration(size/(20<<20))*time.Minute
 }

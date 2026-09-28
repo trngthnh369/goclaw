@@ -243,3 +243,34 @@ func TestAllowsPublisher(t *testing.T) {
 		t.Fatal("unlisted or empty agents must not be allowed")
 	}
 }
+
+func TestCreateReelVerified_InPlaceChangeDuringUploadIsNotFinished(t *testing.T) {
+	f, g := newFakeReels(t)
+	path, sha := writeVideo(t, "mp4-bytes")
+	reelVerifiedHook = func(p string) {
+		// Same length, different bytes, after the pre-upload digest check.
+		if err := os.WriteFile(p, []byte("evil-byte"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { reelVerifiedHook = nil })
+
+	_, err := g.CreateReelVerified(context.Background(), "c", path, sha)
+	if err == nil || !notPublished(err) {
+		t.Fatalf("err = %v, want a not-published upload failure", err)
+	}
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, "finish") {
+			t.Fatalf("finish was called after the uploaded bytes changed: %v", f.calls)
+		}
+	}
+}
+
+func TestReelUploadTimeoutScalesWithSize(t *testing.T) {
+	if got := reelUploadTimeoutFor(9 << 20); got != reelUploadTimeout {
+		t.Fatalf("9 MB timeout = %v, want the base %v", got, reelUploadTimeout)
+	}
+	if got := reelUploadTimeoutFor(95 << 20); got != reelUploadTimeout+4*time.Minute {
+		t.Fatalf("95 MB timeout = %v, want base + 4 min", got)
+	}
+}

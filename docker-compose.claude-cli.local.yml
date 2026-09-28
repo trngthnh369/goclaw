@@ -67,6 +67,13 @@ services:
         source: "D:/Projects/personal/goclaw/.deploy/goclaw"
         target: /app/goclaw
         read_only: true
+      # The entrypoint too, for the same reason: it installs the execute-only
+      # ffmpeg/ffprobe the gateway needs for Reels review cuts (plan 260928-q7m2).
+      # Needs `up -d goclaw` (recreate), not a restart. Must stay LF-only.
+      - type: bind
+        source: "D:/Projects/personal/goclaw/docker-entrypoint.sh"
+        target: /app/docker-entrypoint.sh
+        read_only: true
 
   chrome:
     # Shared read-only view of the agent workspace so the sidecar can open

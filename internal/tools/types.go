@@ -120,6 +120,15 @@ type ChannelTenantCheckerAware interface {
 	SetChannelTenantChecker(ChannelTenantChecker)
 }
 
+// ReelsReviewChatChecker reports whether a channel instance's config lists
+// chatID as a Reels review chat. Implemented by channels.Manager.IsReelsReviewChat.
+type ReelsReviewChatChecker func(channelName, chatID string) bool
+
+// ReelsReviewChatCheckerAware tools can receive a Reels review chat checker.
+type ReelsReviewChatCheckerAware interface {
+	SetReelsReviewChatChecker(ReelsReviewChatChecker)
+}
+
 // ChannelAware is optionally implemented by tools that only work on specific channel types.
 // Tools implementing this are filtered out when the current channel type doesn't match.
 type ChannelAware interface {

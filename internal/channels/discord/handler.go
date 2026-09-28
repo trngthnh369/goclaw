@@ -432,6 +432,10 @@ func (c *Channel) approvalPublishTarget(chatID string) string {
 	return ""
 }
 
+// IsReelsReviewChat reports whether this instance lists chatID as a Reels
+// review chat (the only place a master-mode Reels draft may be sent).
+func (c *Channel) IsReelsReviewChat(chatID string) bool { return c.isReelsReviewChat(chatID) }
+
 func (c *Channel) isReelsReviewChat(chatID string) bool {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {

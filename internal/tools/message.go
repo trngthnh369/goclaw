@@ -76,7 +76,7 @@ const (
 	contentFactoryFacebookTarget    = "feed"
 	feedPostLedgerDir               = ".goclaw/feed-post-ledger"
 	feedPostStagingDir              = ".goclaw/feed-post-staging"
-	maxFeedPostMediaBytes           = 25 << 20
+	maxFeedPostMediaBytes           = int64(25 << 20)
 	approvedReplyPayloadToken       = "APPROVED_REPLY"
 	contentFactoryTerminalKey       = "contentfactory-terminal"
 )
@@ -158,6 +158,7 @@ type MessageTool struct {
 	outboundDispatcher OutboundDispatcher
 	msgBus             *bus.MessageBus
 	tenantChecker      ChannelTenantChecker
+	reelsReviewChat    ReelsReviewChatChecker
 
 	approvalChannelID string
 	facebookChannel   string
@@ -215,6 +216,9 @@ func (t *MessageTool) SetChannelSender(s ChannelSender)               { t.sender
 func (t *MessageTool) SetOutboundDispatcher(d OutboundDispatcher)     { t.outboundDispatcher = d }
 func (t *MessageTool) SetMessageBus(b *bus.MessageBus)                { t.msgBus = b }
 func (t *MessageTool) SetChannelTenantChecker(c ChannelTenantChecker) { t.tenantChecker = c }
+func (t *MessageTool) SetReelsReviewChatChecker(c ReelsReviewChatChecker) {
+	t.reelsReviewChat = c
+}
 
 func (t *MessageTool) Name() string { return "message" }
 func (t *MessageTool) Description() string {
@@ -254,6 +258,10 @@ func (t *MessageTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional per-run idempotency key. Required for ContentFactory terminal sends to the review channel; use contentfactory-terminal.",
 			},
+			"reels_master": map[string]any{
+				"type":        "string",
+				"description": "Video Factory only: path of the master video (inside your workspace) for a Reels review draft. Use with action='send', a [caption]...[/caption] block and no MEDIA: line; the gateway makes the review video from it, attaches it and publishes this master if the draft is approved.",
+			},
 		},
 		"required": []string{"action", "message"},
 	}
@@ -268,6 +276,16 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	message := argString(args, "message")
 	if message == "" {
 		return ErrorResult("message is required")
+	}
+	// The master_sha256 line marks a master-mode Reels draft and is written only
+	// by the gateway (sendReelsMasterDraft); an agent-written one could point an
+	// approval at a different video.
+	reelsMaster := strings.TrimSpace(argString(args, reelsMasterArg))
+	if reelsMaster != "" && action != "send" {
+		return ErrorResult("reels_master is only valid with action='send'")
+	}
+	if action == "send" && len(reelsMasterSHALines(message)) > 0 {
+		return ErrorResult("remove the master_sha256 line: the gateway writes it when you pass reels_master")
 	}
 
 	channel := argString(args, "channel")
@@ -373,7 +391,7 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	forward, _ := args["forward"].(bool)
 	isSelfSend := ctxChannel != "" && ctxChatID != "" && channel == ctxChannel && target == ctxChatID
 	if isSelfSend && !forward {
-		isMediaSend := embeddedMediaPattern.MatchString(message)
+		isMediaSend := embeddedMediaPattern.MatchString(message) || reelsMaster != ""
 		if !isMediaSend {
 			return ErrorResult("You are already responding to this chat. Your response text will be delivered automatically. Do not use the message tool to send text to your own chat — just include the content in your response text. To deliver files, use write_file with deliver=true instead.")
 		}
@@ -436,6 +454,10 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			t.postCrossTargetNotice(ctx, target, forwardReason)
 		}
 		return res
+	}
+
+	if reelsMaster != "" {
+		return noticeOnSuccess(t.sendReelsMasterDraft(ctx, channel, target, message, reelsMaster))
 	}
 
 	// action="post": publish the exact Discord-reviewed payload to the fixed
@@ -519,7 +541,7 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 			slog.Warn("message.feed_post_reply_media_rejected", "error", err)
 			return ErrorResult("approved Discord media metadata is invalid")
 		}
-		cleanupMedia, err := t.bindFeedPostMedia(ctx, outMsg.Media, approvedMediaSHA)
+		cleanupMedia, err := t.bindFeedPostMedia(ctx, outMsg.Media, approvedMediaSHA, maxFeedPostMediaBytes)
 		if err != nil {
 			slog.Warn("message.feed_post_media_mismatch", "reason", "binding_failed")
 			return ErrorResult("feed post media does not match the approved Discord reply")
@@ -793,6 +815,7 @@ func (t *MessageTool) bindFeedPostMedia(
 	ctx context.Context,
 	media []bus.MediaAttachment,
 	approvedSHA string,
+	maxBytes int64,
 ) (func(), error) {
 	if len(media) == 0 {
 		if approvedSHA != "" {
@@ -817,7 +840,7 @@ func (t *MessageTool) bindFeedPostMedia(
 	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(preInfo, openedInfo) {
 		return nil, fmt.Errorf("approved media identity changed")
 	}
-	if openedInfo.Size() > maxFeedPostMediaBytes {
+	if openedInfo.Size() > maxBytes {
 		return nil, fmt.Errorf("approved media exceeds size limit")
 	}
 
@@ -842,8 +865,8 @@ func (t *MessageTool) bindFeedPostMedia(
 	}
 
 	h := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(staged, h), io.LimitReader(source, maxFeedPostMediaBytes+1))
-	if copyErr != nil || written > maxFeedPostMediaBytes {
+	written, copyErr := io.Copy(io.MultiWriter(staged, h), io.LimitReader(source, maxBytes+1))
+	if copyErr != nil || written > maxBytes {
 		staged.Close()
 		cleanup()
 		return nil, fmt.Errorf("snapshot approved media")
@@ -898,6 +921,32 @@ func (t *MessageTool) feedPostStateRoot(ctx context.Context) string {
 	return t.workspace
 }
 
+// feedPostLedgerPath is the ledger entry of one approved review message.
+func (t *MessageTool) feedPostLedgerPath(ctx context.Context, rc *store.RunContext, channel, target string) (string, error) {
+	ledgerRoot := t.feedPostStateRoot(ctx)
+	if ledgerRoot == "" {
+		return "", fmt.Errorf("gateway data directory unavailable for feed post ledger")
+	}
+	keyHash := sha256.Sum256([]byte(strings.Join([]string{
+		rc.TenantID.String(),
+		channel,
+		target,
+		rc.ReplyToMessageID,
+	}, "\x00")))
+	return filepath.Join(ledgerRoot, filepath.FromSlash(feedPostLedgerDir), hex.EncodeToString(keyHash[:])+".json"), nil
+}
+
+// feedPostReserved reports whether this review message already has a ledger
+// entry (published, in flight or of unknown outcome).
+func (t *MessageTool) feedPostReserved(ctx context.Context, rc *store.RunContext, channel, target string) bool {
+	path, err := t.feedPostLedgerPath(ctx, rc, channel, target)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 func (t *MessageTool) reserveFeedPost(
 	ctx context.Context,
 	rc *store.RunContext,
@@ -905,22 +954,13 @@ func (t *MessageTool) reserveFeedPost(
 	target string,
 	payloadSHA string,
 ) (*feedPostReservation, error) {
-	ledgerRoot := t.feedPostStateRoot(ctx)
-	if ledgerRoot == "" {
-		return nil, fmt.Errorf("gateway data directory unavailable for feed post ledger")
+	path, err := t.feedPostLedgerPath(ctx, rc, channel, target)
+	if err != nil {
+		return nil, err
 	}
-	ledgerDir := filepath.Join(ledgerRoot, filepath.FromSlash(feedPostLedgerDir))
-	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create feed post ledger: %w", err)
 	}
-
-	keyHash := sha256.Sum256([]byte(strings.Join([]string{
-		rc.TenantID.String(),
-		channel,
-		target,
-		rc.ReplyToMessageID,
-	}, "\x00")))
-	path := filepath.Join(ledgerDir, hex.EncodeToString(keyHash[:])+".json")
 	now := time.Now().UTC()
 	entry := feedPostLedgerEntry{
 		Version:          1,

@@ -28,6 +28,26 @@ if [ "$(id -u)" = "0" ] && [ -d /app/workspace ]; then
     -exec chown goclaw:goclaw {} + 2>/dev/null || true
 fi
 
+# Execute-only ffmpeg/ffprobe for the gateway's Reels review-cut derivation.
+# A process that execs an unreadable binary is non-dumpable, so an agent's exec
+# (same uid) cannot open its /proc/<pid>/fd; the gateway refuses master-mode
+# drafts unless these copies are root-owned and unreadable.
+# Sources are fixed root-owned paths, never a PATH lookup: the PATH exported
+# below puts agent-writable /app/data/.runtime/bin first, and an ffmpeg planted
+# there would otherwise be installed here as the trusted one.
+if [ "$(id -u)" = "0" ]; then
+  for tool in ffmpeg ffprobe; do
+    src="/usr/bin/$tool"
+    if [ -f "$src" ] && [ ! -L "$src" ] && [ "$(stat -c %u "$src")" = "0" ] \
+      && mkdir -p /usr/libexec/goclaw && chown root:root /usr/libexec/goclaw && chmod 0755 /usr/libexec/goclaw; then
+      install -o root -g root -m 0111 "$src" "/usr/libexec/goclaw/$tool" || \
+        echo "Warning: could not install the execute-only $tool"
+    elif [ -e "$src" ]; then
+      echo "Warning: $src is not a root-owned regular file; Reels master mode stays off"
+    fi
+  done
+fi
+
 # Python: allow agent to pip install to writable target dir
 export PYTHONPATH="$RUNTIME_DIR/pip:${PYTHONPATH:-}"
 export PIP_TARGET="$RUNTIME_DIR/pip"

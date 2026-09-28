@@ -37,6 +37,7 @@ type PublicationRecord struct {
 	Opening     string              `json:"opening"`
 	HasImage    bool                `json:"has_image"`
 	Kind        string              `json:"kind,omitempty"` // "reel" for a Reel; empty for a feed post
+	Source      string              `json:"source,omitempty"` // a Reel's file: "master" or "review_cut"
 	Samples     []PublicationSample `json:"samples,omitempty"`
 }
 
@@ -135,6 +136,7 @@ func (ch *Channel) recordPublication(msg bus.OutboundMessage, postID, permalink 
 	}
 	if msg.Metadata["fb_mode"] == "reels_post" {
 		rec.Kind = "reel"
+		rec.Source = msg.Metadata["reels_source"]
 	}
 	if err := SavePublication(rec); err != nil {
 		slog.Warn("publications: record failed", "post_id", postID, "error", err)

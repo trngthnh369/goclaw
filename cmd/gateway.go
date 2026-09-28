@@ -527,6 +527,9 @@ func runGateway() {
 		if tc, ok := t.(tools.ChannelTenantCheckerAware); ok {
 			tc.SetChannelTenantChecker(channelMgr.ChannelTenantID)
 		}
+		if rc, ok := t.(tools.ReelsReviewChatCheckerAware); ok {
+			rc.SetReelsReviewChatChecker(channelMgr.IsReelsReviewChat)
+		}
 	}
 	// Wire group member lister on list_group_members tool
 	if t, ok := toolsReg.Get("list_group_members"); ok {
