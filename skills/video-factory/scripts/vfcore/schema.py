@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from . import fontmetrics
 from .audio import MOODS
 from .formats import FormatSpec
+from .styles import NO_TEXT, ORIENTATION, STYLE_PRESETS, style_words_in
 from .textutil import SYLLABLES_PER_SECOND, fold_ascii, has_emoji, nfc, syllable_count
 from .themes import THEMES
 from .tts import effective_lexicon, foreign_tokens, spoken_text
@@ -273,7 +274,8 @@ def accentless_pair(text: str, accented: dict[str, str]) -> str | None:
     return None
 
 
-def _validate_visual(visual: Any, where: str, fmt: FormatSpec, errors: list[str], warnings: list[str]) -> None:
+def _validate_visual(visual: Any, where: str, fmt: FormatSpec, errors: list[str], warnings: list[str],
+                     *, lint_style: bool = True) -> None:
     if not isinstance(visual, dict):
         errors.append(f"{where}.visual must be an object with a kind")
         return
@@ -292,6 +294,12 @@ def _validate_visual(visual: Any, where: str, fmt: FormatSpec, errors: list[str]
         lowered = prompt.lower()
         if prompt and not any(p in lowered for p in ("no text", "without text", "no words", "no letters", "textless")):
             warnings.append(f'{where}.visual.prompt should say "no text" - image models garble lettering')
+        # The video's preset owns medium, palette and light (styles.py). A legacy
+        # script (its own image_style) keeps its old prompts, so it is not linted.
+        found = style_words_in(prompt, (*ORIENTATION.values(), NO_TEXT)) if prompt and lint_style else []
+        if found:
+            errors.append(f'{where}.visual.prompt sets its own style ({", ".join(found)}): drop it and describe only '
+                          "the subject, action and framing - the studio adds the video's style")
     elif kind == "card":
         _validate_card(visual.get("card"), f"{where}.visual", fmt, errors)
     elif kind == "screenshot":
@@ -344,7 +352,8 @@ def _validate_social(social: Any, errors: list[str], warnings: list[str]) -> Non
 
 
 def validate_script(doc: Any, fmt: FormatSpec, fact_ids: set[str], *, rate_percent: int = 0,
-                    voice: str | None = None, studio_lexicon: dict[str, str] | None = None) -> Result:
+                    voice: str | None = None, studio_lexicon: dict[str, str] | None = None,
+                    legacy_style: bool = False) -> Result:
     """`voice` (the job's effective voice; defaults to the script's own) and
     `studio_lexicon` decide what the narration will sound like: a Vietnamese voice
     misreads foreign words, so each one must be covered by the lexicon or respelled
@@ -376,6 +385,12 @@ def validate_script(doc: Any, fmt: FormatSpec, fact_ids: set[str], *, rate_perce
     if doc.get("sfx") is not None and doc.get("sfx") not in SFX_MODES:
         errors.append(f"script.sfx must be one of {', '.join(SFX_MODES)}")
     _text(doc, "image_style", "script", errors, required=False, max_len=300)
+    # legacy_style: the job predates presets (styles.is_legacy_style); it keeps its prompts.
+    if not legacy_style and doc.get("style") not in STYLE_PRESETS:
+        errors.append(f"script.style must be one of {', '.join(STYLE_PRESETS)} (one look for the whole video)")
+    if legacy_style and str(doc.get("image_style") or "").strip():
+        warnings.append('script.image_style is deprecated: pick "style" from the presets and drop style words '
+                        "from the image prompts")
 
     scenes = doc.get("scenes")
     lo, hi = fmt.min_scenes, fmt.max_scenes
@@ -459,7 +474,7 @@ def validate_script(doc: Any, fmt: FormatSpec, fact_ids: set[str], *, rate_perce
             for phrase in emphasis:
                 if phrase.lower() not in lowered:
                     errors.append(f"{where}.emphasis {phrase!r} does not occur in the narration")
-        _validate_visual(scene.get("visual"), where, fmt, errors, warnings)
+        _validate_visual(scene.get("visual"), where, fmt, errors, warnings, lint_style=not legacy_style)
         for field, text in _shown_texts(scene) if accented else []:
             pair = accentless_pair(text, accented)
             if pair:

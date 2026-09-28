@@ -12,7 +12,8 @@ import datetime as dt
 import json
 
 from .formats import FormatSpec
-from .jobs import VN_TZ, JobState, image_prompt, reviews, script_review_sha, submit_steps
+from .jobs import VN_TZ, JobState, image_prompt, reviews, script_review_sha, script_style, submit_steps
+from .styles import STYLE_PRESETS, preset
 from .paths import studio_cmd
 from .schema import script_fact_refs
 from .textutil import SYLLABLES_PER_SECOND
@@ -45,7 +46,7 @@ EXAMPLE_SCRIPT = {
     "title": "Vì sao chúng ta hay trì hoãn?",
     "format": "short",
     "theme": "midnight",
-    "image_style": "cinematic editorial illustration, soft volumetric light, muted teal and amber palette",
+    "style": "clay3d",
     "music": "auto",
     "scenes": [
         {"id": "s1", "role": "hook", "narration": "Bạn trì hoãn không phải vì lười.",
@@ -72,7 +73,7 @@ EXAMPLE_SCRIPT = {
          "on_screen": "Nhẹ nhõm = phần thưởng", "emphasis": ["nhẹ nhõm"],
          "visual": {"kind": "ai_image", "motion": "zoom_out",
                     "prompt": "a person exhaling with relief on a sofa while a pile of paperwork looms in "
-                              "the background, warm lamp light, no text"},
+                              "the background, no text"},
          "fact_ids": ["F1"]},
         {"id": "s5", "role": "body", "narration": "Vậy chữa thế nào? Hãy thử ba bước nhỏ.",
          "visual": {"kind": "card", "card": {"layout": "steps", "title": "3 bước gỡ trì hoãn",
@@ -85,14 +86,14 @@ EXAMPLE_SCRIPT = {
          "on_screen": "Sợ sai? Chán? Quá tải?",
          "visual": {"kind": "ai_image", "motion": "pan_left",
                     "prompt": "three translucent masks floating above a desk, each showing a different "
-                              "emotion, soft studio light, no text"},
+                              "emotion, no text"},
          "fact_ids": ["F1"]},
         {"id": "s7", "role": "body",
          "narration": "Bước hai, chia việc thành bước năm phút. Bước ba, cứ bắt đầu, chưa cần làm hay.",
          "on_screen": "Bắt đầu nhỏ thôi",
          "visual": {"kind": "ai_image", "motion": "pan_up",
                     "prompt": "a hand placing the first small domino in a long line of dominoes, "
-                              "shallow depth of field, no text"}},
+                              "close-up, no text"}},
         {"id": "s8", "role": "cta", "narration": "Lưu video này lại cho lần trì hoãn tới nhé.",
          "on_screen": "Lưu lại cho lần sau",
          "visual": {"kind": "ai_image", "motion": "zoom_in",
@@ -145,7 +146,8 @@ Craft rules (these decide whether people keep watching):
 - The Vietnamese voice reads every word with Vietnamese spelling: raw "AI" sounds like "ai" (who), "web" like "ốp". Words it already knows: {lexicon}. For ANY other foreign word, name or acronym, add "tts_text" to that scene: the whole narration as it should be spoken, with the foreign words respelled as Vietnamese syllables ("CEO" -> "xi i âu", "Netflix" -> "nét phờ lích"). Captions keep showing "narration". Submit rejects a scene whose spoken text still has a foreign word.
 - on_screen is an optional headline (max 2 lines) that ADDS a keyword, number or question - never a copy of the narration. Leave it empty on card scenes (the card is the text).
 - Deliver the payoff before the end. The last scene has role "cta": one concrete ask (save, follow, or answer a specific question in the comments).
-- Visuals: ai_image = English prompt describing subject, setting, light and mood, ALWAYS ending with "no text"; card = info-dense beats (stat, list, steps, compare, quote, code, title); screenshot = public URL, only for tutorials about a real website or tool. For a 45 s short about 5-7 ai_image and 2-4 cards works well; do not put two cards back to back.
+- Style: pick "style" ONCE for the whole video: {styles}. The studio adds its wording to every picture, so an ai_image prompt describes only the subject, action, setting and framing - never the medium, palette or lighting ("cinematic", "illustration", "3D render", "photorealistic", "neon glow", "golden hour", "pastel"...). Submit rejects a prompt that carries its own style.
+- Visuals: ai_image = English prompt describing the subject, action, setting and framing, ALWAYS ending with "no text"; card = info-dense beats (stat, list, steps, compare, quote, code, title); screenshot = public URL, only for tutorials about a real website or tool. For a 45 s short about 5-7 ai_image and 2-4 cards works well; do not put two cards back to back.
 - Image models cannot write: a picture whose subject is writing (a map with labels, a phone showing an app, street signs, a page of text) comes back with garbled pseudo-text and gets re-rolled or rejected. Show such things from a distance, blurred, or as a metaphor - and put the real words on a card or a screenshot instead.
 - No emoji anywhere in narration, on_screen or cards (the video fonts cannot draw them). Emoji are fine in social captions.
 - Cards and on_screen are written in Vietnamese with every accent, exactly like the narration ("Lịch sử clipboard", never "Lich su clipboard"): the video fonts draw every Vietnamese letter.
@@ -164,7 +166,8 @@ def emit_script(state: JobState, revise: bool) -> str:
         f"Voice: {meta.get('voice')} at {rate:+d}%. Audience: Vietnamese viewers on TikTok, Facebook Reels, YouTube Shorts.",
         f"Today is {dt.datetime.now(VN_TZ):%Y-%m-%d}; prefer sources from the last two years for anything that changes fast.",
         "",
-        CRAFT_RULES.format(lexicon=", ".join(sorted(set(VI_LEXICON) | VI_KNOWN_LOANWORDS, key=str.lower))),
+        CRAFT_RULES.format(lexicon=", ".join(sorted(set(VI_LEXICON) | VI_KNOWN_LOANWORDS, key=str.lower)),
+                           styles="; ".join(f"{k} ({v['reviewer']})" for k, v in STYLE_PRESETS.items())),
     ]
     if revise:
         parts += ["", "## REVISION - fix these, keep everything that already works"]
@@ -274,6 +277,8 @@ def emit_review_video(state: JobState) -> str:
     qa = read_json(state.paths.qa) or {}
     manifest = read_json(state.paths.manifest) or {}
     sheet = qa.get("contact_sheet") or str(state.paths.contact)
+    spec = preset(script_style(state))
+    style_line = spec["reviewer"] if spec else "one consistent look across scenes"
     lines = [f"# Video review - job {state.meta['id']} (master sha {manifest.get('master_sha')})",
              f"Duration {qa.get('duration')}s, {qa.get('resolution')} @ {qa.get('fps')} fps, "
              f"loudness {qa.get('loudness_lufs')} LUFS, music: {qa.get('music')}, transition sounds: {qa.get('sfx', 0)}",
@@ -294,7 +299,7 @@ def emit_review_video(state: JobState) -> str:
             lines.append(f"    headline: {scene['on_screen']}")
         kind = scene["visual"]["kind"]
         lines.append(f"    visual: {kind}" + (f" - {scene['visual'].get('prompt', '')[:120]}" if kind == "ai_image" else ""))
-    reads = [(sheet, contact_sheet_prompt())] + [(frames[s["id"]], frame_prompt(s)) for s in state.script["scenes"]]
+    reads = [(sheet, contact_sheet_prompt(style_line))] + [(frames[s["id"]], frame_prompt(s)) for s in state.script["scenes"]]
     lines += ["",
               f"## READ - make all {len(reads)} read_image calls below in ONE turn",
               "They run in parallel, so one turn costs about as much as one picture. The whole review must "
@@ -307,7 +312,9 @@ def emit_review_video(state: JobState) -> str:
               "readable against the picture. Captions appear a few words at a time in sync with the voice, so a frame "
               "shows only part of the sentence - that is by design, not truncation.",
               "2. Pictures: match what the narration says; fill the whole frame (no borders, blurred bands or visible "
-              "seams); no garbled pseudo-text, extra fingers, warped faces or logos; consistent style across scenes.",
+              "seams); no garbled pseudo-text, extra fingers, warped faces or logos; every ai_image matches the "
+              f"video's style ({style_line}). A mismatch in one scene is a visual issue on that scene; a mix across "
+              "the video is a visual issue on scene \"global\".",
               "3. Cards: nothing overflowing, nothing clipped, numbers match the script.",
               "4. Would you stop scrolling on the first frame? Does the last frame carry the CTA?",
               "Facts are NOT part of this review: they were checked against their sources at the script stage. "
@@ -349,11 +356,11 @@ def video_review_example(scene_ids: list[str]) -> dict:
 # So every frame is read, all in one turn: read_image is read-only, and the agent loop
 # runs read-only calls of one turn in parallel.
 
-def contact_sheet_prompt() -> str:
+def contact_sheet_prompt(style_line: str = "one consistent look across scenes") -> str:
     """The sheet answers what single frames cannot: does it look like one video."""
     return ("Each labelled tile (s1, s2, ...) is one frame of a vertical social video; the grid itself is not "
             "part of the video. Do the scenes look like one consistent video (style, colours, typography)? "
-            "Name any tile that stands out as wrong, and say why.")
+            f"The pictures should all be: {style_line}. Name any tile that stands out as wrong, and say why.")
 
 
 def frame_prompt(scene: dict) -> str:
@@ -366,5 +373,5 @@ def frame_prompt(scene: dict) -> str:
 
 
 def assets_help(state: JobState) -> list[str]:
-    return [image_prompt(s, state.script, state.fmt) for s in state.script["scenes"]
+    return [image_prompt(s, state.script, state.fmt, script_style(state)) for s in state.script["scenes"]
             if s["visual"]["kind"] == "ai_image"]

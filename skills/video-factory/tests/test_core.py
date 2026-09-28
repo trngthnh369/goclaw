@@ -636,6 +636,149 @@ class FlowTests(unittest.TestCase):
         self.assertIn("STAGE_RESULT: script_revise DONE", self._next(job)["delegate"]["task"])
 
 
+    # ------------------------------------------------------------ style presets
+
+    def _write_review(self, paths, issues: list[dict], *, human: bool) -> None:
+        from vfcore.util import write_json_numbered
+        manifest = read_json(paths.manifest)
+        doc = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE", "issues": issues,
+               "checked_scenes": [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"]],
+               "_target_sha": manifest["master_sha"], "_submitted_at": "2026-09-28T00:00:00Z"}
+        if human:
+            doc["_human"] = True
+        write_json_numbered(paths.reviews, "video", len(jobs.reviews(paths, "video")) + 1, doc)
+
+    def test_style_precedence_override_then_script_then_job_default(self):
+        job, paths = self._job_at_video_review()
+        state = jobs.load_state(paths)
+        self.assertEqual(jobs.script_style(state), "clay3d")                 # the script's choice
+        state.script.pop("style")
+        state.meta["style"] = "flat"
+        self.assertEqual(jobs.script_style(state), "flat")                   # the job default
+        state.meta["overrides"] = {"style": "cinematic_photo"}
+        self.assertEqual(jobs.script_style(state), "cinematic_photo")        # a person's override
+
+    def test_style_change_rerolls_every_picture_but_no_card(self):
+        job, paths = self._job_at_video_review()
+        state = jobs.load_state(paths)
+        self.assertEqual(jobs.missing_images(state), [])
+        meta = jobs.load_meta(paths)
+        meta["overrides"] = {"style": "flat"}
+        jobs.save_meta(paths, meta)
+        state = jobs.load_state(paths)
+        todo = [item["scene"] for item in jobs.missing_images(state)]
+        ai = [s["id"] for s in state.script["scenes"] if s["visual"]["kind"] == "ai_image"]
+        self.assertEqual(todo, ai)
+        self.assertTrue(all(item["prompt"].startswith("Flat vector illustration")
+                            for item in jobs.missing_images(state)))
+        before = jobs.script_review_sha(state.research, state.script)
+        other = copy.deepcopy(state.script) | {"style": "cinematic_photo"}
+        self.assertEqual(jobs.script_review_sha(state.research, other), before)
+
+    def test_set_style_needs_a_persons_reply(self):
+        job, paths = self._job_at_video_review()
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "flat")
+        self.assertEqual(code, 1, text)
+        self.assertIn("no run receipt", text)
+        self.assertNotIn("style", jobs.load_meta(paths).get("overrides") or {})
+
+    def test_set_style_by_a_person_after_a_model_revise_is_not_a_model_revision(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "s2", "severity": "major", "type": "visual",
+                                    "problem": "odd", "fix": "redo"}], human=False)
+        self._as_person(job, paths, "làm chân thực hơn")
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "cinematic_photo")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(jobs.load_meta(paths)["overrides"]["style"], "cinematic_photo")
+        self.assertTrue(jobs.reviews(paths, "video")[-1].get("_human"))
+        jobs.note_render(paths, "f" * 16)
+        self.assertEqual(jobs.load_meta(paths)["revisions"]["video"], 0)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "cinematic_photo")
+        self.assertEqual(code, 1, text)
+        self.assertIn("already uses", text)
+
+    def test_global_visual_issue_from_a_person_offers_set_style(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "global", "severity": "blocker", "type": "visual",
+                                    "problem": "Human feedback: chân thực hơn", "fix": "chân thực hơn"}], human=True)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertIn("--style <preset>", " ".join(action["commands"]))
+        self.assertIn("cinematic_photo", action["styles"])
+        self.assertTrue(action["scenes"])
+
+    def test_global_visual_issue_from_the_model_rerolls_every_picture(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "global", "severity": "major", "type": "visual",
+                                    "problem": "styles differ", "fix": "one style"}], human=False)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertNotIn("--style", " ".join(action["commands"]))
+        ai = [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"] if s["visual"]["kind"] == "ai_image"]
+        self.assertEqual(action["scenes"], sorted(ai))
+
+    def test_legacy_script_keeps_its_prompts_and_is_not_linted(self):
+        legacy = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        legacy.pop("style")
+        legacy["image_style"] = "cinematic editorial illustration, muted teal palette"
+        legacy["scenes"][0]["visual"]["prompt"] = "a cinematic photorealistic office at night, no text"
+        errors, warnings = validate_script(legacy, SHORT, {"F1", "F2"}, legacy_style=True)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("image_style is deprecated" in w for w in warnings), warnings)
+        prompt = jobs.image_prompt(legacy["scenes"][0], legacy, SHORT)
+        self.assertTrue(prompt.startswith("a cinematic photorealistic office at night"))
+        self.assertIn("muted teal palette", prompt)
+        errors, _ = validate_script(legacy, SHORT, {"F1", "F2"})     # a new job must pick a style
+        self.assertTrue(any("script.style must be one of" in e for e in errors), errors)
+
+    def test_style_change_after_a_paste_back_does_not_stack_two_presets(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        scene = doc["scenes"][0]
+        scene["visual"]["prompt"] = jobs.image_prompt(scene, doc, SHORT)          # pasted back under clay3d
+        flat = jobs.image_prompt(scene, doc, SHORT, "flat")
+        self.assertTrue(flat.startswith("Flat vector illustration"))
+        self.assertNotIn("clay", flat.lower())
+        self.assertEqual(flat.count("vertical 9:16 full-bleed"), 1)
+
+    def test_set_style_answers_an_escalated_video(self):
+        job, paths = self._job_at_video_review()
+        meta = jobs.load_meta(paths)
+        meta["status"] = "escalated"
+        meta["escalation_ref"] = f"video-{read_json(paths.manifest)['master_sha']}-1-abcd1234"
+        jobs.save_meta(paths, meta)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--rate", "10")
+        self.assertEqual(code, 1, text)                                            # only a style may answer it
+        self._as_person(job, paths, "đổi sang hoạt hình phẳng")
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "flat")
+        self.assertEqual(code, 0, text)
+        meta = jobs.load_meta(paths)
+        self.assertEqual(meta["status"], "active")
+        self.assertNotIn("escalation_ref", meta)
+        self.assertEqual(meta["overrides"]["style"], "flat")
+
+    def test_style_lint_rejects_style_words_but_not_guard_words(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][0]["visual"]["prompt"] = "a cinematic shot of a worker at a desk, golden hour, no text"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("sets its own style (cinematic, golden hour)" in e for e in errors), errors)
+        for ok in ("a potter shaping a clay pot on a wheel, no text", "a cyclist on a flat road at dawn, no text",
+                   "a 3D printer building a small gear, no text", "a neon sign above a noodle stall, no text"):
+            doc["scenes"][0]["visual"]["prompt"] = ok
+            errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+            self.assertEqual(errors, [], ok)
+
+    def test_pasted_back_prompt_passes_the_lint_and_keeps_its_hash(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        scene = doc["scenes"][0]
+        printed = jobs.image_prompt(scene, doc, SHORT)
+        self.assertTrue(printed.startswith("Soft 3D clay-style illustration"))
+        scene["visual"]["prompt"] = printed
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertEqual(errors, [])
+        self.assertEqual(jobs.image_prompt(scene, doc, SHORT), printed)
+        self.assertEqual(printed.count("Soft 3D clay-style illustration"), 1)
+
 class PronunciationTests(unittest.TestCase):
     def test_lexicon_respells_known_terms_but_never_the_word_ai(self):
         spoken = tts.spoken_text("Ai cũng dùng AI, ChatGPT và GPT-5 trên web.", None, tts.VI_LEXICON)

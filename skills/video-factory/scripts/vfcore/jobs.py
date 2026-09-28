@@ -24,6 +24,7 @@ from typing import Any
 from . import RENDERER_VERSION
 from .formats import FormatSpec, get_format
 from .paths import JobPaths, Studio, studio_cmd
+from .styles import DEFAULT_STYLE, NO_TEXT, ORIENTATION, STYLE_PRESETS, is_legacy_style, preset, scene_core
 from .schema import (script_fact_refs, script_scene_ids, validate_research,
                      validate_review, validate_script)
 from .textutil import slugify
@@ -47,7 +48,8 @@ def new_job_id(topic: str, now: dt.datetime | None = None) -> str:
 
 
 def create_job(studio: Studio, *, topic: str, brief: str, fmt: str, voice: str, rate: int,
-               source: str, requested_by: str, theme: str | None = None) -> JobPaths:
+               source: str, requested_by: str, theme: str | None = None,
+               style: str | None = None) -> JobPaths:
     get_format(fmt)
     job_id = new_job_id(topic)
     paths = studio.job(job_id)
@@ -66,6 +68,7 @@ def create_job(studio: Studio, *, topic: str, brief: str, fmt: str, voice: str, 
         "voice": voice,
         "rate": rate,
         "theme": theme,
+        "style": style if style in STYLE_PRESETS else None,
         "source": source,
         "requested_by": requested_by,
         "status": "active",
@@ -98,7 +101,7 @@ def script_review_sha(research: Any, script: Any) -> str:
     """Hash of what the fact-check covers: everything except image prompts/motion."""
     stripped = copy.deepcopy(script) if isinstance(script, dict) else script
     if isinstance(stripped, dict):
-        for key in ("image_style", "voice", "rate", "theme", "music", "music_mood", "sfx"):   # presentation
+        for key in ("image_style", "style", "voice", "rate", "theme", "music", "music_mood", "sfx"):   # presentation
             stripped.pop(key, None)
         for scene in stripped.get("scenes", []):
             if isinstance(scene, dict) and isinstance(scene.get("visual"), dict):
@@ -109,8 +112,11 @@ def script_review_sha(research: Any, script: Any) -> str:
     return sha256_text(canonical_json({"research": research, "script": stripped}))[:16]
 
 
-def image_prompt(scene: dict, script: dict, fmt: FormatSpec) -> str:
+def image_prompt(scene: dict, script: dict, fmt: FormatSpec, style: str | None = None) -> str:
     """The exact prompt sent to create_image for an ai_image scene.
+
+    `style` is the video's effective preset (script_style); without one, the
+    script's own preset key, else a legacy script's image_style text.
 
     The orientation hint asks for a full-bleed picture. It used to ask for "calm
     empty areas at top and bottom" to keep room for text, and the image model drew
@@ -118,16 +124,18 @@ def image_prompt(scene: dict, script: dict, fmt: FormatSpec) -> str:
     it, on every picture of the first live run (2026-09-24). The headline and
     captions carry their own box and outline, so they need no empty background.
     """
-    orientation = {"short": "vertical 9:16 full-bleed composition filling the whole frame edge to edge, "
-                            "main subject in the centre, one continuous scene from top to bottom, no borders",
-                   "long": "wide 16:9 full-bleed composition filling the whole frame, subject off-centre, no borders",
-                   "square": "square 1:1 full-bleed composition filling the whole frame, subject centred, no borders"}[fmt.name]
-    style = (script.get("image_style") or "").strip().rstrip(".")
+    orientation = ORIENTATION[fmt.name]
+    spec = preset(style if style is not None else script.get("style"))
     base = scene["visual"]["prompt"].strip().rstrip(".")
+    if spec:
+        # The preset goes first so it sets the look before the subject. A pasted-back
+        # prompt is reduced to the scene's own words first, whichever preset printed
+        # it, so it reprints identically and a later style change cannot stack two.
+        return ", ".join([spec["prefix"], scene_core(base), spec["suffix"], orientation, NO_TEXT])
+    style_text = (script.get("image_style") or "").strip().rstrip(".")
     # A director revising a picture has pasted the whole printed prompt back in,
     # which doubled the style and orientation text; add only what is missing.
-    suffix = [part for part in (style, orientation, "no text, no letters, no captions, no logos, no watermark")
-              if part and part.lower() not in base.lower()]
+    suffix = [part for part in (style_text, orientation, NO_TEXT) if part and part.lower() not in base.lower()]
     return ", ".join([base, *suffix])
 
 
@@ -170,7 +178,8 @@ def check_script(state: "JobState", doc: Any) -> tuple[list[str], list[str]]:
     fact_ids = {f.get("id") for f in (state.research or {}).get("facts", []) if isinstance(f, dict)}
     probe = JobState(paths=state.paths, meta=state.meta, fmt=state.fmt, research=state.research, script=doc)
     return validate_script(doc, state.fmt, fact_ids, rate_percent=script_rate(probe),
-                           voice=script_voice(probe), studio_lexicon=studio_lexicon(state.paths))
+                           voice=script_voice(probe), studio_lexicon=studio_lexicon(state.paths),
+                           legacy_style=isinstance(doc, dict) and is_legacy_style(doc, state.meta))
 
 
 def load_state(paths: JobPaths) -> JobState:
@@ -208,6 +217,20 @@ def script_voice(state: JobState) -> str:
             or state.meta.get("voice") or "vi-VN-HoaiMyNeural")
 
 
+def script_style(state: JobState) -> str | None:
+    """The video's preset: a person's override, the script's choice, the job default.
+
+    None for a legacy script (its own image_style text) that nobody overrode.
+    """
+    script = state.script if isinstance(state.script, dict) else {}
+    chosen = overrides(state).get("style") or script.get("style")
+    if chosen in STYLE_PRESETS:
+        return chosen
+    if is_legacy_style(script, state.meta):
+        return None
+    return state.meta.get("style") if state.meta.get("style") in STYLE_PRESETS else DEFAULT_STYLE
+
+
 def script_theme(state: JobState, default: str) -> str:
     return (overrides(state).get("theme") or (state.script or {}).get("theme")
             or state.meta.get("theme") or default)
@@ -240,7 +263,7 @@ def missing_images(state: JobState) -> list[dict]:
     for scene in state.script.get("scenes", []):
         if scene.get("visual", {}).get("kind") != "ai_image":
             continue
-        prompt = image_prompt(scene, state.script, state.fmt)
+        prompt = image_prompt(scene, state.script, state.fmt, script_style(state))
         record = asset_record(state.paths, scene["id"])
         file_ok = record and (state.paths.assets / record.get("file", "")).exists()
         if not file_ok or record.get("prompt_sha") != prompt_sha(prompt):
@@ -410,6 +433,25 @@ def next_action(studio: Studio, paths: JobPaths, render_config: dict) -> dict:
             return {**base, "stage": "script_revise", "owner": "vf-scriptwriter", "action": "delegate",
                     "delegate": _delegate("vf-scriptwriter", task), "video_revision": True}
         scenes = sorted({i.get("scene") for i in issues if i.get("scene") != "global"})
+        if any(i.get("scene") == "global" for i in issues):
+            # The style is per video: a whole-video complaint re-rolls every picture,
+            # never an empty scene list. Only a person may change the preset (set
+            # --style checks the gateway receipt); a model review re-rolls under the
+            # current one, and that render counts toward MAX_VIDEO_REVISIONS.
+            ai_scenes = [s["id"] for s in state.script.get("scenes", [])
+                         if s.get("visual", {}).get("kind") == "ai_image"]
+            if vreview.get("_human"):
+                return {**base, "stage": "fix_visuals", "owner": "vf-director", "action": "run",
+                        "say": "The person wants the whole video to look different. If they ask for another look "
+                               "(more realistic, cartoon, 3D...), run set --style with the matching preset; if they "
+                               "want better pictures in the same look, redo every scene listed. Never redo or "
+                               "revise one scene to change the style.",
+                        "issues": issues, "current_style": script_style(state),
+                        "styles": {k: v["label_vi"] for k, v in STYLE_PRESETS.items()},
+                        "commands": [f"{cmd} set --job {job_id} --style <preset>",
+                                     f"{cmd} redo --job {job_id} --scene <id>"],
+                        "scenes": sorted(set(scenes) | set(ai_scenes)), "then": f"{cmd} next --job {job_id}"}
+            scenes = sorted(set(scenes) | set(ai_scenes))
         return {**base, "stage": "fix_visuals", "owner": "vf-director", "action": "run",
                 "say": "The video review wants new pictures. For each scene below, either re-roll the image "
                        "(redo) or rewrite its prompt (revise-visual), then continue.",
@@ -485,6 +527,8 @@ def _human_decision_commands(paths: JobPaths, kind: str) -> dict[str, str]:
     return {
         "continue anyway": f"{cmd} override --job {job} --stage {kind}   (the gateway supplies the person's words)",
         "give direction": direction,
+        **({"another look": f"{cmd} set --job {job} --style <preset>   (re-rolls every picture; presets: "
+                            f"{', '.join(STYLE_PRESETS)})"} if kind == "video" else {}),
         "cancel": f"{cmd} cancel --job {job} --reason \"<the human's words>\"",
     }
 

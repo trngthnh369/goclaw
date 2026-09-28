@@ -24,7 +24,7 @@ Never write into the job folder itself; `submit` is the only way in.
 - Pay the promise off before the end; the last scene is one concrete call to action.
 - `on_screen` adds a keyword, a number or a question - it never repeats the narration. Leave it empty on card scenes.
 - Cards carry information-dense beats (a number, a list, steps, a comparison, a quote, code). Images carry mood and metaphor. Alternate them.
-- Image prompts are in English and describe subject, setting, light and mood; they end with "no text". No real people's likeness, no brand logos, no copyrighted characters.
+- Pick `style` once for the whole video from the presets the brief lists. Image prompts are in English and describe only the subject, action, setting and framing; they end with "no text". Never write the medium, palette or lighting ("cinematic", "illustration", "3D", "neon glow", "golden hour"): the studio adds the style, and submit rejects a prompt that sets its own. No real people's likeness, no brand logos, no copyrighted characters.
 
 ## How it will sound
 

@@ -42,6 +42,7 @@ from vfcore.audio import DEFAULT_SFX_DB  # noqa: E402
 from vfcore.formats import FORMATS  # noqa: E402
 from vfcore.paths import CDP_RENDER_JS, FONTS_DIR, JobPaths, Studio, default_workspace, studio_cmd  # noqa: E402
 from vfcore.schema import MOTIONS, SFX_MODES, validate_research  # noqa: E402
+from vfcore.styles import DEFAULT_STYLE, STYLE_PRESETS  # noqa: E402
 from vfcore.util import (StudioError, append_ndjson, read_json, sha256_file, utc_now,  # noqa: E402
                          write_json, write_json_numbered)
 
@@ -49,7 +50,7 @@ DEFAULT_CONFIG = {
     "schema": "vf.studio.v1",
     "brand": {"handle": "", "show": False},
     "defaults": {"format": "short", "voice": "vi-VN-HoaiMyNeural", "rate": 5, "theme": "midnight",
-                 "music": "auto", "sfx": "auto"},
+                 "music": "auto", "sfx": "auto", "style": DEFAULT_STYLE},
     "music": {"below_voice_lu": 12},
     "sfx": {"volume_db": DEFAULT_SFX_DB},
     "lexicon": {},
@@ -214,7 +215,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     d = cfg["defaults"]
     paths = jobs.create_job(studio, topic=args.topic, brief=args.brief or "", fmt=args.format or d["format"],
                             voice=args.voice or d["voice"], rate=args.rate if args.rate is not None else d["rate"],
-                            source=args.source, requested_by=args.by or "", theme=args.theme)
+                            source=args.source, requested_by=args.by or "", theme=args.theme,
+                            style=d.get("style"))
     metric(studio, job=paths.job_id, event="created", source=args.source)
     out(f"CREATED {paths.job_id}")
     out(f"NEXT: {studio_cmd()} next --job {paths.job_id}")
@@ -382,7 +384,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
         if old.suffix.lower() in IMAGE_EXTS:
             old.unlink()
     shutil.copyfile(src, dest)
-    prompt = jobs.image_prompt(scene, state.script, state.fmt)
+    prompt = jobs.image_prompt(scene, state.script, state.fmt, jobs.script_style(state))
     write_json(paths.assets / f"{args.scene}.json", {
         "file": dest.name, "sha256": sha256_file(dest)[:16], "prompt_sha": jobs.prompt_sha(prompt),
         "source": str(src), "width": width, "height": height, "attached_at": utc_now()})
@@ -637,10 +639,15 @@ def cmd_feedback(args: argparse.Namespace) -> int:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    """Job-level settings a human may change after seeing a cut (voice, speed, theme)."""
+    """Job-level settings a human may change after seeing a cut (voice, speed, theme, style)."""
     studio = studio_from(args)
-    paths = job_paths(studio, args.job, open_only=True)
+    paths = job_paths(studio, args.job)
     meta = jobs.load_meta(paths)
+    status = meta.get("status")
+    # A style change answers an escalated review (it is the person's own direction,
+    # like feedback); the other settings wait until the job is open again.
+    if status in ("cancelled", "published") or (status == "escalated" and not args.style):
+        raise StudioError(f"job {args.job} is {status}; nothing more can change in it")
     changed = {}
     if args.voice:
         if not re.fullmatch(r"[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural", args.voice):
@@ -655,10 +662,32 @@ def cmd_set(args: argparse.Namespace) -> int:
         if args.theme not in THEMES:
             raise StudioError(f"theme must be one of {', '.join(THEMES)}")
         changed["theme"] = args.theme
+    quote = ""
+    if args.style:
+        if args.style not in STYLE_PRESETS:
+            raise StudioError(f"style must be one of {', '.join(STYLE_PRESETS)}")
+        if args.style == jobs.script_style(jobs.load_state(paths)):
+            raise StudioError(f"the video already uses {args.style}; to get new pictures in the same style, "
+                              f"run {studio_cmd()} redo for each scene")
+        # A style change re-rolls every picture and ends an escalation, so, like
+        # feedback, only a person's reply to this job's message may make it.
+        ref = meta.get("escalation_ref") if status == "escalated" else None
+        if status == "escalated" and not jobs.escalation_ref_ok(meta):
+            raise StudioError(f"no current escalation question; run {studio_cmd()} next --job {args.job} to send it again")
+        quote = human_reply_for(args.job, load_config(studio)["delivery"].get("channel", ""), ref)
+        changed["style"] = args.style
     if not changed:
-        raise StudioError("nothing to change: pass --voice, --rate or --theme")
+        raise StudioError("nothing to change: pass --voice, --rate, --theme or --style")
+    if quote and (read_json(paths.manifest) or {}).get("master_sha"):
+        # Recorded as the person's review of the current cut, so the re-render that
+        # follows never counts as a model revision (note_render) and the wait ends.
+        jobs.record_human_feedback(paths, "visual", "global", f"change the style to {changed['style']}", quote=quote)
+        meta = jobs.load_meta(paths)
     meta.setdefault("overrides", {}).update(changed)
-    if meta.get("status") == "awaiting_approval":
+    if meta.get("status") in ("awaiting_approval", "escalated") and "style" in changed:
+        meta["status"] = "active"
+        meta.pop("escalation_ref", None)
+    elif meta.get("status") == "awaiting_approval":
         meta["status"] = "active"
     jobs.log_event(paths, meta, "settings", **changed)
     out(f"OK {changed}; run: {studio_cmd()} next --job {args.job}")
@@ -724,7 +753,7 @@ def cmd_backlog(args: argparse.Namespace) -> int:
         d = cfg["defaults"]
         paths = jobs.create_job(studio, topic=item["topic"], brief=item.get("brief", ""),
                                 fmt=item.get("format") or d["format"], voice=d["voice"], rate=d["rate"],
-                                source=f"backlog:{item['id']}", requested_by="cron")
+                                source=f"backlog:{item['id']}", requested_by="cron", style=d.get("style"))
         backlog.mark(studio, item["id"], "taken", paths.job_id)
         metric(studio, job=paths.job_id, event="created", source=f"backlog:{item['id']}")
         out(f"CREATED {paths.job_id} from {item['id']}: {item['topic']}")
@@ -764,6 +793,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     key, _, value = (args.assign or "").partition("=")
     allowed = {"brand.handle", "brand.show", "defaults.format", "defaults.voice", "defaults.rate",
                "defaults.theme", "defaults.music", "music.below_voice_lu", "defaults.sfx", "sfx.volume_db",
+               "defaults.style",
                "delivery.channel", "delivery.target",
                "publish.facebook_reels.enabled"}
     if key not in allowed:
@@ -775,6 +805,8 @@ def cmd_config(args: argparse.Namespace) -> int:
         raise StudioError(f"format must be one of {', '.join(FORMATS)}")
     if key == "defaults.sfx" and value not in SFX_MODES:
         raise StudioError(f"defaults.sfx must be one of {', '.join(SFX_MODES)}")
+    if key == "defaults.style" and value not in STYLE_PRESETS:
+        raise StudioError(f"defaults.style must be one of {', '.join(STYLE_PRESETS)}")
     node = raw
     for part in parents:
         node = node.setdefault(part, {})
@@ -862,6 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--voice")
     p.add_argument("--rate", type=int)
     p.add_argument("--theme")
+    p.add_argument("--style")
     p = sub.add_parser("status")
     p.add_argument("--job", required=True)
     p = sub.add_parser("list")
