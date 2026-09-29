@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +87,8 @@ func (aq *AnnounceQueue) Enqueue(sessionKey string, item AnnounceQueueItem, meta
 	if !ok {
 		sq = &sessionQueue{meta: meta}
 		aq.queues[sessionKey] = sq
+	} else {
+		sq.meta = mergeAnnouncePrivilege(sq.meta, meta)
 	}
 
 	sq.items = append(sq.items, item)
@@ -227,4 +230,20 @@ func BuildReplyInstruction(roster SubagentRoster) string {
 		"(don't mention system/log/stats/session details or announce type), " +
 		"and do NOT copy the [System Message] block verbatim. " +
 		"Reply ONLY: NO_REPLY if this exact result was already delivered to the user."
+}
+
+// mergeAnnouncePrivilege keeps the batch meta of the first item but drops the
+// sender and role as soon as a later item came from a different sender or
+// role: one batched announce must not carry one user's permissions over
+// another user's results (#915). Once dropped they stay dropped.
+func mergeAnnouncePrivilege(batch, next AnnounceMetadata) AnnounceMetadata {
+	if batch.OriginSenderID == next.OriginSenderID && batch.OriginRole == next.OriginRole {
+		return batch
+	}
+	if batch.OriginSenderID != "" || batch.OriginRole != "" {
+		slog.Warn("security.subagent_announce.mixed_origin", "parent", batch.ParentAgent)
+	}
+	batch.OriginSenderID = ""
+	batch.OriginRole = ""
+	return batch
 }

@@ -25,6 +25,7 @@ type announceEntry struct {
 	MemberDisplayName string // display name (e.g. "Nhà Nghiên Cứu"), empty if not set
 	Content           string
 	Media             []agent.MediaResult
+	OriginUserID      string // user scope of the turn that created this entry's task
 	OriginSenderID    string // real user who created this entry's task (#915)
 	OriginRole        string // that user's RBAC role at task creation
 }
@@ -241,7 +242,7 @@ func buildTeamAnnounceRunRequest(r announceRouting, entries []announceEntry, con
 		ChatID:           r.OrigChatID,
 		PeerKind:         r.OrigPeerKind,
 		LocalKey:         r.OrigLocalKey,
-		UserID:           r.OriginUserID,
+		UserID:           announceBatchUserID(r, entries),
 		SenderID:         senderID,
 		Role:             role,
 		RunID:            fmt.Sprintf("teammate-announce-%s-%d", r.LeadAgent, len(entries)),
@@ -274,16 +275,53 @@ func announceSenderID(sender string) string {
 // all share one sender and role inherits them; otherwise the turn runs with no
 // sender, which denies group writes as before (#915).
 func announceBatchPrivilege(r announceRouting, entries []announceEntry) (senderID, role string) {
-	if len(entries) == 0 {
-		return "", ""
-	}
-	senderID, role = entries[0].OriginSenderID, entries[0].OriginRole
-	for _, e := range entries[1:] {
-		if e.OriginSenderID != senderID || e.OriginRole != role {
-			slog.Warn("security.team_announce.mixed_origin",
-				"session", r.LeadSessionKey, "team_id", r.TeamID, "batch_size", len(entries))
-			return "", ""
-		}
+	senderID, role, mixed := commonOriginPrivilege(len(entries), func(i int) (string, string) {
+		return entries[i].OriginSenderID, entries[i].OriginRole
+	})
+	if mixed {
+		slog.Warn("security.team_announce.mixed_origin",
+			"session", r.LeadSessionKey, "team_id", r.TeamID, "batch_size", len(entries))
 	}
 	return senderID, role
+}
+
+// commonOriginPrivilege returns the sender and role that all n batch items
+// share. When any item differs it returns two empty strings and mixed=true:
+// a lead turn over results from different users must not act with any one of
+// their permissions (#915).
+func commonOriginPrivilege(n int, at func(i int) (sender, role string)) (sender, role string, mixed bool) {
+	if n == 0 {
+		return "", "", false
+	}
+	sender, role = at(0)
+	for i := 1; i < n; i++ {
+		if s, r := at(i); s != sender || r != role {
+			return "", "", true
+		}
+	}
+	return sender, role, false
+}
+
+// announceBatchUserID picks the user scope (workspace, USER.md, memory) for the
+// lead's announce turn. A batch whose tasks all came from one user runs in that
+// user's scope. A batch mixing users in a group runs in the shared group scope,
+// so one user's private context is not loaded into a reply that summarizes
+// another user's results in the group.
+func announceBatchUserID(r announceRouting, entries []announceEntry) string {
+	uid := r.OriginUserID
+	for i, e := range entries {
+		if i == 0 {
+			if e.OriginUserID != "" {
+				uid = e.OriginUserID
+			}
+			continue
+		}
+		if e.OriginUserID != entries[0].OriginUserID {
+			if r.OrigPeerKind == string(sessions.PeerGroup) && r.OrigChatID != "" {
+				return fmt.Sprintf("group:%s:%s", r.OrigChannel, r.OrigChatID)
+			}
+			return r.OriginUserID
+		}
+	}
+	return uid
 }

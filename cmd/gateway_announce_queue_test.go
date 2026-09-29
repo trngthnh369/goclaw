@@ -89,3 +89,47 @@ func TestAnnounceSenderID_DropsInternalSenders(t *testing.T) {
 		}
 	}
 }
+
+func TestCommonOriginPrivilege(t *testing.T) {
+	pairs := func(p ...[2]string) func(int) (string, string) {
+		return func(i int) (string, string) { return p[i][0], p[i][1] }
+	}
+	cases := []struct {
+		name       string
+		items      [][2]string
+		wantSender string
+		wantRole   string
+		wantMixed  bool
+	}{
+		{"empty batch", nil, "", "", false},
+		{"single item", [][2]string{{"u1", "owner"}}, "u1", "owner", false},
+		{"all agree", [][2]string{{"u1", "owner"}, {"u1", "owner"}}, "u1", "owner", false},
+		{"sender differs", [][2]string{{"u1", "owner"}, {"u2", "owner"}}, "", "", true},
+		{"role differs", [][2]string{{"u1", "owner"}, {"u1", ""}}, "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, r, mixed := commonOriginPrivilege(len(tc.items), pairs(tc.items...))
+			if s != tc.wantSender || r != tc.wantRole || mixed != tc.wantMixed {
+				t.Errorf("got (%q, %q, %v), want (%q, %q, %v)", s, r, mixed, tc.wantSender, tc.wantRole, tc.wantMixed)
+			}
+		})
+	}
+}
+
+func TestAnnounceBatchUserID(t *testing.T) {
+	const alice = "guild:1487758328577921066:user:896694335670726676"
+	r := codexGroupRouting()
+	one := announceEntry{OriginUserID: alice}
+	other := announceEntry{OriginUserID: "guild:1487758328577921066:user:111"}
+
+	if got := announceBatchUserID(r, []announceEntry{one, one}); got != alice {
+		t.Errorf("single-user batch = %q, want %q", got, alice)
+	}
+	if got, want := announceBatchUserID(r, []announceEntry{one, other}), "group:codex-discord:1552179009540857876"; got != want {
+		t.Errorf("mixed-user group batch = %q, want the shared group scope %q", got, want)
+	}
+	if got := announceBatchUserID(r, []announceEntry{{}}); got != r.OriginUserID {
+		t.Errorf("entry without user = %q, want routing fallback %q", got, r.OriginUserID)
+	}
+}

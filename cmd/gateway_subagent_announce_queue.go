@@ -91,6 +91,10 @@ type subagentAnnounceEntry struct {
 	OutputTokens int64
 	Runtime      time.Duration
 	Iterations   int
+	// Real sender + RBAC role of the turn that spawned this subagent (#915).
+	// Per entry: one batch can hold results spawned by different users.
+	OriginSenderID string
+	OriginRole     string
 }
 
 // subagentAnnounceRouting holds shared routing info captured by the first enqueue.
@@ -104,8 +108,6 @@ type subagentAnnounceRouting struct {
 	OrigPeerKind     string
 	OrigLocalKey     string
 	UserID           string
-	SenderID         string // real acting sender (preserves permission attribution through re-ingress, #915)
-	Role             string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
 	ParentAgent      string
 	ParentTraceID    uuid.UUID
 	ParentRootSpanID uuid.UUID
@@ -168,6 +170,14 @@ func processSubagentAnnounceLoop(
 			fwdMedia = nil
 		}
 
+		senderID, role, mixed := commonOriginPrivilege(len(entries), func(i int) (string, string) {
+			return entries[i].OriginSenderID, entries[i].OriginRole
+		})
+		if mixed {
+			slog.Warn("security.subagent_announce.mixed_origin",
+				"session", r.SessionKey, "batch_size", len(entries))
+		}
+
 		req := agent.RunRequest{
 			Surface:          tools.SurfaceSubagent,
 			SessionKey:       r.SessionKey,
@@ -180,8 +190,8 @@ func processSubagentAnnounceLoop(
 			PeerKind:         r.OrigPeerKind,
 			LocalKey:         r.OrigLocalKey,
 			UserID:           r.UserID,
-			SenderID:         r.SenderID, // preserves real acting sender for permission checks (#915)
-			Role:             r.Role,     // preserves RBAC role for admin bypass in group writes (#915)
+			SenderID:         senderID, // real acting sender for permission checks (#915)
+			Role:             role,     // RBAC role for admin bypass in group writes (#915)
 			RunID:            fmt.Sprintf("subagent-announce-%s-%d", r.ParentAgent, len(entries)),
 			RunKind:          "announce",
 			HideInput:        true,

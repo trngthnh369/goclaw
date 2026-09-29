@@ -107,14 +107,13 @@ func handleSubagentAnnounce(
 		OutputTokens: outputToks,
 		Runtime:      time.Duration(runtimeMs) * time.Millisecond,
 		Iterations:   iterations,
+		// Preserve real acting sender + RBAC role from original turn so permission
+		// checks (e.g. write_file in group chat) attribute to the user and can
+		// bypass per-user grants for authenticated admins, not the synthetic
+		// "subagent:<id>" sender of the announce message itself (#915).
+		OriginSenderID: announceSenderID(msg.Metadata[tools.MetaOriginSenderID]),
+		OriginRole:     msg.Metadata[tools.MetaOriginRole],
 	}
-
-	// Preserve real acting sender + RBAC role from original turn so permission
-	// checks (e.g. write_file in group chat) attribute to the user and can
-	// bypass per-user grants for authenticated admins, not the synthetic
-	// "subagent:<id>" sender of the announce message itself (#915).
-	originSenderID := msg.Metadata[tools.MetaOriginSenderID]
-	originRole := msg.Metadata[tools.MetaOriginRole]
 
 	queueKey := fmt.Sprintf("%s:%s", msg.TenantID, sessionKey)
 	routing := subagentAnnounceRouting{
@@ -127,8 +126,6 @@ func handleSubagentAnnounce(
 		OrigPeerKind:     origPeerKind,
 		OrigLocalKey:     origLocalKey,
 		UserID:           announceUserID,
-		SenderID:         originSenderID,
-		Role:             originRole,
 		ParentAgent:      parentAgent,
 		ParentTraceID:    parentTraceID,
 		ParentRootSpanID: parentRootSpanID,
@@ -355,6 +352,7 @@ func handleTeammateMessage(
 			MemberDisplayName: inMeta[tools.MetaToAgentDisplay],
 			Content:           announceContent,
 			Media:             announceMedia,
+			OriginUserID:      inMeta[tools.MetaOriginUserID],
 			OriginSenderID:    announceSenderID(inMeta[tools.MetaOriginSenderID]),
 			OriginRole:        inMeta[tools.MetaOriginRole],
 		}
