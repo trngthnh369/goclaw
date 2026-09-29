@@ -83,7 +83,7 @@ func handleSubagentAnnounce(
 	// Group-scoped UserID for subagent announce (same logic as main lane).
 	announceUserID := msg.UserID
 	if origPeerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
-		announceUserID = fmt.Sprintf("group:%s:%s", origChannel, msg.ChatID)
+		announceUserID = groupScopeUserID(origChannel, msg.ChatID)
 	}
 
 	// Build announce entry from raw metadata (avoids double-formatting).
@@ -208,7 +208,7 @@ func handleTeammateMessage(
 
 	announceUserID := msg.UserID
 	if origPeerKind == string(sessions.PeerGroup) && origChatID != "" {
-		announceUserID = fmt.Sprintf("group:%s:%s", origChannel, origChatID)
+		announceUserID = groupScopeUserID(origChannel, origChatID)
 	}
 
 	// Preserve real acting sender + RBAC role through teammate dispatch so

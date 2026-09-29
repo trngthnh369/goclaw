@@ -175,7 +175,7 @@ func processSubagentAnnounceLoop(
 		})
 		if mixed {
 			slog.Warn("security.subagent_announce.mixed_origin",
-				"session", r.SessionKey, "batch_size", len(entries))
+				"session", r.SessionKey, "batch_size", len(entries), "layer", "loop")
 		}
 
 		req := agent.RunRequest{

@@ -88,7 +88,7 @@ func (aq *AnnounceQueue) Enqueue(sessionKey string, item AnnounceQueueItem, meta
 		sq = &sessionQueue{meta: meta}
 		aq.queues[sessionKey] = sq
 	} else {
-		sq.meta = mergeAnnouncePrivilege(sq.meta, meta)
+		sq.meta = mergeAnnouncePrivilege(sessionKey, sq.meta, meta)
 	}
 
 	sq.items = append(sq.items, item)
@@ -236,14 +236,23 @@ func BuildReplyInstruction(roster SubagentRoster) string {
 // sender and role as soon as a later item came from a different sender or
 // role: one batched announce must not carry one user's permissions over
 // another user's results (#915). Once dropped they stay dropped.
-func mergeAnnouncePrivilege(batch, next AnnounceMetadata) AnnounceMetadata {
-	if batch.OriginSenderID == next.OriginSenderID && batch.OriginRole == next.OriginRole {
+func mergeAnnouncePrivilege(sessionKey string, batch, next AnnounceMetadata) AnnounceMetadata {
+	if SenderIdentity(batch.OriginSenderID) == SenderIdentity(next.OriginSenderID) && batch.OriginRole == next.OriginRole {
 		return batch
 	}
 	if batch.OriginSenderID != "" || batch.OriginRole != "" {
-		slog.Warn("security.subagent_announce.mixed_origin", "parent", batch.ParentAgent)
+		slog.Warn("security.subagent_announce.mixed_origin",
+			"session", sessionKey, "parent", batch.ParentAgent, "layer", "queue")
 	}
 	batch.OriginSenderID = ""
 	batch.OriginRole = ""
 	return batch
+}
+
+// SenderIdentity returns the stable part of a channel sender ID. Channels may
+// send "id|display name"; the display part can change between messages of the
+// same user, so identity comparisons use the ID before the first "|".
+func SenderIdentity(senderID string) string {
+	id, _, _ := strings.Cut(senderID, "|")
+	return id
 }

@@ -95,7 +95,7 @@ func processNormalMessage(
 			userID = fmt.Sprintf("guild:%s:user:%s", guildID, msg.SenderID)
 		} else {
 			groupID := msg.ChatID
-			userID = fmt.Sprintf("group:%s:%s", msg.Channel, groupID)
+			userID = groupScopeUserID(msg.Channel, groupID)
 		}
 	}
 

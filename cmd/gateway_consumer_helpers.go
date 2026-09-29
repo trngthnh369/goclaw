@@ -205,3 +205,9 @@ func resolveSenderName(msg bus.InboundMessage) string {
 	}
 	return ""
 }
+
+// groupScopeUserID is the user scope shared by everyone in a group chat
+// ("group:{channel}:{chatID}"): context files, memory and workspace dir.
+func groupScopeUserID(channel, chatID string) string {
+	return fmt.Sprintf("group:%s:%s", channel, chatID)
+}

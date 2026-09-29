@@ -106,6 +106,7 @@ func TestCommonOriginPrivilege(t *testing.T) {
 		{"all agree", [][2]string{{"u1", "owner"}, {"u1", "owner"}}, "u1", "owner", false},
 		{"sender differs", [][2]string{{"u1", "owner"}, {"u2", "owner"}}, "", "", true},
 		{"role differs", [][2]string{{"u1", "owner"}, {"u1", ""}}, "", "", true},
+		{"same id, new display name", [][2]string{{"u1|Old", "owner"}, {"u1|New", "owner"}}, "u1|Old", "owner", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

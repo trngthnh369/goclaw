@@ -295,7 +295,7 @@ func commonOriginPrivilege(n int, at func(i int) (sender, role string)) (sender,
 	}
 	sender, role = at(0)
 	for i := 1; i < n; i++ {
-		if s, r := at(i); s != sender || r != role {
+		if s, r := at(i); tools.SenderIdentity(s) != tools.SenderIdentity(sender) || r != role {
 			return "", "", true
 		}
 	}
@@ -306,22 +306,25 @@ func commonOriginPrivilege(n int, at func(i int) (sender, role string)) (sender,
 // lead's announce turn. A batch whose tasks all came from one user runs in that
 // user's scope. A batch mixing users in a group runs in the shared group scope,
 // so one user's private context is not loaded into a reply that summarizes
-// another user's results in the group.
+// another user's results in the group. Outside groups a session belongs to one
+// user, so a mismatch there only means an entry predates origin_user_id and the
+// routing user is kept.
 func announceBatchUserID(r announceRouting, entries []announceEntry) string {
-	uid := r.OriginUserID
-	for i, e := range entries {
-		if i == 0 {
-			if e.OriginUserID != "" {
-				uid = e.OriginUserID
-			}
+	if len(entries) == 0 {
+		return r.OriginUserID
+	}
+	first := entries[0].OriginUserID
+	for _, e := range entries[1:] {
+		if e.OriginUserID == first {
 			continue
 		}
-		if e.OriginUserID != entries[0].OriginUserID {
-			if r.OrigPeerKind == string(sessions.PeerGroup) && r.OrigChatID != "" {
-				return fmt.Sprintf("group:%s:%s", r.OrigChannel, r.OrigChatID)
-			}
-			return r.OriginUserID
+		if r.OrigPeerKind == string(sessions.PeerGroup) && r.OrigChatID != "" {
+			return groupScopeUserID(r.OrigChannel, r.OrigChatID)
 		}
+		return r.OriginUserID
 	}
-	return uid
+	if first == "" {
+		return r.OriginUserID
+	}
+	return first
 }
