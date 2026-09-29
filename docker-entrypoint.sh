@@ -38,12 +38,14 @@ fi
 if [ "$(id -u)" = "0" ]; then
   for tool in ffmpeg ffprobe; do
     src="/usr/bin/$tool"
-    if [ -f "$src" ] && [ ! -L "$src" ] && [ "$(stat -c %u "$src")" = "0" ] \
-      && mkdir -p /usr/libexec/goclaw && chown root:root /usr/libexec/goclaw && chmod 0755 /usr/libexec/goclaw; then
+    [ -e "$src" ] || continue
+    if ! [ -f "$src" ] || [ -L "$src" ] || [ "$(stat -c %u "$src")" != "0" ]; then
+      echo "Warning: $src is not a root-owned regular file; Reels master mode stays off"
+    elif ! { mkdir -p /usr/libexec/goclaw && chown root:root /usr/libexec/goclaw && chmod 0755 /usr/libexec/goclaw; }; then
+      echo "Warning: cannot prepare /usr/libexec/goclaw; Reels master mode stays off"
+    else
       install -o root -g root -m 0111 "$src" "/usr/libexec/goclaw/$tool" || \
         echo "Warning: could not install the execute-only $tool"
-    elif [ -e "$src" ]; then
-      echo "Warning: $src is not a root-owned regular file; Reels master mode stays off"
     fi
   done
 fi

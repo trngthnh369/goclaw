@@ -126,13 +126,13 @@ func (t *MessageTool) postReel(ctx context.Context, channel, message string, for
 			err = checkReelsDraftScope(ctx, rec, caption, masterLines[0])
 		}
 		if err != nil {
+			slog.Warn("security.reels_master_draft_rejected", "reason", err.Error(), "review_sha256", approvedSHA)
 			// A posted draft is removed, so a second approval of the same message
 			// lands here: say it was published, never "re-package" (a duplicate).
 			if t.feedPostReserved(ctx, rc, channel, reelsTarget) {
 				return ErrorResult("this review message was already published or is being published; operator reconciliation is required")
 			}
 			// Swept, lost or not matching: refuse; never fall back to the review cut.
-			slog.Warn("security.reels_master_draft_rejected", "reason", err.Error(), "review_sha256", approvedSHA)
 			return ErrorResult("this review expired or does not match its record; re-package the video and send a new review message")
 		}
 		source, publishSHA, draftDir = "master", rec.MasterSHA256, dir

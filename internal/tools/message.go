@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -937,14 +938,15 @@ func (t *MessageTool) feedPostLedgerPath(ctx context.Context, rc *store.RunConte
 }
 
 // feedPostReserved reports whether this review message already has a ledger
-// entry (published, in flight or of unknown outcome).
+// entry (published, in flight or of unknown outcome). Only a definite "no
+// entry" answers false: an unreadable ledger must not invite a re-post.
 func (t *MessageTool) feedPostReserved(ctx context.Context, rc *store.RunContext, channel, target string) bool {
 	path, err := t.feedPostLedgerPath(ctx, rc, channel, target)
 	if err != nil {
-		return false
+		return true
 	}
 	_, err = os.Stat(path)
-	return err == nil
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 func (t *MessageTool) reserveFeedPost(
