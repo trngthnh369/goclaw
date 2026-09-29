@@ -1260,3 +1260,34 @@ func TestCodexBuildRequestBody_MidTurnUserWarningKeepsDynamicPromptAtTurnStart(t
 		t.Errorf("developer message moved from %d to %d after a mid-turn user warning", before, after)
 	}
 }
+
+func TestCodexBuildRequestBody_TruncationRetryKeepsDynamicPromptAtMarkedTurnStart(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\nper-turn context"
+	base := []Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+		{Role: "user", Content: "current question", TurnStart: true},
+	}
+	// Truncated tool call: the think stage appends an assistant message WITHOUT
+	// tool calls plus a user retry hint, mid-turn.
+	retried := append(append([]Message{}, base...),
+		Message{Role: "assistant", Content: "partial"},
+		Message{Role: "user", Content: "[System] Your output was truncated"},
+	)
+
+	devIndex := func(msgs []Message) int {
+		input := p.buildRequestBody(ChatRequest{Messages: msgs}, true)["input"].([]any)
+		for i, it := range input {
+			if it.(map[string]any)["role"] == "developer" {
+				return i
+			}
+		}
+		return -1
+	}
+
+	if got, want := devIndex(retried), devIndex(base); got != want || want != 2 {
+		t.Errorf("developer message at %d after a truncation retry, want %d (before the marked turn start)", got, want)
+	}
+}

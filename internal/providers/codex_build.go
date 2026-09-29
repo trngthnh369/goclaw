@@ -252,12 +252,17 @@ func moveDynamicPromptBeforeTurn(instructions string, input []any, turnAt int) (
 }
 
 // currentTurnStartIndex returns the index in msgs of the user message that
-// opens the current turn: the first user message after the last assistant
+// opens the current turn. The agent loop marks it with TurnStart; without the
+// mark (internal calls) it is the first user message after the last assistant
 // reply that made no tool calls (the end of the previous turn). User messages
-// added later in the turn (loop-detector warnings, messages injected while the
-// run is busy) sit after it and must not move the anchor. Returns -1 when
-// there is no user message to anchor on.
+// added later in the turn (retry hints, loop warnings, injected messages) must
+// not move the anchor. Returns -1 when there is no user message to anchor on.
 func currentTurnStartIndex(msgs []Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].TurnStart && msgs[i].Role == "user" {
+			return i
+		}
+	}
 	from := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) == 0 {

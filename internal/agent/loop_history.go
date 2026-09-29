@@ -295,8 +295,9 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 
 	// Current user message
 	messages = append(messages, providers.Message{
-		Role:    "user",
-		Content: userMessage,
+		Role:      "user",
+		Content:   userMessage,
+		TurnStart: true,
 	})
 
 	return messages, hadBootstrap

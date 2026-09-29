@@ -67,11 +67,10 @@ func (l *Loop) injectTeamTaskReminders(ctx context.Context, req *RunRequest, mes
 					// Merge reminder into the user message as a prefix tag.
 					// Previous approach injected [user]+[assistant]+[user] which caused
 					// LLMs to treat the assistant ack as "turn complete" → NO_REPLY (#266).
+					// Copy so the message keeps its other fields (TurnStart, media).
 					userMsg := messages[len(messages)-1]
-					messages[len(messages)-1] = providers.Message{
-						Role:    "user",
-						Content: "[Active team tasks]\n" + reminder + "\n[/Active team tasks]\n\n" + userMsg.Content,
-					}
+					userMsg.Content = "[Active team tasks]\n" + reminder + "\n[/Active team tasks]\n\n" + userMsg.Content
+					messages[len(messages)-1] = userMsg
 				}
 			}
 		}
@@ -92,10 +91,8 @@ func (l *Loop) injectTeamTaskReminders(ctx context.Context, req *RunRequest, mes
 					task.TaskNumber, task.Subject)
 				// Merge reminder into user message as prefix tag (#266).
 				userMsg := messages[len(messages)-1]
-				messages[len(messages)-1] = providers.Message{
-					Role:    "user",
-					Content: "[Task context]\n" + reminder + "\n[/Task context]\n\n" + userMsg.Content,
-				}
+				userMsg.Content = "[Task context]\n" + reminder + "\n[/Task context]\n\n" + userMsg.Content
+				messages[len(messages)-1] = userMsg
 			}
 		}
 	}
