@@ -1176,7 +1176,7 @@ func TestCodexProviderChatStreamSendsSessionIDHeaderFromCacheKey(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequestBody_DynamicPromptMovesBeforeCurrentTurn(t *testing.T) {
+func TestCodexBuildRequestBody_DynamicPromptLeadsInput(t *testing.T) {
 	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
 	system := "Stable persona and tools.\n\n" + CacheBoundaryMarker + "\n\n- User: Turti (ID: 1)\nCurrent date: 2026-09-28"
 
@@ -1204,11 +1204,11 @@ func TestCodexBuildRequestBody_DynamicPromptMovesBeforeCurrentTurn(t *testing.T)
 			roles = append(roles, m["type"].(string))
 		}
 	}
-	want := []string{"user", "assistant", "developer", "user", "function_call", "function_call_output"}
+	want := []string{"developer", "user", "assistant", "user", "function_call", "function_call_output"}
 	if strings.Join(roles, ",") != strings.Join(want, ",") {
 		t.Fatalf("input order = %v, want %v", roles, want)
 	}
-	dev := input[2].(map[string]any)["content"].(string)
+	dev := input[0].(map[string]any)["content"].(string)
 	if !strings.Contains(dev, "- User: Turti") || strings.Contains(dev, CacheBoundaryMarker) {
 		t.Errorf("developer content = %q, want the dynamic part without the marker", dev)
 	}
@@ -1229,65 +1229,42 @@ func TestCodexBuildRequestBody_NoBoundaryKeepsInstructions(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequestBody_MidTurnUserWarningKeepsDynamicPromptAtTurnStart(t *testing.T) {
+// The ChatGPT backend only reuses cache when a request extends an earlier one
+// exactly, so with an unchanged per-turn part the next turn's request (and a
+// mid-turn warning) must start with the previous request byte for byte.
+func TestCodexBuildRequestBody_NextTurnExtendsPreviousRequest(t *testing.T) {
 	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
-	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\nper-turn context"
-	base := []Message{
+	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\n- User: Turti (ID: 1)"
+	turn := []Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: "earlier question"},
 		{Role: "assistant", Content: "earlier answer"},
 		{Role: "user", Content: "current question"},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "read_file", Arguments: map[string]any{"path": "a"}}}},
-		{Role: "tool", ToolCallID: "call_1", Content: "a"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "team_tasks", Arguments: map[string]any{"action": "create"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "task created"},
 	}
-	withWarning := append(append([]Message{}, base...), Message{Role: "user", Content: "[loop detector] stop re-reading the same file"})
+	cases := map[string][]Message{
+		"mid-turn warning": append(append([]Message{}, turn...),
+			Message{Role: "user", Content: "[loop detector] stop re-reading the same file"}),
+		"announce turn": append(append([]Message{}, turn...),
+			Message{Role: "assistant", Content: "Task assigned, waiting for the result."},
+			Message{Role: "user", Content: "[System Message] Team member completed task."}),
+	}
 
-	devIndex := func(msgs []Message) int {
-		input := p.buildRequestBody(ChatRequest{Messages: msgs}, true)["input"].([]any)
-		for i, it := range input {
-			if it.(map[string]any)["role"] == "developer" {
-				return i
+	prev := p.buildRequestBody(ChatRequest{Messages: turn}, true)
+	prevInput, _ := json.Marshal(prev["input"])
+	prevPrefix := strings.TrimSuffix(string(prevInput), "]")
+
+	for name, msgs := range cases {
+		t.Run(name, func(t *testing.T) {
+			next := p.buildRequestBody(ChatRequest{Messages: msgs}, true)
+			if next["instructions"] != prev["instructions"] {
+				t.Errorf("instructions changed: %q -> %q", prev["instructions"], next["instructions"])
 			}
-		}
-		return -1
-	}
-
-	before, after := devIndex(base), devIndex(withWarning)
-	if before != 2 {
-		t.Fatalf("developer message at %d, want 2 (right before the current question)", before)
-	}
-	if after != before {
-		t.Errorf("developer message moved from %d to %d after a mid-turn user warning", before, after)
-	}
-}
-
-func TestCodexBuildRequestBody_TruncationRetryKeepsDynamicPromptAtMarkedTurnStart(t *testing.T) {
-	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
-	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\nper-turn context"
-	base := []Message{
-		{Role: "system", Content: system},
-		{Role: "user", Content: "earlier question"},
-		{Role: "assistant", Content: "earlier answer"},
-		{Role: "user", Content: "current question", TurnStart: true},
-	}
-	// Truncated tool call: the think stage appends an assistant message WITHOUT
-	// tool calls plus a user retry hint, mid-turn.
-	retried := append(append([]Message{}, base...),
-		Message{Role: "assistant", Content: "partial"},
-		Message{Role: "user", Content: "[System] Your output was truncated"},
-	)
-
-	devIndex := func(msgs []Message) int {
-		input := p.buildRequestBody(ChatRequest{Messages: msgs}, true)["input"].([]any)
-		for i, it := range input {
-			if it.(map[string]any)["role"] == "developer" {
-				return i
+			nextInput, _ := json.Marshal(next["input"])
+			if !strings.HasPrefix(string(nextInput), prevPrefix+",") {
+				t.Errorf("input does not extend the previous request\nprev: %s\nnext: %s", prevInput, nextInput)
 			}
-		}
-		return -1
-	}
-
-	if got, want := devIndex(retried), devIndex(base); got != want || want != 2 {
-		t.Errorf("developer message at %d after a truncation retry, want %d (before the marked turn start)", got, want)
+		})
 	}
 }

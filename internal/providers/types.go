@@ -170,12 +170,6 @@ type Message struct {
 	// Transient messages are runtime-only context for the next provider call.
 	// They must not be persisted to session history or serialized to providers.
 	Transient bool `json:"-"`
-
-	// TurnStart marks the user message that opens the current turn. Runtime-only:
-	// providers that split the system prompt for caching anchor the per-turn part
-	// on it, since later user messages in the turn (retry hints, loop warnings,
-	// injected messages) must not move that anchor.
-	TurnStart bool `json:"-"`
 }
 
 // ToolCall represents a tool invocation requested by the LLM.

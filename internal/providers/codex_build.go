@@ -24,13 +24,7 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 	var instructions string
 	var input []any
 
-	turnStart := currentTurnStartIndex(req.Messages)
-	turnInputAt := -1
-
-	for i, m := range req.Messages {
-		if i == turnStart {
-			turnInputAt = len(input)
-		}
+	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
 			if instructions == "" {
@@ -103,7 +97,7 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 		}
 	}
 
-	instructions, input = moveDynamicPromptBeforeTurn(instructions, input, turnInputAt)
+	instructions, input = moveDynamicPromptToInputHead(instructions, input)
 
 	body := map[string]any{
 		"model":  model,
@@ -220,16 +214,20 @@ func toFcID(id string) string {
 	return "fc_" + id
 }
 
-// moveDynamicPromptBeforeTurn keeps only the stable part of the system prompt
+// moveDynamicPromptToInputHead keeps only the stable part of the system prompt
 // (above CacheBoundaryMarker) in instructions and moves the per-turn part
-// (sender, chat, date, runtime) into a developer message placed right before
-// the current turn's opening user message (input index turnAt). Instructions
-// precede the history in the prompt, so leaving the per-turn part there makes
-// every change of sender or run kind re-bill the whole history as fresh input;
-// placed at the turn start it only costs itself once per turn, and everything
-// the turn appends (tool calls, loop warnings, injected messages) comes after
-// it, so its position holds for the whole turn.
-func moveDynamicPromptBeforeTurn(instructions string, input []any, turnAt int) (string, []any) {
+// (sender, chat, date, USER.md, runtime) into a developer message at input[0].
+//
+// The ChatGPT backend reuses its prompt cache only when a request extends an
+// earlier request exactly (measured 2026-09-30: every hit equals the previous
+// request length, and an identical 33K-token history in the middle of a
+// request was not reused). So the per-turn part must sit at the same position
+// in every request of a session: at input[0] the history of all earlier turns
+// stays cached whenever it is unchanged (same sender, same day), and a change
+// of it still leaves instructions + tools cached. It must not be kept in the
+// history per turn instead: it carries the sender's USER.md, and a group
+// session is shared by several senders.
+func moveDynamicPromptToInputHead(instructions string, input []any) (string, []any) {
 	before, after, ok := strings.Cut(instructions, CacheBoundaryMarker)
 	if !ok {
 		return instructions, input
@@ -240,40 +238,8 @@ func moveDynamicPromptBeforeTurn(instructions string, input []any, turnAt int) (
 		return stable, input
 	}
 
-	msg := map[string]any{"role": "developer", "content": dynamic}
-	if turnAt < 0 || turnAt > len(input) {
-		return stable, append(input, msg)
-	}
 	out := make([]any, 0, len(input)+1)
-	out = append(out, input[:turnAt]...)
-	out = append(out, msg)
-	out = append(out, input[turnAt:]...)
+	out = append(out, map[string]any{"role": "developer", "content": dynamic})
+	out = append(out, input...)
 	return stable, out
-}
-
-// currentTurnStartIndex returns the index in msgs of the user message that
-// opens the current turn. The agent loop marks it with TurnStart; without the
-// mark (internal calls) it is the first user message after the last assistant
-// reply that made no tool calls (the end of the previous turn). User messages
-// added later in the turn (retry hints, loop warnings, injected messages) must
-// not move the anchor. Returns -1 when there is no user message to anchor on.
-func currentTurnStartIndex(msgs []Message) int {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].TurnStart && msgs[i].Role == "user" {
-			return i
-		}
-	}
-	from := 0
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) == 0 {
-			from = i + 1
-			break
-		}
-	}
-	for i := from; i < len(msgs); i++ {
-		if msgs[i].Role == "user" {
-			return i
-		}
-	}
-	return -1
 }
