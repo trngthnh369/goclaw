@@ -18,7 +18,7 @@ func codexGroupRouting() announceRouting {
 }
 
 func ownerEntry(member string) announceEntry {
-	return announceEntry{MemberAgent: member, Content: "done", OriginSenderID: "896694335670726676", OriginRole: "owner"}
+	return announceEntry{MemberAgent: member, Content: "done", OriginSenderID: "896694335670726676", OriginSenderName: "Turti", OriginRole: "owner"}
 }
 
 func TestBuildTeamAnnounceRunRequest_GroupCarriesOriginContext(t *testing.T) {
@@ -31,6 +31,7 @@ func TestBuildTeamAnnounceRunRequest_GroupCarriesOriginContext(t *testing.T) {
 		"Channel":     {req.Channel, "codex-discord"},
 		"UserID":      {req.UserID, r.OriginUserID},
 		"SenderID":    {req.SenderID, "896694335670726676"},
+		"SenderName":  {req.SenderName, "Turti"},
 		"Role":        {req.Role, "owner"},
 		"RunKind":     {req.RunKind, "announce"},
 		"RunID":       {req.RunID, "teammate-announce-codex-2"},
@@ -53,8 +54,8 @@ func TestBuildTeamAnnounceRunRequest_MixedOriginBatch_DropsPrivilege(t *testing.
 
 	req := buildTeamAnnounceRunRequest(codexGroupRouting(), []announceEntry{ownerEntry("agy-pro"), other}, "x")
 
-	if req.SenderID != "" || req.Role != "" {
-		t.Errorf("SenderID=%q Role=%q, want both empty for a batch mixing two users", req.SenderID, req.Role)
+	if req.SenderID != "" || req.SenderName != "" || req.Role != "" {
+		t.Errorf("SenderID=%q SenderName=%q Role=%q, want all empty for a batch mixing two users", req.SenderID, req.SenderName, req.Role)
 	}
 }
 
@@ -86,6 +87,24 @@ func TestAnnounceSenderID_DropsInternalSenders(t *testing.T) {
 	for in, want := range cases {
 		if got := announceSenderID(in); got != want {
 			t.Errorf("announceSenderID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestAnnounceSenderName_FollowsKeptSender(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{"real sender", map[string]string{"origin_sender_id": "896694335670726676", "origin_sender_name": "Turti"}, "Turti"},
+		{"internal sender", map[string]string{"origin_sender_id": "teammate:dashboard", "origin_sender_name": "Turti"}, ""},
+		{"no sender", map[string]string{"origin_sender_name": "Turti"}, ""},
+		{"name is flattened", map[string]string{"origin_sender_id": "1", "origin_sender_name": "Tur\nti"}, "Tur ti"},
+	}
+	for _, tc := range cases {
+		if got := announceSenderName(tc.meta); got != tc.want {
+			t.Errorf("%s: announceSenderName = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
@@ -132,5 +151,16 @@ func TestAnnounceBatchUserID(t *testing.T) {
 	}
 	if got := announceBatchUserID(r, []announceEntry{{}}); got != r.OriginUserID {
 		t.Errorf("entry without user = %q, want routing fallback %q", got, r.OriginUserID)
+	}
+}
+
+func TestBuildTeamAnnounceRunRequest_SameSenderTakesFirstStoredName(t *testing.T) {
+	legacy := ownerEntry("agy-pro")
+	legacy.OriginSenderName = "" // task created before names were stored
+
+	req := buildTeamAnnounceRunRequest(codexGroupRouting(), []announceEntry{legacy, ownerEntry("agy-flash")}, "x")
+
+	if req.SenderID != "896694335670726676" || req.SenderName != "Turti" {
+		t.Errorf("SenderID=%q SenderName=%q, want the shared sender with its stored name", req.SenderID, req.SenderName)
 	}
 }

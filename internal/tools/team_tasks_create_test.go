@@ -473,3 +473,31 @@ func TestCreate_StoresOriginUserForDispatch(t *testing.T) {
 		})
 	}
 }
+
+func TestCreate_StoresOriginSenderName(t *testing.T) {
+	mb, tool, _, _, ctx := newTestTeamSetup()
+	ptd := NewPendingTeamDispatch()
+	ptd.MarkListed()
+	ctx = WithPendingTeamDispatch(ctx, ptd)
+	ctx = store.WithSenderName(store.WithSenderID(ctx, "896694335670726676"), "Turti")
+
+	result := tool.Execute(ctx, map[string]any{
+		"action":   "create",
+		"subject":  "Named task",
+		"assignee": "member-agent",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.ForLLM)
+	}
+
+	mb.taskStore.mu.Lock()
+	var task *store.TeamTaskData
+	for _, v := range mb.taskStore.tasks {
+		task = v
+	}
+	mb.taskStore.mu.Unlock()
+
+	if got := task.Metadata[MetaOriginSenderName]; got != "Turti" {
+		t.Errorf("origin_sender_name = %v, want %q", got, "Turti")
+	}
+}

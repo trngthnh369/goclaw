@@ -419,12 +419,14 @@ func processNormalMessage(
 	// senders without propagation keep their on-wire value and hit F1's
 	// deny-in-group rule (safe default).
 	effectiveSenderID := msg.SenderID
+	effectiveSenderName := resolveSenderName(msg)
 	if bus.IsInternalSender(effectiveSenderID) {
 		// Defense-in-depth: if a propagation bug ever writes a synthetic
 		// value into MetaOriginSenderID, do NOT honour it. We want only real
 		// user senders to override the on-wire synthetic.
 		if realSender := msg.Metadata[tools.MetaOriginSenderID]; realSender != "" && !bus.IsInternalSender(realSender) {
 			effectiveSenderID = realSender
+			effectiveSenderName = sanitizeSenderName(msg.Metadata[tools.MetaOriginSenderName])
 		}
 	}
 	// Role propagation: carry the RBAC role of the originating actor so
@@ -467,7 +469,7 @@ func processNormalMessage(
 		UserID:             userID,
 		SenderID:           effectiveSenderID,
 		Role:               effectiveRole,
-		SenderName:         resolveSenderName(msg),
+		SenderName:         effectiveSenderName,
 		RunID:              runID,
 		Stream:             providerStream,
 		HistoryLimit:       msg.HistoryLimit,

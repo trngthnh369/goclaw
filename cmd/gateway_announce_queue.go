@@ -27,6 +27,7 @@ type announceEntry struct {
 	Media             []agent.MediaResult
 	OriginUserID      string // user scope of the turn that created this entry's task
 	OriginSenderID    string // real user who created this entry's task (#915)
+	OriginSenderName  string // that user's display name, for the prompt's User line
 	OriginRole        string // that user's RBAC role at task creation
 }
 
@@ -232,7 +233,7 @@ func buildMergedAnnounceContent(entries []announceEntry, taskBoardSnapshot, team
 // from announceBatchPrivilege. Per-topic prompts, channel self-identity and
 // Bitrix24 hints are not carried: those only land in the dynamic prompt part.
 func buildTeamAnnounceRunRequest(r announceRouting, entries []announceEntry, content string) agent.RunRequest {
-	senderID, role := announceBatchPrivilege(r, entries)
+	senderID, senderName, role := announceBatchPrivilege(r, entries)
 	req := agent.RunRequest{
 		Surface:          tools.SurfaceSubagent,
 		SessionKey:       r.LeadSessionKey,
@@ -244,6 +245,7 @@ func buildTeamAnnounceRunRequest(r announceRouting, entries []announceEntry, con
 		LocalKey:         r.OrigLocalKey,
 		UserID:           announceBatchUserID(r, entries),
 		SenderID:         senderID,
+		SenderName:       senderName,
 		Role:             role,
 		RunID:            fmt.Sprintf("teammate-announce-%s-%d", r.LeadAgent, len(entries)),
 		RunKind:          "announce",
@@ -268,13 +270,24 @@ func announceSenderID(sender string) string {
 	return sender
 }
 
+// announceSenderName returns the origin sender's display name, only when that
+// sender is kept by announceSenderID.
+func announceSenderName(meta map[string]string) string {
+	if announceSenderID(meta[tools.MetaOriginSenderID]) == "" {
+		return ""
+	}
+	return sanitizeSenderName(meta[tools.MetaOriginSenderName])
+}
+
 // announceBatchPrivilege returns the sender and role the lead's announce turn
 // acts with. A batch merges every result that completes while the lead is busy,
 // keyed by lead+team+chat, so it can hold tasks created by different users in
 // one group. Their write permissions must not mix: only a batch whose entries
 // all share one sender and role inherits them; otherwise the turn runs with no
-// sender, which denies group writes as before (#915).
-func announceBatchPrivilege(r announceRouting, entries []announceEntry) (senderID, role string) {
+// sender, which denies group writes as before (#915). The sender's display name
+// follows the sender, so the announce prompt shows the same User line as the
+// turn that created the tasks.
+func announceBatchPrivilege(r announceRouting, entries []announceEntry) (senderID, senderName, role string) {
 	senderID, role, mixed := commonOriginPrivilege(len(entries), func(i int) (string, string) {
 		return entries[i].OriginSenderID, entries[i].OriginRole
 	})
@@ -282,7 +295,21 @@ func announceBatchPrivilege(r announceRouting, entries []announceEntry) (senderI
 		slog.Warn("security.team_announce.mixed_origin",
 			"session", r.LeadSessionKey, "team_id", r.TeamID, "batch_size", len(entries))
 	}
-	return senderID, role
+	if senderID != "" {
+		senderName = firstSenderName(len(entries), func(i int) string { return entries[i].OriginSenderName })
+	}
+	return senderID, senderName, role
+}
+
+// firstSenderName returns the first non-empty display name among n batch items
+// that share one sender: a task created before names were stored has none.
+func firstSenderName(n int, at func(i int) string) string {
+	for i := 0; i < n; i++ {
+		if name := at(i); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // commonOriginPrivilege returns the sender and role that all n batch items

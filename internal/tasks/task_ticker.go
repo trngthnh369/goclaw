@@ -288,6 +288,9 @@ func (t *TaskTicker) notifyLeaders(ctx context.Context, tasks []store.RecoveredT
 		if fullTask != nil && fullTask.Metadata != nil {
 			if s, ok := fullTask.Metadata["origin_sender_id"].(string); ok && s != "" {
 				tickerMeta[tools.MetaOriginSenderID] = s
+				if n, ok := fullTask.Metadata[tools.MetaOriginSenderName].(string); ok && n != "" {
+					tickerMeta[tools.MetaOriginSenderName] = n
+				}
 			}
 			if r, ok := fullTask.Metadata["origin_role"].(string); ok && r != "" {
 				tickerMeta[tools.MetaOriginRole] = r

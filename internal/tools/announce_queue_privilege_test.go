@@ -39,7 +39,7 @@ func TestAnnounceQueue_SameOrigin_KeepsPrivilege(t *testing.T) {
 }
 
 func TestAnnounceQueue_MixedOrigin_DropsPrivilege(t *testing.T) {
-	owner := AnnounceMetadata{ParentAgent: "lead", OriginSenderID: "896694335670726676", OriginRole: "owner"}
+	owner := AnnounceMetadata{ParentAgent: "lead", OriginSenderID: "896694335670726676", OriginSenderName: "Turti", OriginRole: "owner"}
 	other := AnnounceMetadata{ParentAgent: "lead", OriginSenderID: "111"}
 
 	cases := map[string][]AnnounceMetadata{
@@ -50,8 +50,8 @@ func TestAnnounceQueue_MixedOrigin_DropsPrivilege(t *testing.T) {
 	for name, metas := range cases {
 		t.Run(name, func(t *testing.T) {
 			meta := drainOnce(t, metas...)
-			if meta.OriginSenderID != "" || meta.OriginRole != "" {
-				t.Errorf("sender=%q role=%q, want both dropped once the batch mixes users", meta.OriginSenderID, meta.OriginRole)
+			if meta.OriginSenderID != "" || meta.OriginSenderName != "" || meta.OriginRole != "" {
+				t.Errorf("sender=%q name=%q role=%q, want all dropped once the batch mixes users", meta.OriginSenderID, meta.OriginSenderName, meta.OriginRole)
 			}
 			if meta.ParentAgent != "lead" {
 				t.Errorf("ParentAgent = %q, want routing meta kept", meta.ParentAgent)

@@ -57,6 +57,7 @@ type SubagentTask struct {
 	OriginLocalKey    string             `json:"originLocalKey,omitempty"`   // composite key with topic/thread suffix for routing
 	OriginUserID      string             `json:"originUserId,omitempty"`     // parent's userID for per-user scoping propagation
 	OriginSenderID    string             `json:"originSenderId,omitempty"`   // real acting sender; preserves permission attribution in announce re-ingress (#915)
+	OriginSenderName  string             `json:"originSenderName,omitempty"` // that sender's display name, so the announce turn renders the same User line
 	OriginRole        string             `json:"originRole,omitempty"`       // parent's RBAC role; bypasses per-user grants for admin/operator/owner in re-ingress (#915)
 	OriginSessionKey  string             `json:"originSessionKey,omitempty"` // exact parent session key for announce routing (WS uses non-standard format)
 	CreatedAt         int64              `json:"createdAt"`

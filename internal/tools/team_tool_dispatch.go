@@ -156,12 +156,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	// rather than the synthetic "teammate:dashboard" sender (#915).
 	// For deferred dispatches (ticker/unblock), context has no sender — fall back
 	// to origin_sender_id stored in task metadata at creation time.
-	originSenderID := store.SenderIDFromContext(ctx)
-	if originSenderID == "" || bus.IsInternalSender(originSenderID) {
-		if s, ok := task.Metadata["origin_sender_id"].(string); ok && s != "" && !bus.IsInternalSender(s) {
-			originSenderID = s
-		}
-	}
+	originSenderID, originSenderName := resolveDispatchOriginSender(ctx, task)
 
 	// Resolve peer kind from context; fallback to task metadata, then "direct".
 	originPeerKind := ToolPeerKindFromCtx(ctx)
@@ -186,6 +181,9 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	}
 	if originSenderID != "" {
 		meta[MetaOriginSenderID] = originSenderID
+		if originSenderName != "" {
+			meta[MetaOriginSenderName] = originSenderName
+		}
 	}
 	// Role propagation: prefer context, fall back to task metadata for deferred dispatches.
 	originRole := store.RoleFromContext(ctx)
@@ -445,4 +443,22 @@ func resolveDispatchOriginUserID(ctx context.Context, task *store.TeamTaskData, 
 		return uid
 	}
 	return originChatID
+}
+
+// resolveDispatchOriginSender returns the real acting sender the member's turn
+// and the lead's announce are attributed to (#915), with that sender's display
+// name. For deferred dispatches (ticker/unblock) the context has no real
+// sender, so both fall back to what the task stored at creation. The name
+// always comes from the same source as the ID; an internal ctx sender with no
+// stored fallback is passed through unchanged, as before.
+func resolveDispatchOriginSender(ctx context.Context, task *store.TeamTaskData) (senderID, senderName string) {
+	senderID = store.SenderIDFromContext(ctx)
+	if senderID != "" && !bus.IsInternalSender(senderID) {
+		return senderID, store.SenderNameFromContext(ctx)
+	}
+	if s, ok := task.Metadata["origin_sender_id"].(string); ok && s != "" && !bus.IsInternalSender(s) {
+		name, _ := task.Metadata[MetaOriginSenderName].(string)
+		return s, name
+	}
+	return senderID, ""
 }

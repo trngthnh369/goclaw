@@ -403,11 +403,18 @@ func (m *TeamsMethods) dispatchTaskToAgent(ctx context.Context, task *store.Team
 	// from the task at creation time. Without this, group-scope tasks
 	// dispatched from the dashboard would hit the empty-sender DENY rule in
 	// CheckFileWriterPermission (#915 Flow F).
+	// The display name always comes from the same source as the sender.
 	if dispatchSender := store.SenderIDFromContext(ctx); dispatchSender != "" {
 		meta["origin_sender_id"] = dispatchSender
+		if name := store.SenderNameFromContext(ctx); name != "" {
+			meta["origin_sender_name"] = name
+		}
 	} else if task.Metadata != nil {
 		if taskSender, _ := task.Metadata["origin_sender_id"].(string); taskSender != "" {
 			meta["origin_sender_id"] = taskSender
+			if name, _ := task.Metadata["origin_sender_name"].(string); name != "" {
+				meta["origin_sender_name"] = name
+			}
 		}
 	}
 	// Propagate RBAC role so the teammate's permission checks can bypass

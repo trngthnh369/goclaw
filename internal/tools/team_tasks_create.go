@@ -208,6 +208,9 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]any) 
 	// restore permission attribution when the teammate runs (#915 Flow F).
 	if sender := store.SenderIDFromContext(ctx); sender != "" {
 		taskMeta["origin_sender_id"] = sender
+		if name := store.SenderNameFromContext(ctx); name != "" {
+			taskMeta[MetaOriginSenderName] = name
+		}
 	}
 	// Persist caller role for RBAC-aware bypass at dispatch time.
 	if role := store.RoleFromContext(ctx); role != "" {

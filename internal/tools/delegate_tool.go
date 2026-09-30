@@ -40,6 +40,7 @@ type DelegateRequest struct {
 	DelegationID string
 	UserID       string
 	SenderID     string // real acting sender preserved through delegate announce re-ingress (#915)
+	SenderName   string // that sender's display name, so the announce turn renders the same User line
 	Role         string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
 	TenantID     string
 	Channel      string
@@ -201,6 +202,7 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 		DelegationID: delegationID,
 		UserID:       actorID,
 		SenderID:     store.SenderIDFromContext(ctx),
+		SenderName:   store.SenderNameFromContext(ctx),
 		Role:         store.RoleFromContext(ctx),
 		TenantID:     store.TenantIDFromContext(ctx).String(),
 		Channel:      ToolChannelFromCtx(ctx),
@@ -470,6 +472,9 @@ func (t *DelegateTool) announceToParent(req DelegateRequest, content string, med
 	}
 	if req.SenderID != "" {
 		meta[MetaOriginSenderID] = req.SenderID
+		if req.SenderName != "" {
+			meta[MetaOriginSenderName] = req.SenderName
+		}
 	}
 	if req.Role != "" {
 		meta[MetaOriginRole] = req.Role

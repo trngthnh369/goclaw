@@ -111,8 +111,9 @@ func handleSubagentAnnounce(
 		// checks (e.g. write_file in group chat) attribute to the user and can
 		// bypass per-user grants for authenticated admins, not the synthetic
 		// "subagent:<id>" sender of the announce message itself (#915).
-		OriginSenderID: announceSenderID(msg.Metadata[tools.MetaOriginSenderID]),
-		OriginRole:     msg.Metadata[tools.MetaOriginRole],
+		OriginSenderID:   announceSenderID(msg.Metadata[tools.MetaOriginSenderID]),
+		OriginSenderName: announceSenderName(msg.Metadata),
+		OriginRole:       msg.Metadata[tools.MetaOriginRole],
 	}
 
 	queueKey := fmt.Sprintf("%s:%s", msg.TenantID, sessionKey)
@@ -354,6 +355,7 @@ func handleTeammateMessage(
 			Media:             announceMedia,
 			OriginUserID:      inMeta[tools.MetaOriginUserID],
 			OriginSenderID:    announceSenderID(inMeta[tools.MetaOriginSenderID]),
+			OriginSenderName:  announceSenderName(inMeta),
 			OriginRole:        inMeta[tools.MetaOriginRole],
 		}
 		isProcessor := enqueueAnnounce(leadSessionKey, entry)

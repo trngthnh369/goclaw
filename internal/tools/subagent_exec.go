@@ -44,6 +44,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			OriginLocalKey:   task.OriginLocalKey,
 			OriginUserID:     task.OriginUserID,
 			OriginSenderID:   task.OriginSenderID,
+			OriginSenderName: task.OriginSenderName,
 			OriginRole:       task.OriginRole,
 			OriginSessionKey: task.OriginSessionKey,
 			OriginTenantID:   task.OriginTenantID,
@@ -84,6 +85,9 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			}
 			if task.OriginSenderID != "" {
 				announceMeta[MetaOriginSenderID] = task.OriginSenderID
+				if task.OriginSenderName != "" {
+					announceMeta[MetaOriginSenderName] = task.OriginSenderName
+				}
 			}
 			if task.OriginRole != "" {
 				announceMeta[MetaOriginRole] = task.OriginRole

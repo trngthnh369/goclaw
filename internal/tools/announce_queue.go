@@ -33,6 +33,7 @@ type AnnounceMetadata struct {
 	OriginLocalKey   string // composite key with topic/thread suffix for routing
 	OriginUserID     string
 	OriginSenderID   string // real acting sender; preserves permission attribution through re-ingress (#915)
+	OriginSenderName string // that sender's display name; dropped together with the sender
 	OriginRole       string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
 	OriginSessionKey string // exact parent session key (WS uses non-standard format)
 	OriginTenantID   uuid.UUID // parent tenant for announce routing
@@ -238,6 +239,9 @@ func BuildReplyInstruction(roster SubagentRoster) string {
 // another user's results (#915). Once dropped they stay dropped.
 func mergeAnnouncePrivilege(sessionKey string, batch, next AnnounceMetadata) AnnounceMetadata {
 	if SenderIdentity(batch.OriginSenderID) == SenderIdentity(next.OriginSenderID) && batch.OriginRole == next.OriginRole {
+		if batch.OriginSenderName == "" {
+			batch.OriginSenderName = next.OriginSenderName
+		}
 		return batch
 	}
 	if batch.OriginSenderID != "" || batch.OriginRole != "" {
@@ -245,6 +249,7 @@ func mergeAnnouncePrivilege(sessionKey string, batch, next AnnounceMetadata) Ann
 			"session", sessionKey, "parent", batch.ParentAgent, "layer", "queue")
 	}
 	batch.OriginSenderID = ""
+	batch.OriginSenderName = ""
 	batch.OriginRole = ""
 	return batch
 }

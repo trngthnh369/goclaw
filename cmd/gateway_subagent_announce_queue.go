@@ -49,6 +49,9 @@ func makeDelegateAnnounceCallback(
 		}
 		if meta.OriginSenderID != "" {
 			batchMeta[tools.MetaOriginSenderID] = meta.OriginSenderID
+			if meta.OriginSenderName != "" {
+				batchMeta[tools.MetaOriginSenderName] = meta.OriginSenderName
+			}
 		}
 		if meta.OriginRole != "" {
 			batchMeta[tools.MetaOriginRole] = meta.OriginRole
@@ -93,8 +96,9 @@ type subagentAnnounceEntry struct {
 	Iterations   int
 	// Real sender + RBAC role of the turn that spawned this subagent (#915).
 	// Per entry: one batch can hold results spawned by different users.
-	OriginSenderID string
-	OriginRole     string
+	OriginSenderID   string
+	OriginSenderName string // display name of that sender, for the prompt's User line
+	OriginRole       string
 }
 
 // subagentAnnounceRouting holds shared routing info captured by the first enqueue.
@@ -177,6 +181,10 @@ func processSubagentAnnounceLoop(
 			slog.Warn("security.subagent_announce.mixed_origin",
 				"session", r.SessionKey, "batch_size", len(entries), "layer", "loop")
 		}
+		senderName := ""
+		if senderID != "" {
+			senderName = firstSenderName(len(entries), func(i int) string { return entries[i].OriginSenderName })
+		}
 
 		req := agent.RunRequest{
 			Surface:          tools.SurfaceSubagent,
@@ -191,7 +199,8 @@ func processSubagentAnnounceLoop(
 			LocalKey:         r.OrigLocalKey,
 			UserID:           r.UserID,
 			SenderID:         senderID, // real acting sender for permission checks (#915)
-			Role:             role,     // RBAC role for admin bypass in group writes (#915)
+			SenderName:       senderName,
+			Role:             role, // RBAC role for admin bypass in group writes (#915)
 			RunID:            fmt.Sprintf("subagent-announce-%s-%d", r.ParentAgent, len(entries)),
 			RunKind:          "announce",
 			HideInput:        true,

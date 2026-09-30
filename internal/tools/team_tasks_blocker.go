@@ -86,6 +86,9 @@ func (t *TeamTasksTool) handleBlockerComment(
 			}
 			if actorSender := store.SenderIDFromContext(ctx); actorSender != "" {
 				escalationMeta[MetaOriginSenderID] = actorSender
+				if name := store.SenderNameFromContext(ctx); name != "" {
+					escalationMeta[MetaOriginSenderName] = name
+				}
 			}
 			if !t.manager.TryPublishInbound(bus.InboundMessage{
 				Channel:  task.Channel,
