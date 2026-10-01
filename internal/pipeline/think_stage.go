@@ -63,7 +63,7 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		},
 	}
 	if state.Input != nil && state.Input.SessionKey != "" {
-		req.Options[providers.OptPromptCacheKey] = promptCacheKey(state.Input.SessionKey)
+		req.Options[providers.OptPromptCacheKey] = promptCacheKey(state.Input.SessionKey, state.Input.SenderID)
 	}
 
 	// 4. Call LLM (stream or sync — delegated to callback)
@@ -287,9 +287,21 @@ func isContextOverflowErr(err error) bool {
 	return providers.IsContextOverflowMessage(lower)
 }
 
-// promptCacheKey derives a stable per-session prompt cache key. The session key
-// embeds user and chat IDs, so only a hash of it leaves the gateway.
-func promptCacheKey(sessionKey string) string {
-	sum := sha256.Sum256([]byte(sessionKey))
+// promptCacheKey derives a stable prompt cache key per session and sender. The
+// session key embeds user and chat IDs, so only a hash of it leaves the gateway.
+//
+// The sender is part of the key because the per-turn prompt names the sender
+// and the ChatGPT backend reuses cache only for a request that extends an
+// earlier one exactly: with one key per group session, every change of sender
+// re-bills the whole history. With a key per sender, each sender's request
+// extends that sender's previous request (other senders' turns are only
+// appended), so only the turns in between are billed fresh. The display part
+// of "id|name" sender IDs is dropped: a rename must not split the cache.
+func promptCacheKey(sessionKey, senderID string) string {
+	key := sessionKey
+	if id, _, _ := strings.Cut(senderID, "|"); id != "" {
+		key += "|sender:" + id
+	}
+	sum := sha256.Sum256([]byte(key))
 	return "goclaw-" + hex.EncodeToString(sum[:16])
 }

@@ -61,3 +61,24 @@ func TestThinkStage_EmptySessionKey_PromptCacheKeyOmitted(t *testing.T) {
 		t.Errorf("key = %q, want none for an empty session key", got)
 	}
 }
+
+func TestThinkStage_PromptCacheKeyPerSender(t *testing.T) {
+	t.Parallel()
+	keyFor := func(sender string) string {
+		input := minimalInput()
+		input.SessionKey = "agent:codex:codex-discord:group:1552179009540857876"
+		input.SenderID = sender
+		return captureCacheKey(t, stateWithInput(input))
+	}
+
+	turti, other, none := keyFor("896694335670726676"), keyFor("111"), keyFor("")
+	if turti == other || turti == none || other == none {
+		t.Errorf("senders share a cache key: turti=%q other=%q none=%q", turti, other, none)
+	}
+	if renamed := keyFor("896694335670726676|Turti"); renamed != turti {
+		t.Errorf("display-name suffix split the cache: %q vs %q", renamed, turti)
+	}
+	if strings.Contains(turti, "896694335670726676") {
+		t.Errorf("key leaks the raw sender ID: %q", turti)
+	}
+}
