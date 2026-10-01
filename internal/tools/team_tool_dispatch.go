@@ -56,10 +56,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	if agentID == team.LeadAgentID {
 		slog.Warn("team_tasks.dispatch: blocked dispatch to lead agent",
 			"task_id", task.ID, "agent_id", agentID, "team_id", teamID)
-		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": "Cannot dispatch task to the team lead — reassign to a team member",
-		})
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, "Cannot dispatch task to the team lead — reassign to a team member")
 		return
 	}
 
@@ -70,10 +67,8 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	if assignee, err := m.cachedGetAgentByID(ctx, agentID); err == nil && ContentFactoryGatedAssignee(assignee.AgentKey) {
 		slog.Warn("security.team_tasks.dispatch_blocked_gated_agent",
 			"task_id", task.ID, "agent_key", assignee.AgentKey, "team_id", teamID)
-		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": "Cannot dispatch task to " + assignee.AgentKey + " — this agent must be reached through the audited delegate path",
-		})
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID,
+			"Cannot dispatch task to "+assignee.AgentKey+" — this agent must be reached through the audited delegate path")
 		return
 	}
 
@@ -86,10 +81,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		slog.Warn("team_tasks.dispatch: max dispatch count reached, auto-failing task",
 			"task_id", task.ID, "dispatch_count", dispatchCount)
 		failReason := fmt.Sprintf("Task auto-failed after %d dispatch attempts", dispatchCount)
-		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": failReason,
-		})
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, failReason)
 		return
 	}
 
@@ -376,10 +368,7 @@ func (m *TeamToolManager) DispatchUnblockedTasks(ctx context.Context, teamID uui
 		if ownerID == team.LeadAgentID {
 			slog.Warn("DispatchUnblockedTasks: auto-failing lead-owned task",
 				"task_id", task.ID, "team_id", teamID)
-			_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-				"status": store.TeamTaskStatusFailed,
-				"result": "Cannot dispatch task to the team lead — reassign to a team member",
-			})
+			failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, "Cannot dispatch task to the team lead — reassign to a team member")
 			continue
 		}
 		if dispatched[ownerID] {
@@ -461,4 +450,18 @@ func resolveDispatchOriginSender(ctx context.Context, task *store.TeamTaskData) 
 		return s, name
 	}
 	return senderID, ""
+}
+
+// failUndispatchableTask marks a task that must not be dispatched as failed.
+// UpdateTask cannot change the status (its column whitelist rejects "status"
+// and "result"), so this goes through the lifecycle methods: the task is either
+// still pending/blocked or already assigned (in_progress).
+func failUndispatchableTask(ctx context.Context, ts store.TeamStore, taskID, teamID uuid.UUID, reason string) {
+	err := ts.FailPendingTask(ctx, taskID, teamID, reason)
+	if err != nil {
+		err = ts.FailTask(ctx, taskID, teamID, reason)
+	}
+	if err != nil {
+		slog.Warn("team_tasks.dispatch: could not fail task", "task_id", taskID, "error", err)
+	}
 }
