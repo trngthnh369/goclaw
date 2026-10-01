@@ -511,3 +511,49 @@ func TestStoreTask_RaceToClaimSameTask(t *testing.T) {
 		t.Error("OwnerAgentID should be set after race claim")
 	}
 }
+
+// The origin sender's display name only renders the announce prompt, so it is
+// dropped from the task row once the task ends; the sender ID stays (#915).
+func TestStoreTask_TerminalStatusClearsOriginSenderName(t *testing.T) {
+	db := testDB(t)
+	pg.InitSqlx(db)
+	tenantID, agentID := seedTenantAgent(t, db)
+	ctx := tenantCtx(tenantID)
+	ts := pg.NewPGTeamStore(db)
+	teamID, memberID := seedTeam(t, db, tenantID, agentID)
+
+	end := map[string]func(id uuid.UUID) error{
+		"complete": func(id uuid.UUID) error {
+			if err := ts.ClaimTask(ctx, id, memberID, teamID); err != nil {
+				return err
+			}
+			return ts.CompleteTask(ctx, id, teamID, "done")
+		},
+		"cancel": func(id uuid.UUID) error { return ts.CancelTask(ctx, id, teamID, "stop") },
+		"fail pending": func(id uuid.UUID) error {
+			return ts.FailPendingTask(ctx, id, teamID, "invalid")
+		},
+	}
+	for name, finish := range end {
+		t.Run(name, func(t *testing.T) {
+			task := makeTask(teamID, "named "+name, store.TeamTaskStatusPending)
+			task.Metadata = map[string]any{"origin_sender_id": "896694335670726676", "origin_sender_name": "Turti"}
+			if err := ts.CreateTask(ctx, task); err != nil {
+				t.Fatalf("CreateTask: %v", err)
+			}
+			if err := finish(task.ID); err != nil {
+				t.Fatalf("finish: %v", err)
+			}
+			got, err := ts.GetTask(ctx, task.ID)
+			if err != nil {
+				t.Fatalf("GetTask: %v", err)
+			}
+			if _, has := got.Metadata["origin_sender_name"]; has {
+				t.Errorf("origin_sender_name kept after %s: %v", name, got.Metadata)
+			}
+			if got.Metadata["origin_sender_id"] != "896694335670726676" {
+				t.Errorf("origin_sender_id = %v, want it kept", got.Metadata["origin_sender_id"])
+			}
+		})
+	}
+}
