@@ -113,7 +113,8 @@ func (s *SQLiteTeamStore) CreateTask(ctx context.Context, task *store.TeamTaskDa
 	hex := strings.ReplaceAll(task.ID.String(), "-", "")
 	task.Identifier = fmt.Sprintf("T-%03d-%s", taskNumber, hex[len(hex)-4:])
 
-	var metaJSON []byte
+	// Default to '{}' to satisfy the NOT NULL constraint (same as the PG store).
+	metaJSON := []byte(`{}`)
 	if len(task.Metadata) > 0 {
 		metaJSON, _ = json.Marshal(task.Metadata)
 	}
