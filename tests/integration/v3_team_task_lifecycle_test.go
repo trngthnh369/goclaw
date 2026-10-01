@@ -513,7 +513,8 @@ func TestStoreTask_RaceToClaimSameTask(t *testing.T) {
 }
 
 // The origin sender's display name only renders the announce prompt, so it is
-// dropped from the task row once the task ends; the sender ID stays (#915).
+// dropped from the task row once the task ends (UpdateTask cannot change the
+// status); the sender ID and other keys stay (#915).
 func TestStoreTask_TerminalStatusClearsOriginSenderName(t *testing.T) {
 	db := testDB(t)
 	pg.InitSqlx(db)
@@ -522,22 +523,45 @@ func TestStoreTask_TerminalStatusClearsOriginSenderName(t *testing.T) {
 	ts := pg.NewPGTeamStore(db)
 	teamID, memberID := seedTeam(t, db, tenantID, agentID)
 
+	claim := func(id uuid.UUID) error { return ts.ClaimTask(ctx, id, memberID, teamID) }
+	review := func(id uuid.UUID) error {
+		if err := claim(id); err != nil {
+			return err
+		}
+		return ts.ReviewTask(ctx, id, teamID)
+	}
 	end := map[string]func(id uuid.UUID) error{
 		"complete": func(id uuid.UUID) error {
-			if err := ts.ClaimTask(ctx, id, memberID, teamID); err != nil {
+			if err := claim(id); err != nil {
 				return err
 			}
 			return ts.CompleteTask(ctx, id, teamID, "done")
 		},
-		"cancel": func(id uuid.UUID) error { return ts.CancelTask(ctx, id, teamID, "stop") },
-		"fail pending": func(id uuid.UUID) error {
-			return ts.FailPendingTask(ctx, id, teamID, "invalid")
+		"fail": func(id uuid.UUID) error {
+			if err := claim(id); err != nil {
+				return err
+			}
+			return ts.FailTask(ctx, id, teamID, "boom")
 		},
+		"approve": func(id uuid.UUID) error {
+			if err := review(id); err != nil {
+				return err
+			}
+			return ts.ApproveTask(ctx, id, teamID, "ok")
+		},
+		"reject": func(id uuid.UUID) error {
+			if err := review(id); err != nil {
+				return err
+			}
+			return ts.RejectTask(ctx, id, teamID, "no")
+		},
+		"cancel":       func(id uuid.UUID) error { return ts.CancelTask(ctx, id, teamID, "stop") },
+		"fail pending": func(id uuid.UUID) error { return ts.FailPendingTask(ctx, id, teamID, "invalid") },
 	}
 	for name, finish := range end {
 		t.Run(name, func(t *testing.T) {
 			task := makeTask(teamID, "named "+name, store.TeamTaskStatusPending)
-			task.Metadata = map[string]any{"origin_sender_id": "896694335670726676", "origin_sender_name": "Turti"}
+			task.Metadata = map[string]any{"origin_sender_id": "896694335670726676", "origin_sender_name": "Turti", "peer_kind": "group"}
 			if err := ts.CreateTask(ctx, task); err != nil {
 				t.Fatalf("CreateTask: %v", err)
 			}
@@ -551,9 +575,27 @@ func TestStoreTask_TerminalStatusClearsOriginSenderName(t *testing.T) {
 			if _, has := got.Metadata["origin_sender_name"]; has {
 				t.Errorf("origin_sender_name kept after %s: %v", name, got.Metadata)
 			}
-			if got.Metadata["origin_sender_id"] != "896694335670726676" {
-				t.Errorf("origin_sender_id = %v, want it kept", got.Metadata["origin_sender_id"])
+			if got.Metadata["origin_sender_id"] != "896694335670726676" || got.Metadata["peer_kind"] != "group" {
+				t.Errorf("other metadata lost after %s: %v", name, got.Metadata)
 			}
 		})
 	}
+
+	t.Run("non-terminal update keeps the name", func(t *testing.T) {
+		task := makeTask(teamID, "still open", store.TeamTaskStatusPending)
+		task.Metadata = map[string]any{"origin_sender_name": "Turti"}
+		if err := ts.CreateTask(ctx, task); err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+		if err := ts.UpdateTask(ctx, task.ID, map[string]any{"subject": "renamed"}); err != nil {
+			t.Fatalf("UpdateTask: %v", err)
+		}
+		got, err := ts.GetTask(ctx, task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.Metadata["origin_sender_name"] != "Turti" {
+			t.Errorf("name dropped by a non-terminal update: %v", got.Metadata)
+		}
+	})
 }

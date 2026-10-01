@@ -300,7 +300,7 @@ func isContextOverflowErr(err error) bool {
 func promptCacheKey(sessionKey, senderID string) string {
 	key := sessionKey
 	if id, _, _ := strings.Cut(senderID, "|"); id != "" {
-		key += "|sender:" + id
+		key += "\x00" + id
 	}
 	sum := sha256.Sum256([]byte(key))
 	return "goclaw-" + hex.EncodeToString(sum[:16])
