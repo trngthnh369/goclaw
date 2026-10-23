@@ -90,11 +90,14 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			cronCtx = store.WithCredentialUserID(cronCtx, job.Payload.CredentialUserID)
 		}
 
-		// Reset session before each cron run to prevent tool errors from previous
-		// runs from polluting the context and blocking future executions (#294).
-		// Save() persists the empty session to DB so stale data won't reload after restart.
-		// Stateless jobs skip this — they intentionally carry no session history.
-		if !job.Stateless {
+		// Stateless jobs explicitly reset their session before each run — they
+		// carry no history between executions, matching the "Stateless" UI label
+		// and statelessHelp ("each run starts fresh without loading previous
+		// messages"). Stateful (non-stateless) jobs keep prior turns to enable
+		// multi-run dialog.
+		// Save() persists the empty session to DB so stale data won't reload
+		// after restart (#294).
+		if job.Stateless && sessionMgr != nil {
 			sessionMgr.Reset(cronCtx, sessionKey)
 			sessionMgr.Save(cronCtx, sessionKey)
 		}
@@ -184,30 +187,7 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 }
 
 func cronOutputContainsNoReplySentinel(content string) bool {
-	text := strings.TrimSpace(content)
-	if text == "" {
-		return false
-	}
-
-	const token = "NO_REPLY"
-	for i := 0; i+len(token) <= len(text); i++ {
-		if !strings.EqualFold(text[i:i+len(token)], token) {
-			continue
-		}
-		beforeOK := i == 0 || !cronNoReplyAlphaNumByte(text[i-1])
-		after := i + len(token)
-		afterOK := after == len(text) || !cronNoReplyAlphaNumByte(text[after])
-		if beforeOK && afterOK {
-			return true
-		}
-	}
-	return false
-}
-
-func cronNoReplyAlphaNumByte(b byte) bool {
-	return (b >= 'a' && b <= 'z') ||
-		(b >= 'A' && b <= 'Z') ||
-		(b >= '0' && b <= '9')
+	return agent.IsSilentReply(content)
 }
 
 // resolveCronPeerKind infers peer kind from the cron job's user ID.

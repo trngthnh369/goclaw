@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // staticTokenSource implements TokenSource for testing.
@@ -1266,5 +1267,79 @@ func TestCodexBuildRequestBody_NextTurnExtendsPreviousRequest(t *testing.T) {
 				t.Errorf("input does not extend the previous request\nprev: %s\nnext: %s", prevInput, nextInput)
 			}
 		})
+	}
+}
+
+func TestCodexProviderRetriesPreOutputResponseFailed(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		if calls == 1 {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+				Type:     "response.failed",
+				Response: &codexAPIResponse{Error: &codexErrorDetail{Message: "An error occurred while processing your request. You can retry your request."}},
+			}))
+			flusher.Flush()
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{Type: "response.output_text.delta", Delta: "ok"}))
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{Type: "response.completed", Response: &codexAPIResponse{Status: "completed"}}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "tok"}, server.URL, "gpt-4o")
+	p.retryConfig = RetryConfig{Attempts: 2, MinDelay: time.Millisecond, MaxDelay: time.Millisecond}
+
+	result, err := p.ChatStream(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if result.Content != "ok" {
+		t.Fatalf("content = %q, want ok", result.Content)
+	}
+}
+
+func TestCodexProviderDoesNotRetryAfterVisibleOutput(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{Type: "response.output_text.delta", Delta: "partial"}))
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type:     "response.failed",
+			Response: &codexAPIResponse{Error: &codexErrorDetail{Message: "An error occurred while processing your request. You can retry your request."}},
+		}))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "tok"}, server.URL, "gpt-4o")
+	p.retryConfig = RetryConfig{Attempts: 2, MinDelay: time.Millisecond, MaxDelay: time.Millisecond}
+
+	var chunks []string
+	result, err := p.ChatStream(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}}, func(chunk StreamChunk) {
+		if chunk.Content != "" {
+			chunks = append(chunks, chunk.Content)
+		}
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+	if result == nil || result.Content != "partial" {
+		t.Fatalf("result content = %#v, want partial", result)
+	}
+	if len(chunks) != 1 || chunks[0] != "partial" {
+		t.Fatalf("chunks = %#v, want [partial]", chunks)
 	}
 }
