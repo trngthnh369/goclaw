@@ -73,6 +73,7 @@ type openAIServerToolUse struct {
 type openAIStreamChunk struct {
 	Choices []openAIStreamChoice `json:"choices"`
 	Usage   *openAIUsage         `json:"usage,omitempty"`
+	Error   *openAIStreamError   `json:"error,omitempty"`
 }
 
 type openAIStreamChoice struct {

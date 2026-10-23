@@ -210,8 +210,9 @@ var (
 	leakedReasoningHeader = regexp.MustCompile(
 		`^\s*(?:\*\*|#+\s*)?(?:思考过程|思考過程|(?i:thinking process|thought process))(?:\*\*)?\s*[:：]`)
 	leakedReasoningHandoffs = []*regexp.Regexp{
+		// A "Final Answer:" label is deliberately not a hand-off: a reply that
+		// shows its working on request legitimately ends with one.
 		regexp.MustCompile(`(?i)let'?s (?:now )?(?:write|draft|compose|produce|generate|output|craft|finalize)(?: out| up)? (?:the |my |a |our )?(?:final )?(?:response|answer|reply|output)\s*[.!]+`),
-		regexp.MustCompile(`(?im)^\s*(?:\*\*|#+\s*)?final (?:response|answer)(?:\*\*)?\s*[:：](?:\*\*)?`),
 	}
 )
 
@@ -230,6 +231,8 @@ func stripLeakedReasoningPreamble(content string) string {
 			"len", len(content))
 		return content
 	}
+	slog.Info("sanitize: stripped leaked reasoning preamble",
+		"stripped_len", cut, "kept_len", len(content)-cut)
 	return strings.TrimSpace(content[cut:])
 }
 

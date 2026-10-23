@@ -494,6 +494,7 @@
     }
   },
   "fieldOptions": {
+    "error_notice": { "off": "Off (stay silent)", "en": "English", "vi": "Tiếng Việt", "zh": "中文" },
     "dm_policy": {
       "pairing": "Pairing (require code)",
       "open": "Open (accept all)",

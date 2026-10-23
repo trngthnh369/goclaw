@@ -63,3 +63,11 @@ func (b *idleTimeoutBody) Close() error {
 	})
 	return err
 }
+
+// UsesStreamTransport reports whether req asks Chat to stream under the hood
+// (OptStreamTransport). Usage accounting treats such a call like a stream: the
+// upstream may have generated tokens even when the call ends in an error.
+func UsesStreamTransport(req ChatRequest) bool {
+	use, _ := req.Options[OptStreamTransport].(bool)
+	return use
+}

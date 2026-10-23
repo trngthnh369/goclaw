@@ -23,6 +23,10 @@ type ModelFallbackProvider struct {
 
 type FallbackCallInfo struct {
 	Streamed bool
+	// StreamTransport is true when a Chat call ran over a stream without
+	// delivering chunks (OptStreamTransport). Nothing reached the user, but the
+	// upstream may have generated tokens before an error.
+	StreamTransport bool
 }
 
 type FallbackAfterCall func(*ChatResponse, error, FallbackCallInfo)
@@ -81,7 +85,7 @@ func (p *ModelFallbackProvider) ChatWithHook(ctx context.Context, req ChatReques
 		}
 		resp, err := entry.Provider.Chat(ctx, nextReq)
 		if after != nil {
-			after(resp, err, FallbackCallInfo{})
+			after(resp, err, FallbackCallInfo{StreamTransport: UsesStreamTransport(nextReq)})
 		}
 		return resp, err
 	})
@@ -149,7 +153,7 @@ func (p *ModelFallbackProvider) runOrdered(
 			continue
 		}
 		callCtx := ctx
-		if p.hasNextCandidate(len(candidates), i) {
+		if p.hasNextCandidate(candidates, i) {
 			callCtx = WithoutTimeoutRetry(ctx)
 		}
 		resp, err := call(callCtx, entry, req)
@@ -179,10 +183,18 @@ func (p *ModelFallbackProvider) runOrdered(
 }
 
 // hasNextCandidate reports whether runOrdered may still try another candidate
-// after index i, given the configured attempt cap.
-func (p *ModelFallbackProvider) hasNextCandidate(total, i int) bool {
-	next := i + 1
-	return next < total && (p.maxAttempts <= 0 || next < p.maxAttempts)
+// after index i: one within the attempt cap that is not cooling down. Probe
+// eligibility is not consulted because ShouldProbe consumes the probe slot.
+func (p *ModelFallbackProvider) hasNextCandidate(candidates []FallbackCandidate, i int) bool {
+	for next := i + 1; next < len(candidates); next++ {
+		if p.maxAttempts > 0 && next >= p.maxAttempts {
+			return false
+		}
+		if p.tracker == nil || p.tracker.IsAvailable(CooldownKey(candidates[next].ProviderName, candidates[next].Model)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *ModelFallbackProvider) orderedCandidates(requestModel string) []FallbackCandidate {

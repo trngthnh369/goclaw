@@ -407,7 +407,7 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 						}
 						opts = append(opts, withModelFallbackAttempt(fallbackMeta))
 						if reservation != nil {
-							if info.Streamed {
+							if info.Streamed || info.StreamTransport {
 								reservation.ReconcileStream(callCtx, callResp, callErr, true)
 							} else {
 								reservation.Reconcile(callCtx, callResp, callErr)
@@ -445,7 +445,9 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 				callResp, callErr = provider.Chat(ctx, request)
 			}
 			if reservation != nil {
-				reservation.Reconcile(ctx, callResp, callErr)
+				// A stream-transport call may have generated tokens before failing,
+				// so it keeps the estimate on error like a real stream does.
+				reservation.ReconcileStream(ctx, callResp, callErr, providers.UsesStreamTransport(request))
 				recordUsageCapAttempt(reservation)
 			}
 			return callResp, callErr

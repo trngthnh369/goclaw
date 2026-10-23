@@ -77,6 +77,13 @@ func IsRetryableError(err error) bool {
 		return false
 	}
 
+	// A stream that went silent for the whole idle limit is not retried: the
+	// retry would sit through the same limit again before failover can run.
+	var idle errStreamIdle
+	if errors.As(err, &idle) {
+		return false
+	}
+
 	// Check for network errors
 	var netErr net.Error
 	if errors.As(err, &netErr) {

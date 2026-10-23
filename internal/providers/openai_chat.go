@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
 )
 
 func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if useStream, _ := req.Options[OptStreamTransport].(bool); useStream {
-		return p.ChatStream(ctx, req, nil)
+	if UsesStreamTransport(req) {
+		return p.chatViaStream(ctx, req)
 	}
 	model := p.resolveModel(req.Model)
 	body := p.buildRequestBody(model, req, false)
@@ -93,7 +92,8 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 	defer cb.Close()
 
 	result := &ChatResponse{FinishReason: "stop"}
-	accumulators := make(map[int]*toolCallAccumulator)
+	var calls toolCallAssembler
+	sawFinish := false
 
 	sse := NewSSEScanner(cb)
 	for sse.Next() {
@@ -102,6 +102,12 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+		// An upstream failure after the 200 header arrives in-band. Surface it
+		// as an HTTP error so retry and model fallback treat it like the
+		// status code a non-stream request would have returned.
+		if chunk.Error != nil {
+			return nil, chunk.Error.httpError(p.name)
 		}
 
 		// Usage chunk often has empty choices — extract usage before skipping.
@@ -167,24 +173,12 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 
 		// Accumulate streamed tool calls
 		for _, tc := range delta.ToolCalls {
-			acc, ok := accumulators[tc.Index]
-			if !ok {
-				acc = &toolCallAccumulator{
-					ToolCall: ToolCall{ID: tc.ID, Name: strings.TrimSpace(tc.Function.Name)},
-				}
-				accumulators[tc.Index] = acc
-			}
-			if tc.Function.Name != "" {
-				acc.Name = strings.TrimSpace(tc.Function.Name)
-			}
-			acc.rawArgs += tc.Function.Arguments
-			if tc.Function.ThoughtSignature != "" {
-				acc.thoughtSig = tc.Function.ThoughtSignature
-			}
+			calls.add(tc)
 		}
 
 		if chunk.Choices[0].FinishReason != "" {
 			result.FinishReason = chunk.Choices[0].FinishReason
+			sawFinish = true
 		}
 
 	}
@@ -194,20 +188,16 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 		return result, fmt.Errorf("%s: stream read error: %w", p.name, err)
 	}
 
-	// Parse accumulated tool call arguments
-	for i := 0; i < len(accumulators); i++ {
-		acc := accumulators[i]
-		args := make(map[string]any)
-		if err := json.Unmarshal([]byte(acc.rawArgs), &args); err != nil && acc.rawArgs != "" {
-			slog.Warn("openai_stream: failed to parse tool call arguments",
-				"tool", acc.Name, "raw_len", len(acc.rawArgs), "error", err)
-			acc.ParseError = fmt.Sprintf("malformed JSON (%d chars): %v", len(acc.rawArgs), err)
-		}
-		acc.Arguments = args
-		if acc.thoughtSig != "" {
-			acc.Metadata = map[string]string{"thought_signature": acc.thoughtSig}
-		}
-		result.ToolCalls = append(result.ToolCalls, acc.ToolCall)
+	result.ToolCalls = calls.toolCalls()
+
+	// A stream that ends without a finish_reason was cut off upstream. When
+	// nothing was delivered to a caller (stream transport for a non-streaming
+	// channel), report it so retry or fallback runs, instead of returning an
+	// empty or half-written answer as a success. The partial result is kept
+	// for usage accounting.
+	if onChunk == nil && !sawFinish {
+		return result, fmt.Errorf("%s: stream ended without a response: %w", p.name,
+			&HTTPError{Status: 502, Body: "upstream stream closed before finish_reason"})
 	}
 
 	// Only override finish_reason when stream wasn't truncated.
@@ -255,4 +245,19 @@ func truncateToolCallID(id string) string {
 	}
 	hash := sha256.Sum256([]byte(id))
 	return "call_" + hex.EncodeToString(hash[:])[:maxToolCallIDLen-len("call_")]
+}
+
+// chatViaStream serves Chat over a streaming request (OptStreamTransport).
+// Nothing reaches the caller until the answer is complete, so a mid-stream
+// failure is retried as a whole like a non-stream request would be. The whole
+// call is bounded by StreamTransportTimeout: the idle guard alone would let an
+// upstream that keeps sending bytes hold the session lane indefinitely.
+func (p *OpenAIProvider) chatViaStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, StreamTransportTimeout)
+	defer cancel()
+	// ChatStream retries its own connection phase; only the outer loop retries.
+	once := WithRetryMaxAttempts(ctx, 1)
+	return RetryDo(ctx, p.retryConfig, func() (*ChatResponse, error) {
+		return p.ChatStream(once, req, nil)
+	})
 }

@@ -3,6 +3,8 @@ package discord
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -78,6 +80,10 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		if err := json.Unmarshal(cfg, &ic); err != nil {
 			return nil, fmt.Errorf("decode discord config: %w", err)
 		}
+	}
+	if v := strings.TrimSpace(ic.ErrorNotice); v != "" && !strings.EqualFold(v, "off") && channels.ResolveErrorNoticeLocale(v) == "" {
+		slog.Warn("discord: unknown error_notice value, failure notices stay off",
+			"channel", name, "error_notice", v, "allowed", "off, en, vi, zh")
 	}
 
 	dcCfg := config.DiscordConfig{

@@ -24,9 +24,14 @@ func TestStripLeakedReasoningPreamble(t *testing.T) {
 			want: "Quất tiếp **Chương VIII (Quyển IV)** nha sếp! 👾🔥\n\n### I. NỘI DUNG CỐT LÕI",
 		},
 		{
-			name: "english header with a final response label",
-			in:   "**Thinking Process:**\n1. Plan the answer.\n\n**Final Response:**\nXin chào bạn!",
+			name: "english header handed off to the answer",
+			in:   "**Thinking Process:**\n1. Plan the answer.\nLet's draft the reply.\nXin chào bạn!",
 			want: "Xin chào bạn!",
+		},
+		{
+			name: "requested working that ends in a final answer label is kept",
+			in:   "Thinking Process:\n1. 6 x 7 = 42\n\nFinal Answer: 42",
+			want: "Thinking Process:\n1. 6 x 7 = 42\n\nFinal Answer: 42",
 		},
 		{
 			name: "header without a hand-off is kept whole",

@@ -424,6 +424,7 @@
     }
   },
   "fieldOptions": {
+    "error_notice": { "off": "关闭（保持静默）", "en": "English", "vi": "Tiếng Việt", "zh": "中文" },
     "dm_policy": {
       "pairing": "配对（需要验证码）",
       "open": "开放（接受所有）",

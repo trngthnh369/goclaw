@@ -424,6 +424,7 @@
     }
   },
   "fieldOptions": {
+    "error_notice": { "off": "Tắt (im lặng)", "en": "English", "vi": "Tiếng Việt", "zh": "中文" },
     "dm_policy": {
       "pairing": "Ghép nối (yêu cầu mã)",
       "open": "Mở (chấp nhận tất cả)",

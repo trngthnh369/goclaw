@@ -23,8 +23,9 @@ const (
 	// request and return it whole, emitting nothing to the caller on the way.
 	// Agent turns on non-streaming channels set it: a non-stream request gets no
 	// response header until generation ends, so ResponseHeaderTimeout would
-	// otherwise cap the length of the whole answer. Providers that cannot
-	// stream a given request ignore it.
+	// otherwise cap the length of the whole answer. Only OpenAI-compatible
+	// providers honour it today (DashScope not when tools are present);
+	// Anthropic native, Codex and CLI providers keep their own transport.
 	OptStreamTransport = "stream_transport"
 
 	// Middleware-related options (Phase 2 will use these)
