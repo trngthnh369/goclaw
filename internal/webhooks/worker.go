@@ -27,6 +27,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/crypto"
 	"github.com/nextlevelbuilder/goclaw/internal/security"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 const (
@@ -749,6 +750,7 @@ func (w *WebhookWorker) invokeAgent(
 	}
 
 	rr := agent.RunRequest{
+		Surface:           tools.SurfaceHTTP,
 		SessionKey:        sessionKey,
 		Message:           userMessage,
 		Channel:           "webhook",

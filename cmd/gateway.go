@@ -99,6 +99,7 @@ func runGateway() {
 	textHandler := slog.NewTextHandler(logOutput, &slog.HandlerOptions{Level: logLevel})
 	logTee := gateway.NewLogTee(textHandler)
 	slog.SetDefault(slog.New(logTee))
+	hardenGatewayProcess()
 
 	// Load config
 	cfgPath := resolveConfigPath()
@@ -500,6 +501,10 @@ func runGateway() {
 	channelMgr := channels.NewManager(msgBus)
 	deps.channelMgr = channelMgr
 
+	// Webhooks mount here, not in wireHTTPHandlersOnServer: POST /v1/webhooks/message
+	// is gated on deps.channelMgr, which does not exist until the line above.
+	deps.wireWebhookHandlers()
+
 	// Wire channel member resolver into permission grant paths (WS + HTTP) so
 	// file_writer grants coming from the Web UI auto-enrich their metadata.
 	cfgPermsMethods.SetMemberResolver(channelMgr)
@@ -511,13 +516,19 @@ func runGateway() {
 		channelInstancesH.SetChannelManager(channelMgr)
 	}
 
-	// Wire channel sender + tenant checker on message tool (now that channelMgr exists)
+	// Wire channel sender + tenant checker + outbound dispatcher on message tool (now that channelMgr exists)
 	if t, ok := toolsReg.Get("message"); ok {
 		if cs, ok := t.(tools.ChannelSenderAware); ok {
 			cs.SetChannelSender(channelMgr.SendToChannel)
 		}
+		if od, ok := t.(tools.OutboundDispatcherAware); ok {
+			od.SetOutboundDispatcher(channelMgr.DispatchOutbound)
+		}
 		if tc, ok := t.(tools.ChannelTenantCheckerAware); ok {
 			tc.SetChannelTenantChecker(channelMgr.ChannelTenantID)
+		}
+		if rc, ok := t.(tools.ReelsReviewChatCheckerAware); ok {
+			rc.SetReelsReviewChatChecker(channelMgr.IsReelsReviewChat)
 		}
 	}
 	// Wire group member lister on list_group_members tool
@@ -642,6 +653,13 @@ func runGateway() {
 		}
 	}
 
+	// Set contact collector before starting channels so startup sync can populate group names.
+	var contactCollector *store.ContactCollector
+	if pgStores.Contacts != nil {
+		contactCollector = store.NewContactCollector(pgStores.Contacts, cache.NewInMemoryCache[bool]())
+		channelMgr.SetContactCollector(contactCollector)
+	}
+
 	// Start channels
 	if err := channelMgr.StartAll(ctx); err != nil {
 		slog.Error("failed to start channels", "error", err)
@@ -716,9 +734,11 @@ func runGateway() {
 		webFetchTool:      webFetchTool,
 		ttsTool:           ttsTool,
 		sandboxMgr:        sandboxMgr,
+		execApprovalMgr:   execApprovalMgr,
 		postTurn:          postTurn,
 		subagentMgr:       subagentMgr,
 		consumerTeamStore: consumerTeamStore,
+		contactCollector:  contactCollector,
 		auditCh:           auditCh,
 		sigCh:             sigCh,
 	})

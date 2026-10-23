@@ -1,0 +1,1108 @@
+"""Unit and flow tests for the Video Factory core. No network, no browser.
+
+Run: python3 -X utf8 tests/test_core.py   (stdlib unittest; also runs in the container)
+Tests that need ffprobe are skipped when it is not installed.
+"""
+
+from __future__ import annotations
+
+import copy
+import io
+import json
+import os
+import shutil
+import struct
+import sys
+import tempfile
+import unittest
+import zlib
+from contextlib import redirect_stdout
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "scripts"))
+
+import studio  # noqa: E402
+from vfcore import backlog, briefs, captions, fontmetrics, jobs, package, tts  # noqa: E402
+from vfcore.formats import get_format  # noqa: E402
+from vfcore.paths import Studio  # noqa: E402
+from vfcore.schema import validate_research, validate_review, validate_script  # noqa: E402
+from vfcore.textutil import syllable_count  # noqa: E402
+from vfcore.themes import get_theme  # noqa: E402
+from vfcore.util import StudioError, read_json  # noqa: E402
+
+SHORT = get_format("short")
+HAS_FFPROBE = shutil.which("ffprobe") is not None
+
+
+def png_bytes(width: int, height: int, rgb: tuple[int, int, int] = (40, 80, 160)) -> bytes:
+    """A solid-colour PNG built with zlib, so tests need no image library."""
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+
+
+def run_cli(*argv: str, stdin: str | None = None) -> tuple[int, str]:
+    buf = io.StringIO()
+    old_stdin = sys.stdin
+    if stdin is not None:
+        sys.stdin = io.StringIO(stdin)
+    try:
+        with redirect_stdout(buf):
+            code = studio.main(list(argv))
+    finally:
+        sys.stdin = old_stdin
+    return code, buf.getvalue()
+
+
+class SchemaTests(unittest.TestCase):
+    def test_examples_pass(self):
+        errors, _ = validate_research(briefs.EXAMPLE_RESEARCH)
+        self.assertEqual(errors, [])
+        errors, _ = validate_script(briefs.EXAMPLE_SCRIPT, SHORT, {"F1", "F2"})
+        self.assertEqual(errors, [])
+
+    def test_number_without_fact_is_rejected(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][2]["fact_ids"] = []
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("states a number" in e for e in errors), errors)
+
+    def test_emoji_and_unknown_fact_rejected(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][1]["narration"] += " 🔥"
+        doc["scenes"][1]["fact_ids"] = ["F9"]
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("emoji" in e for e in errors), errors)
+        self.assertTrue(any("F9" in e for e in errors), errors)
+
+    def test_hook_first_and_cta_last(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][0]["role"] = "body"
+        doc["scenes"][3]["role"] = "cta"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any('must be "hook"' in e for e in errors), errors)
+        self.assertTrue(any("must be the last scene" in e for e in errors), errors)
+
+    def test_long_scene_and_wide_headline_rejected(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][1]["narration"] = " ".join(["từ"] * 40)
+        doc["scenes"][1]["emphasis"] = []
+        doc["scenes"][4]["on_screen"] = "MƯỜI BA ĐIỀU QUAN TRỌNG NHẤT BẠN CẦN BIẾT"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("syllables" in e for e in errors), errors)
+        self.assertTrue(any("does not fit in 2 lines" in e for e in errors), errors)
+
+    def test_facebook_caption_required(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        del doc["social"]["facebook"]
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("facebook" in e for e in errors), errors)
+
+    def test_on_screen_text_without_accents_is_rejected_but_english_is_not(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][2]["visual"]["card"]["label"] = "nguoi truong thanh tri hoan kinh nien"
+        doc["scenes"][7]["on_screen"] = "Save it for later"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        accents = [e for e in errors if "drops the Vietnamese accents" in e]
+        self.assertEqual(len(accents), 1, errors)
+        self.assertIn("scene s3.visual.card.label", accents[0])
+        self.assertIn('"người trưởng"', accents[0])
+
+    def test_review_rules(self):
+        review = copy.deepcopy(briefs.REVIEW_EXAMPLE)
+        errors, _ = validate_review(review, "script", required_facts={"F1", "F2"}, scene_ids=["s1", "s3"])
+        self.assertEqual(errors, [])
+        review["verdict"] = "PASS"
+        errors, _ = validate_review(review, "script", required_facts={"F1", "F2"}, scene_ids=["s1", "s3"])
+        self.assertTrue(any("PASS but lists blocker" in e for e in errors), errors)
+        review = copy.deepcopy(briefs.REVIEW_EXAMPLE)
+        review["checked_facts"] = ["F1"]
+        errors, _ = validate_review(review, "script", required_facts={"F1", "F2"}, scene_ids=["s1", "s3"])
+        self.assertTrue(any("misses F2" in e for e in errors), errors)
+
+    def test_an_older_deployed_version_hands_the_call_to_the_newest(self):
+        with tempfile.TemporaryDirectory() as root:
+            for version in ("9", "10", ".staging-11"):
+                (Path(root) / version / "scripts").mkdir(parents=True)
+                (Path(root) / version / "scripts" / "studio.py").write_text("", encoding="utf-8")
+            newest = Path(root) / "10" / "scripts" / "studio.py"
+            self.assertEqual(studio.newer_install(Path(root) / "9" / "scripts" / "studio.py"), newest)
+            self.assertIsNone(studio.newer_install(newest))
+            self.assertIsNone(studio.newer_install(Path(root) / ".staging-11" / "scripts" / "studio.py"))
+
+    def test_syllables(self):
+        self.assertEqual(syllable_count("Bạn có biết? Mỗi ngày, 70 nghìn suy nghĩ."), 9)
+
+
+class CaptionTests(unittest.TestCase):
+    WORDS = [{"text": t, "start": i * 0.25, "end": i * 0.25 + 0.22}
+             for i, t in enumerate(["Bạn", "có", "biết", "Mỗi", "ngày", "bộ", "não", "xử", "lý", "khoảng",
+                                    "bảy", "mươi", "nghìn", "suy", "nghĩ"])]
+
+    def test_alignment_keeps_punctuation_and_handles_expansion(self):
+        tokens = captions.align("Bạn có biết? Mỗi ngày, bộ não xử lý khoảng 70 nghìn suy nghĩ.", self.WORDS, 4.0)
+        texts = [t.text for t in tokens]
+        self.assertEqual(texts[2], "biết?")
+        self.assertTrue(all(t.start >= 0 and t.end >= t.start for t in tokens))
+        seventy = tokens[texts.index("70")]
+        self.assertGreaterEqual(seventy.start, self.WORDS[9]["end"] - 0.01)   # after "khoảng"
+        self.assertLessEqual(seventy.end, self.WORDS[12]["end"] + 0.01)       # before/at "nghìn" end
+        starts = [t.start for t in tokens]
+        self.assertEqual(starts, sorted(starts))
+
+    def test_chunks_fit_the_frame(self):
+        tokens = captions.align("Bạn có biết? Mỗi ngày, bộ não xử lý khoảng 70 nghìn suy nghĩ.", self.WORDS, 4.0)
+        chunks = captions.chunk(tokens, SHORT)
+        font = fontmetrics.load(fontmetrics.CAPTION_FONT_FILE)
+        for c in chunks:
+            self.assertLessEqual(font.ass_width(c.text, SHORT.caption_size), SHORT.text_width)
+        self.assertTrue(chunks[0].text.endswith("biết?"))
+
+    def test_scene_ass(self):
+        tokens = captions.align("Bạn có biết?", self.WORDS[:3], 1.0)
+        ass, chunks = captions.build_scene_ass(SHORT, get_theme("midnight"), tokens=tokens, emphasis=["biết"],
+                                               on_screen="Không phải vì lười", duration=2.0, offset=0.12)
+        self.assertIn("Be Vietnam Pro ExtraBold", ass)
+        self.assertIn("Headline", ass)
+        self.assertEqual(ass.count("Dialogue: 1,"), 3)
+        srt = captions.build_srt([(10.0, chunks)])
+        self.assertIn("00:00:10,", srt)
+
+    def test_font_metrics_match_libass_measurement(self):
+        # Measured on a libass frame in the container: "Vì sao não bộ" at Fontsize 96 = ~436 px.
+        width = fontmetrics.load(fontmetrics.HEADLINE_FONT_FILE).ass_width("Vì sao não bộ", 96)
+        self.assertAlmostEqual(width, 437, delta=8)
+
+
+class FlowTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="vf-test-"))
+        self.ws = str(self.tmp / "studio")
+        code, _ = run_cli("--workspace", self.ws, "init")
+        self.assertEqual(code, 0)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _next(self, job: str) -> dict:
+        code, text = run_cli("--workspace", self.ws, "next", "--job", job)
+        self.assertEqual(code, 0, text)
+        return json.loads(text)
+
+    def test_stage_machine(self):
+        code, text = run_cli("--workspace", self.ws, "new", "--topic", "Vì sao chúng ta hay trì hoãn")
+        self.assertEqual(code, 0, text)
+        job = text.split()[1]
+        action = self._next(job)
+        self.assertEqual((action["stage"], action["owner"]), ("script", "vf-scriptwriter"))
+        self.assertIn("emit --job", action["delegate"]["task"])
+
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                             stdin=json.dumps(briefs.EXAMPLE_SCRIPT))
+        self.assertIn("submit research.json first", text)
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "research",
+                             stdin="```json\n" + json.dumps(briefs.EXAMPLE_RESEARCH, ensure_ascii=False) + "\n```")
+        self.assertEqual(code, 0, text)
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                             stdin=json.dumps(briefs.EXAMPLE_SCRIPT, ensure_ascii=False))
+        self.assertEqual(code, 0, text)
+
+        action = self._next(job)
+        self.assertEqual(action["stage"], "review_script")
+        code, text = run_cli("--workspace", self.ws, "emit", "--job", job, "--stage", "review_script")
+        self.assertIn("F2:", text)
+
+        revise = copy.deepcopy(briefs.REVIEW_EXAMPLE)
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_script",
+                             stdin=json.dumps(revise, ensure_ascii=False))
+        self.assertEqual(code, 0, text)
+        action = self._next(job)
+        self.assertEqual(action["stage"], "script_revise")
+        code, text = run_cli("--workspace", self.ws, "emit", "--job", job, "--stage", "script_revise")
+        self.assertIn("REVISION", text)
+        self.assertIn("ở Mỹ", text)
+
+        fixed = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        fixed["scenes"][2]["narration"] = "Ở Mỹ, cứ 5 người trưởng thành thì có 1 người trì hoãn kinh niên."
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                             stdin=json.dumps(fixed, ensure_ascii=False))
+        self.assertEqual(code, 0, text)
+        paths = Studio(Path(self.ws)).job(job)
+        self.assertEqual(jobs.load_meta(paths)["revisions"]["script"], 1)
+        self.assertEqual(self._next(job)["stage"], "review_script")
+
+        ok = {"schema": "vf.review.v1", "stage": "script", "verdict": "PASS", "issues": [],
+              "checked_facts": ["F1", "F2"]}
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_script",
+                             stdin=json.dumps(ok))
+        self.assertEqual(code, 0, text)
+        action = self._next(job)
+        self.assertEqual(action["stage"], "assets")
+        self.assertEqual(len(action["calls"]), 6)
+        call = action["calls"][0]
+        self.assertEqual(call["create_image"]["aspect_ratio"], "9:16")
+        self.assertEqual(call["create_image"]["image_size"], "2K")
+        self.assertIn("no text", call["create_image"]["prompt"])
+
+        # A prompt-only change must not reopen the fact check.
+        code, text = run_cli("--workspace", self.ws, "revise-visual", "--job", job, "--scene", "s2",
+                             "--prompt", "a person walking away from a storm cloud at dusk, no text")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self._next(job)["stage"], "assets")
+
+        if not HAS_FFPROBE:
+            return
+        outside = self.tmp / "img.png"
+        outside.write_bytes(png_bytes(768, 1376))
+        code, text = run_cli("--workspace", self.ws, "attach", "--job", job, "--scene",
+                             self._next(job)["calls"][0]["scene"], "--file", f"MEDIA:{outside}")
+        self.assertEqual(code, 1, text)                       # not a create_image output
+        image = self.tmp / "generated" / "2026-09-24" / "img.png"
+        image.parent.mkdir(parents=True)
+        image.write_bytes(png_bytes(768, 1376))
+        self.addCleanup(setattr, studio, "IMAGE_ROOT", studio.IMAGE_ROOT)
+        studio.IMAGE_ROOT = self.tmp
+        for c in self._next(job)["calls"]:
+            code, text = run_cli("--workspace", self.ws, "attach", "--job", job, "--scene", c["scene"],
+                                 "--file", f"MEDIA:{image}")
+            self.assertEqual(code, 0, text)
+        action = self._next(job)
+        self.assertEqual(action["stage"], "render")
+        self.assertIn("render --job", action["exec"])
+
+    def _job_at_video_review(self) -> tuple[str, "object"]:
+        """A job whose script passed review and whose 'render' is faked by a manifest."""
+        code, text = run_cli("--workspace", self.ws, "new", "--topic", "Kiểm thử phản hồi")
+        job = text.split()[1]
+        run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "research",
+                stdin=json.dumps(briefs.EXAMPLE_RESEARCH, ensure_ascii=False))
+        run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                stdin=json.dumps(briefs.EXAMPLE_SCRIPT, ensure_ascii=False))
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_script",
+                             stdin=json.dumps({"schema": "vf.review.v1", "stage": "script", "verdict": "PASS",
+                                               "issues": [], "checked_facts": ["F1", "F2"]}))
+        self.assertEqual(code, 0, text)
+        paths = Studio(Path(self.ws)).job(job)
+        from vfcore.util import sha256_file, write_json
+        state = jobs.load_state(paths)
+        paths.assets.mkdir(parents=True, exist_ok=True)
+        for scene in state.script["scenes"]:
+            if scene["visual"]["kind"] == "ai_image":
+                (paths.assets / f"{scene['id']}.png").write_bytes(png_bytes(8, 8))
+                write_json(paths.assets / f"{scene['id']}.json", {
+                    "file": f"{scene['id']}.png", "sha256": "0" * 16,
+                    "prompt_sha": jobs.prompt_sha(jobs.image_prompt(scene, state.script, state.fmt))})
+        paths.out.mkdir(parents=True, exist_ok=True)
+        paths.master.write_bytes(b"fake master")
+        write_json(paths.manifest, {"master_sha": sha256_file(paths.master)[:16], "qa_ok": True,
+                                    "input_sha": jobs.render_input_sha(jobs.load_state(paths), {})})
+        return job, paths
+
+    def test_video_review_reads_every_frame_in_one_turn(self):
+        job, paths = self._job_at_video_review()
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "review_video")
+        self.assertIn("Do not run emit again", action["delegate"]["task"])
+        from vfcore.util import write_json
+        write_json(paths.qa, {"ok": True, "soft": [], "contact_sheet": str(paths.contact)})
+        code, text = run_cli("--workspace", self.ws, "emit", "--job", job, "--stage", "review_video")
+        self.assertEqual(code, 0, text)
+        scenes = briefs.EXAMPLE_SCRIPT["scenes"]
+        self.assertIn(f"make all {len(scenes) + 1} read_image calls below in ONE turn", text)
+        for scene in scenes:
+            self.assertIn(f"{scene['id']}.jpg\n  prompt: One frame of a vertical social video (scene {scene['id']};", text)
+        self.assertIn("a picture inside a picture", text)
+        self.assertIn('"checked_scenes"', text)
+        self.assertIn("deliver: false", text)
+        last = text.rstrip().splitlines()[-1]
+        self.assertTrue(last.startswith("NEXT: in one turn, call read_image once for each of"), last)
+
+    def _as_person(self, job: str, paths, words: str = "sửa ảnh") -> None:
+        """The gateway reports that a person replied to this job's current message."""
+        run_cli("--workspace", self.ws, "config", "set", "delivery.channel=vf-discord")
+        ref = jobs.load_meta(paths).get("escalation_ref")
+        replied = f"⚠️ Video Factory · x\njob: {job}" + (f"\nref: {ref}" if ref else "")
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": replied,
+                               "current_message": words})
+
+    def test_feedback_needs_a_persons_reply_confirmed_by_the_gateway(self):
+        job, paths = self._job_at_video_review()
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
+                             "--scene", "s1", "--text", "director's own idea")
+        self.assertEqual(code, 1, text)
+        self.assertIn("no run receipt", text)
+        self.assertEqual(len(jobs.reviews(paths, "video")), 0)
+
+    def test_consecutive_feedback_on_one_cut_adds_up(self):
+        job, paths = self._job_at_video_review()
+        self._as_person(job, paths)
+        for scene in ("s1", "s2"):
+            code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
+                                 "--scene", scene, "--text", f"ảnh {scene} bị lồng khung")
+            self.assertEqual(code, 0, text)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertEqual(sorted(action["scenes"]), ["s1", "s2"])
+        self.assertEqual(len(jobs.reviews(paths, "video")), 1)
+
+    def test_model_review_rounds_escalate_but_human_feedback_does_not(self):
+        job, paths = self._job_at_video_review()
+        revise = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE",
+                  "issues": [{"scene": "s1", "severity": "major", "type": "visual",
+                              "problem": "chữ méo trong ảnh", "fix": "tạo lại ảnh"}],
+                  "checked_scenes": [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"]]}
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_video",
+                             stdin=json.dumps(revise, ensure_ascii=False))
+        self.assertEqual(code, 0, text)
+        meta = jobs.load_meta(paths)
+        meta["revisions"]["video"] = jobs.MAX_VIDEO_REVISIONS
+        jobs.save_meta(paths, meta)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "escalate")
+        self.assertNotIn("commands", action)                  # nothing to run until the human answers
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual((action["stage"], action["action"]), ("escalated", "stop"))
+        self.assertNotIn("--quote", action["human_commands"]["continue anyway"])   # the gateway supplies the words
+        # The same situation raised by a person is never capped.
+        self._as_person(job, paths, "sửa: ảnh cảnh 2 tối quá")
+        code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "visual",
+                             "--scene", "s2", "--text", "ảnh cảnh 2 tối quá")
+        self.assertEqual(code, 0, text)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertEqual(action["scenes"], ["s2"])
+        code, text = run_cli("--workspace", self.ws, "feedback", "--job", job, "--type", "script",
+                             "--text", "đổi hook thành câu hỏi")
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "script_revise")
+
+    def test_escalation_is_sent_to_the_review_channel_with_the_chat_id_as_text(self):
+        job, paths = self._job_at_video_review()
+        for kv in ("delivery.channel=vf-discord", "delivery.target=1552695501751586918"):
+            code, text = run_cli("--workspace", self.ws, "config", "set", kv)
+            self.assertEqual(code, 0, text)
+        revise = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE",
+                  "issues": [{"scene": "s1", "severity": "major", "type": "visual",
+                              "problem": "bàn tay sáu ngón", "fix": "tạo lại ảnh"}],
+                  "checked_scenes": [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"]]}
+        run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_video",
+                stdin=json.dumps(revise, ensure_ascii=False))
+        meta = jobs.load_meta(paths)
+        meta["revisions"]["video"] = jobs.MAX_VIDEO_REVISIONS
+        jobs.save_meta(paths, meta)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "escalate")
+        cfg = studio.load_config(Studio(Path(self.ws)))
+        self.assertEqual(cfg["delivery"]["target"], "1552695501751586918")   # never a rounded number
+        message = package.escalation_message(paths, action["issues"])
+        self.assertIn(f"job: {job}", message)
+        self.assertIn(f"ref: video-{read_json(paths.manifest)['master_sha']}-1-", message)
+        self.assertIn("[s1] bàn tay sáu ngón", message)
+        self.assertIn("cứ làm tiếp", message)
+
+    def test_redo_takes_only_a_scene_of_the_script(self):
+        job, paths = self._job_at_video_review()
+        code, text = run_cli("--workspace", self.ws, "redo", "--job", job, "--scene", "../job")
+        self.assertEqual(code, 1, text)
+        self.assertTrue(paths.meta.exists())
+
+    def test_config_values_are_typed_and_a_publish_switch_is_only_true_or_false(self):
+        for kv in ("publish.facebook_reels.enabled=no", "defaults.rate=abc"):
+            code, text = run_cli("--workspace", self.ws, "config", "set", kv)
+            self.assertEqual(code, 1, text)
+        self.assertFalse(studio.load_config(Studio(Path(self.ws)))["publish"]["facebook_reels"]["enabled"])
+
+    def test_two_reviews_claiming_one_number_both_survive(self):
+        from vfcore.util import write_json_numbered
+        with tempfile.TemporaryDirectory() as root:
+            first = write_json_numbered(Path(root), "video", 1, {"n": 1})
+            second = write_json_numbered(Path(root), "video", 1, {"n": 2})
+            self.assertEqual((first.name, second.name), ("video-01.json", "video-02.json"))
+
+    def _gateway_receipt(self, receipt: dict) -> None:
+        """Stand in for the gateway's GET /v1/runs/receipt for this test."""
+        import http.server
+        import threading
+
+        body = json.dumps(receipt).encode("utf-8")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                ok = self.headers.get("Authorization") == "Bearer tok-1"
+                self.send_response(200 if ok else 404)
+                self.end_headers()
+                if ok:
+                    self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(setattr, studio, "RECEIPT_URL", studio.RECEIPT_URL)
+        studio.RECEIPT_URL = f"http://127.0.0.1:{server.server_port}/v1/runs/receipt"
+
+    def test_override_takes_the_persons_reply_from_the_gateway_never_from_the_model(self):
+        job, paths = self._job_at_video_review()
+        override = ("--workspace", self.ws, "override", "--job", job, "--stage", "video")
+        code, text = run_cli(*override)
+        self.assertEqual(code, 1, text)                       # nothing escalated: nothing to override
+        self.assertIn("only answers an escalated review", text)
+        ref = f"video-{read_json(paths.manifest)['master_sha']}-2-0123abcd"
+        meta = jobs.load_meta(paths)
+        meta["status"], meta["escalated_stage"], meta["escalation_ref"] = "escalated", "video", ref
+        jobs.save_meta(paths, meta)
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli(*override)                       # a cron run: no receipt at all
+        self.assertEqual(code, 1, text)
+        question = f"⚠️ Video Factory · x\njob: {job}\nref: {ref}\n\nReview video vẫn chưa đạt"
+        earlier = f"⚠️ Video Factory · x\njob: {job}\nref: script-0badc0de-1\n\nReview kịch bản vẫn chưa đạt"
+        planted = question.replace(f"ref: {ref}", f"ref: script-0badc0de-1\nref: {ref}")
+        cases = [({"human_reply": False}, "not started by an allowlisted person"),
+                 ({"human_reply": True, "reply_to_content": planted, "current_message": "tiếp tục"},
+                  "not a Video Factory message"),
+                 ({"human_reply": True, "reply_to_content": earlier, "current_message": "tiếp tục"},
+                  "answered an earlier question"),
+                 ({"human_reply": True, "reply_to_content": "⚠️ Video Factory\njob: vf-other",
+                   "current_message": "cứ làm tiếp"}, "not a Video Factory message"),
+                 ({"human_reply": True, "reply_to_content": question, "current_message": "không được, làm lại"},
+                  "does not say to continue")]
+        cases.insert(1, ({"human_reply": True, "channel": "telegram-main", "reply_to_content": question,
+                          "current_message": "cứ làm tiếp"}, "not the review channel"))
+        for receipt, _ in cases[2:]:
+            receipt["channel"] = "vf-discord"
+        run_cli("--workspace", self.ws, "config", "set", "delivery.channel=vf-discord")
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        for receipt, reason in cases:
+            self._gateway_receipt(receipt)
+            code, text = run_cli(*override)
+            self.assertEqual(code, 1, text)
+            self.assertIn(reason, text)
+        self.assertEqual(jobs.load_meta(paths)["status"], "escalated")
+        manifest = read_json(paths.manifest)                  # a manifest edited to name another cut
+        paths.manifest.write_text(json.dumps(manifest | {"master_sha": "f" * 16}), encoding="utf-8")
+        code, text = run_cli(*override)
+        self.assertIn("does not match its manifest", text)
+        paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": question,
+                               "current_message": "cứ làm tiếp"})
+        code, text = run_cli(*override)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(jobs.load_meta(paths)["status"], "active")
+        self.assertEqual(jobs.reviews(paths, "video")[-1]["_human_quote"], "cứ làm tiếp")
+        meta = jobs.load_meta(paths)                          # a new question: the old reply is spent
+        meta["status"], meta["escalated_stage"] = "escalated", "video"
+        jobs.save_meta(paths, meta)
+        code, text = run_cli(*override)
+        self.assertEqual(code, 1, text)
+        self.assertIn("to send it again", text)
+        message = package.review_message(*PackageTests.ARGS, "Caption.", [], "/tmp/p.mp4", publishable=False,
+                                         overrides=["cứ làm tiếp"])
+        self.assertIn("theo lời bạn: «cứ làm tiếp»", message)
+
+    def test_a_question_without_a_random_ref_is_asked_again(self):
+        job, paths = self._job_at_video_review()
+        meta = jobs.load_meta(paths)                          # asked by v20: kind-sha8-count
+        meta["status"], meta["escalated_stage"], meta["escalation_ref"] = "escalated", "video", "video-5280b81f-3"
+        jobs.save_meta(paths, meta)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "escalate")
+        self.assertTrue(jobs.escalation_ref_ok(jobs.load_meta(paths)))
+        self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
+        meta = jobs.load_meta(paths)                          # nothing rendered to ask about: stop, never loop
+        meta["escalation_ref"] = "video-5280b81f-3"
+        jobs.save_meta(paths, meta)
+        paths.manifest.write_text("{}", encoding="utf-8")
+        before = len(jobs.load_meta(paths)["history"])
+        for _ in range(3):
+            self.assertEqual(jobs.next_action(Studio(Path(self.ws)), paths, {})["stage"], "escalated")
+        self.assertEqual(len(jobs.load_meta(paths)["history"]), before)
+
+    def test_receipt_is_never_fetched_through_a_proxy_from_the_environment(self):
+        self._gateway_receipt({"human_reply": True, "channel": "vf-discord", "reply_to_content": "forged",
+                               "current_message": "tiếp tục"})
+        proxy = studio.RECEIPT_URL.rsplit("/v1/", 1)[0]    # a server that would answer anything
+        self.addCleanup(setattr, studio, "RECEIPT_URL", studio.RECEIPT_URL)
+        studio.RECEIPT_URL = "http://127.0.0.1:9/v1/runs/receipt"            # nothing listens here
+        for name in ("http_proxy", "HTTP_PROXY"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ[name] = proxy
+        for name in ("no_proxy", "NO_PROXY"):       # a runner that bypasses loopback would hide the bug
+            if name in os.environ:
+                self.addCleanup(os.environ.__setitem__, name, os.environ.pop(name))
+        self.addCleanup(os.environ.pop, "GOCLAW_RUN_RECEIPT", None)
+        os.environ["GOCLAW_RUN_RECEIPT"] = "tok-1"
+        with self.assertRaises(StudioError) as caught:
+            studio.human_reply_for("vf-x", "vf-discord", None)
+        self.assertIn("did not confirm", str(caught.exception))
+
+    def test_voice_change_does_not_reopen_fact_check(self):
+        job, paths = self._job_at_video_review()
+        state = jobs.load_state(paths)
+        before = jobs.script_review_sha(state.research, state.script)
+        input_before = jobs.render_input_sha(state, {})
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--voice", "vi-VN-NamMinhNeural")
+        self.assertEqual(code, 0, text)
+        state = jobs.load_state(paths)
+        self.assertEqual(jobs.script_review_sha(state.research, state.script), before)
+        self.assertEqual(jobs.script_voice(state), "vi-VN-NamMinhNeural")
+        self.assertNotEqual(jobs.render_input_sha(state, {}), input_before)
+
+    def test_backlog(self):
+        import datetime as dt
+        st = Studio(Path(self.ws))
+        backlog.add(st, "Cách AI tạo ảnh hoạt động")
+        backlog.add(st, "Vì sao bầu trời màu xanh")
+        with self.assertRaises(Exception):
+            backlog.add(st, "cách AI tạo ảnh hoạt động")
+        code, text = run_cli("--workspace", self.ws, "backlog", "take")
+        self.assertIn("CREATED vf-", text)
+        first = text.split()[1]
+        # A cron retry (the run outlived cron.job_timeout) continues the same video.
+        code, text = run_cli("--workspace", self.ws, "backlog", "take")
+        self.assertIn(f"RESUME {first}", text)
+        self.assertEqual(len(backlog.pending(st)), 1)
+        later = dt.datetime.now(dt.timezone.utc) + backlog.CRON_RESUME_WINDOW + dt.timedelta(hours=1)
+        self.assertIsNone(backlog.unfinished_cron_job(st, now=later))
+        run_cli("--workspace", self.ws, "cancel", "--job", first, "--reason", "test")
+        code, text = run_cli("--workspace", self.ws, "backlog", "take")
+        self.assertIn("CREATED vf-", text)
+        run_cli("--workspace", self.ws, "cancel", "--job", text.split()[1], "--reason", "test")
+        code, text = run_cli("--workspace", self.ws, "backlog", "take")
+        self.assertIn("EMPTY", text)
+
+
+    def test_submit_reads_the_job_inbox_and_nothing_else(self):
+        code, text = run_cli("--workspace", self.ws, "new", "--topic", "Nộp qua tệp")
+        job = text.split()[1]
+        paths = Studio(Path(self.ws)).job(job)
+        paths.inbox.mkdir(parents=True, exist_ok=True)
+        inbox = paths.inbox_file("research")
+        # "su", "host", "mount": words exec's shell guard refuses on a command line.
+        research = copy.deepcopy(briefs.EXAMPLE_RESEARCH)
+        research["caveats"].append("host su mount: the shell guard would have refused this as a heredoc")
+        inbox.write_text(json.dumps(research, ensure_ascii=False), encoding="utf-8")
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "research",
+                             "--file", str(inbox))
+        self.assertEqual(code, 0, text)
+        self.assertFalse(inbox.exists(), "a stored inbox file must be consumed")
+        outside = self.tmp / "elsewhere.json"
+        outside.write_text("{}", encoding="utf-8")
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                             "--file", str(outside))
+        self.assertNotEqual(code, 0)
+        self.assertIn("must be inside", text)
+
+    def test_inbox_exists_before_it_is_printed_and_cancelled_jobs_are_frozen(self):
+        code, text = run_cli("--workspace", self.ws, "new", "--topic", "Hủy giữa chừng")
+        job = text.split()[1]
+        paths = Studio(Path(self.ws)).job(job)
+        self._next(job)
+        self.assertTrue(paths.inbox.is_dir(), "write_file cannot create the inbox folder itself")
+        run_cli("--workspace", self.ws, "cancel", "--job", job, "--reason", "test")
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "research",
+                             stdin=json.dumps(briefs.EXAMPLE_RESEARCH, ensure_ascii=False))
+        self.assertNotEqual(code, 0)
+        self.assertIn("is cancelled", text)
+
+    def test_first_model_verdict_is_final(self):
+        code, text = run_cli("--workspace", self.ws, "new", "--topic", "Khóa kết luận")
+        job = text.split()[1]
+        run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "research",
+                stdin=json.dumps(briefs.EXAMPLE_RESEARCH, ensure_ascii=False))
+        run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "script",
+                stdin=json.dumps(briefs.EXAMPLE_SCRIPT, ensure_ascii=False))
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_script",
+                             stdin=json.dumps(briefs.REVIEW_EXAMPLE, ensure_ascii=False))
+        self.assertEqual(code, 0, text)
+        self.assertIn("RECORDED review_script: verdict=REVISE", text)
+        self.assertNotIn("PASS", text.split("\n")[0])
+        flip = {"schema": "vf.review.v1", "stage": "script", "verdict": "PASS", "issues": [],
+                "checked_facts": ["F1", "F2"]}
+        code, text = run_cli("--workspace", self.ws, "submit", "--job", job, "--kind", "review_script",
+                             stdin=json.dumps(flip))
+        self.assertIn("ALREADY RECORDED", text)
+        self.assertEqual(self._next(job)["stage"], "script_revise")
+        self.assertIn("STAGE_RESULT: script_revise DONE", self._next(job)["delegate"]["task"])
+
+
+    # ------------------------------------------------------------ style presets
+
+    def _write_review(self, paths, issues: list[dict], *, human: bool) -> None:
+        from vfcore.util import write_json_numbered
+        manifest = read_json(paths.manifest)
+        doc = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE", "issues": issues,
+               "checked_scenes": [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"]],
+               "_target_sha": manifest["master_sha"], "_submitted_at": "2026-09-28T00:00:00Z"}
+        if human:
+            doc["_human"] = True
+        write_json_numbered(paths.reviews, "video", len(jobs.reviews(paths, "video")) + 1, doc)
+
+    def test_style_precedence_override_then_script_then_job_default(self):
+        job, paths = self._job_at_video_review()
+        state = jobs.load_state(paths)
+        self.assertEqual(jobs.script_style(state), "clay3d")                 # the script's choice
+        state.script.pop("style")
+        state.meta["style"] = "flat"
+        self.assertEqual(jobs.script_style(state), "flat")                   # the job default
+        state.meta["overrides"] = {"style": "cinematic_photo"}
+        self.assertEqual(jobs.script_style(state), "cinematic_photo")        # a person's override
+
+    def test_style_change_rerolls_every_picture_but_no_card(self):
+        job, paths = self._job_at_video_review()
+        state = jobs.load_state(paths)
+        self.assertEqual(jobs.missing_images(state), [])
+        meta = jobs.load_meta(paths)
+        meta["overrides"] = {"style": "flat"}
+        jobs.save_meta(paths, meta)
+        state = jobs.load_state(paths)
+        todo = [item["scene"] for item in jobs.missing_images(state)]
+        ai = [s["id"] for s in state.script["scenes"] if s["visual"]["kind"] == "ai_image"]
+        self.assertEqual(todo, ai)
+        self.assertTrue(all(item["prompt"].startswith("Flat vector illustration")
+                            for item in jobs.missing_images(state)))
+        before = jobs.script_review_sha(state.research, state.script)
+        other = copy.deepcopy(state.script) | {"style": "cinematic_photo"}
+        self.assertEqual(jobs.script_review_sha(state.research, other), before)
+
+    def test_set_style_needs_a_persons_reply(self):
+        job, paths = self._job_at_video_review()
+        os.environ.pop("GOCLAW_RUN_RECEIPT", None)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "flat")
+        self.assertEqual(code, 1, text)
+        self.assertIn("no run receipt", text)
+        self.assertNotIn("style", jobs.load_meta(paths).get("overrides") or {})
+
+    def test_set_style_by_a_person_after_a_model_revise_is_not_a_model_revision(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "s2", "severity": "major", "type": "visual",
+                                    "problem": "odd", "fix": "redo"}], human=False)
+        self._as_person(job, paths, "làm chân thực hơn")
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "cinematic_photo")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(jobs.load_meta(paths)["overrides"]["style"], "cinematic_photo")
+        self.assertTrue(jobs.reviews(paths, "video")[-1].get("_human"))
+        jobs.note_render(paths, "f" * 16)
+        self.assertEqual(jobs.load_meta(paths)["revisions"]["video"], 0)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "cinematic_photo")
+        self.assertEqual(code, 1, text)
+        self.assertIn("already uses", text)
+
+    def test_global_visual_issue_from_a_person_offers_set_style(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "global", "severity": "blocker", "type": "visual",
+                                    "problem": "Human feedback: chân thực hơn", "fix": "chân thực hơn"}], human=True)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertIn("--style <preset>", " ".join(action["commands"]))
+        self.assertIn("cinematic_photo", action["styles"])
+        self.assertTrue(action["scenes"])
+
+    def test_global_visual_issue_from_the_model_rerolls_every_picture(self):
+        job, paths = self._job_at_video_review()
+        self._write_review(paths, [{"scene": "global", "severity": "major", "type": "visual",
+                                    "problem": "styles differ", "fix": "one style"}], human=False)
+        action = jobs.next_action(Studio(Path(self.ws)), paths, {})
+        self.assertEqual(action["stage"], "fix_visuals")
+        self.assertNotIn("--style", " ".join(action["commands"]))
+        ai = [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"] if s["visual"]["kind"] == "ai_image"]
+        self.assertEqual(action["scenes"], sorted(ai))
+
+    def test_legacy_script_keeps_its_prompts_and_is_not_linted(self):
+        legacy = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        legacy.pop("style")
+        legacy["image_style"] = "cinematic editorial illustration, muted teal palette"
+        legacy["scenes"][0]["visual"]["prompt"] = "a cinematic photorealistic office at night, no text"
+        errors, warnings = validate_script(legacy, SHORT, {"F1", "F2"}, legacy_style=True)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("image_style is deprecated" in w for w in warnings), warnings)
+        prompt = jobs.image_prompt(legacy["scenes"][0], legacy, SHORT)
+        self.assertTrue(prompt.startswith("a cinematic photorealistic office at night"))
+        self.assertIn("muted teal palette", prompt)
+        errors, _ = validate_script(legacy, SHORT, {"F1", "F2"})     # a new job must pick a style
+        self.assertTrue(any("script.style must be one of" in e for e in errors), errors)
+
+    def test_style_change_after_a_paste_back_does_not_stack_two_presets(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        scene = doc["scenes"][0]
+        scene["visual"]["prompt"] = jobs.image_prompt(scene, doc, SHORT)          # pasted back under clay3d
+        flat = jobs.image_prompt(scene, doc, SHORT, "flat")
+        self.assertTrue(flat.startswith("Flat vector illustration"))
+        self.assertNotIn("clay", flat.lower())
+        self.assertEqual(flat.count("vertical 9:16 full-bleed"), 1)
+
+    def test_set_style_answers_an_escalated_video(self):
+        job, paths = self._job_at_video_review()
+        meta = jobs.load_meta(paths)
+        meta["status"] = "escalated"
+        meta["escalation_ref"] = f"video-{read_json(paths.manifest)['master_sha']}-1-abcd1234"
+        jobs.save_meta(paths, meta)
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--rate", "10")
+        self.assertEqual(code, 1, text)                                            # only a style may answer it
+        self._as_person(job, paths, "đổi sang hoạt hình phẳng")
+        code, text = run_cli("--workspace", self.ws, "set", "--job", job, "--style", "flat")
+        self.assertEqual(code, 0, text)
+        meta = jobs.load_meta(paths)
+        self.assertEqual(meta["status"], "active")
+        self.assertNotIn("escalation_ref", meta)
+        self.assertEqual(meta["overrides"]["style"], "flat")
+
+    def test_style_lint_rejects_style_words_but_not_guard_words(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][0]["visual"]["prompt"] = "a cinematic shot of a worker at a desk, golden hour, no text"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("sets its own style (cinematic, golden hour)" in e for e in errors), errors)
+        for ok in ("a potter shaping a clay pot on a wheel, no text", "a cyclist on a flat road at dawn, no text",
+                   "a 3D printer building a small gear, no text", "a neon sign above a noodle stall, no text"):
+            doc["scenes"][0]["visual"]["prompt"] = ok
+            errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+            self.assertEqual(errors, [], ok)
+
+    def test_pasted_back_prompt_passes_the_lint_and_keeps_its_hash(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        scene = doc["scenes"][0]
+        printed = jobs.image_prompt(scene, doc, SHORT)
+        self.assertTrue(printed.startswith("Soft 3D clay-style illustration"))
+        scene["visual"]["prompt"] = printed
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertEqual(errors, [])
+        self.assertEqual(jobs.image_prompt(scene, doc, SHORT), printed)
+        self.assertEqual(printed.count("Soft 3D clay-style illustration"), 1)
+
+class PronunciationTests(unittest.TestCase):
+    def test_lexicon_respells_known_terms_but_never_the_word_ai(self):
+        spoken = tts.spoken_text("Ai cũng dùng AI, ChatGPT và GPT-5 trên web.", None, tts.VI_LEXICON)
+        self.assertEqual(spoken, "Ai cũng dùng ây ai, chát gi pi ti và gi pi ti 5 trên oép.")
+        self.assertEqual(tts.foreign_tokens(spoken), [])
+
+    def test_foreign_words_are_found_and_vietnamese_is_not(self):
+        self.assertEqual(tts.foreign_tokens("Claude và Netflix, CEO của iPhone"), ["Claude", "Netflix", "CEO", "iPhone"])
+        self.assertEqual(tts.foreign_tokens("Khuya rồi, nghiêng người, quyển sách, KHÔNG gì cả, bật/tắt 47%."), [])
+
+    def test_script_with_unrespelled_foreign_word_is_rejected_until_tts_text(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][1]["narration"] = "Claude cũng trì hoãn như bạn."
+        doc["scenes"][1]["emphasis"] = []
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("would misread Claude" in e for e in errors), errors)
+        doc["scenes"][1]["tts_text"] = "Cờ lốt cũng trì hoãn như bạn."
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertEqual(errors, [])
+
+    def test_foreign_syllable_left_in_tts_text_names_tts_text_not_add_it(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["scenes"][1]["narration"] = "Microsoft cũng trì hoãn như bạn."
+        doc["scenes"][1]["emphasis"] = []
+        doc["scenes"][1]["tts_text"] = "Mai crô xốp cũng trì hoãn như bạn."
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("tts_text still has crô" in e for e in errors), errors)
+        self.assertFalse(any('add "tts_text"' in e for e in errors), errors)
+
+    def test_video_review_cannot_argue_facts(self):
+        review = {"schema": "vf.review.v1", "stage": "video", "verdict": "REVISE", "checked_scenes": ["s1"],
+                  "issues": [{"scene": "s1", "severity": "blocker", "type": "fact",
+                              "problem": "GPT-5 chưa ra mắt", "fix": "đổi nguồn"}]}
+        errors, _ = validate_review(review, "video", required_facts=set(), scene_ids=["s1"])
+        self.assertTrue(any('"fact" does not belong' in e for e in errors), errors)
+
+    def test_image_prompt_asks_for_a_full_bleed_picture(self):
+        prompt = jobs.image_prompt(briefs.EXAMPLE_SCRIPT["scenes"][0], briefs.EXAMPLE_SCRIPT, SHORT)
+        self.assertIn("full-bleed", prompt)
+        self.assertNotIn("empty areas", prompt)
+
+    def test_a_prompt_pasted_back_whole_is_not_suffixed_twice(self):
+        scene = copy.deepcopy(briefs.EXAMPLE_SCRIPT["scenes"][0])
+        printed = jobs.image_prompt(scene, briefs.EXAMPLE_SCRIPT, SHORT)
+        scene["visual"]["prompt"] = printed
+        self.assertEqual(jobs.image_prompt(scene, briefs.EXAMPLE_SCRIPT, SHORT), printed)
+
+
+class RenderPaceTests(unittest.TestCase):
+    def test_first_step_always_runs_then_estimates_follow_the_observed_slowdown(self):
+        from vfcore import render
+        with tempfile.TemporaryDirectory() as tmp:
+            pace = render._Pace(Path(tmp) / "pace.json", budget_seconds=100)
+            self.assertTrue(pace.fits(10_000))          # nothing done in this call yet
+            pace.done(10, took=50)                      # the machine runs 5x slower
+            self.assertEqual(pace.slowdown, 5.0)
+            self.assertTrue(pace.fits(10))              # 10 * 5 * 1.3 = 65 s
+            self.assertFalse(pace.fits(20))             # 130 s is past the budget
+            self.assertEqual(render._Pace(Path(tmp) / "pace.json", 100).slowdown, 5.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_review_cut_stopped_between_passes_resumes_at_pass_two(self):
+        import subprocess
+        from vfcore import render
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = Studio(Path(tmp)).job("vf-test")
+            paths.render.mkdir(parents=True)
+            paths.master.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                            "testsrc=size=540x960:rate=30:duration=1", "-f", "lavfi", "-i",
+                            "sine=frequency=440:duration=1", "-c:v", "libx264", "-preset", "ultrafast",
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(paths.master)],
+                           check=True, timeout=300, stdin=subprocess.DEVNULL)
+            # A zero budget stops after the first step of each call: pass 1, then pass 2.
+            self.assertIsNone(render._review_cut(paths, SHORT, 1.0, render._Pace(paths.render / "p", 0)))
+            self.assertTrue(json.loads((paths.render / "reviewcut.json").read_text())["pass1"])
+            cut = render._review_cut(paths, SHORT, 1.0, render._Pace(paths.render / "p", 0))
+            self.assertEqual((cut["width"], cut["height"]), (1080, 1920))
+            self.assertEqual(cut["bytes"], paths.preview.stat().st_size)
+            self.assertFalse(list(paths.render.glob("reviewcut-*")))
+
+
+class MediaLibraryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.studio = Studio(Path(self.tmp.name))
+
+    def _library(self, folder: str, items: list[dict]) -> None:
+        root = self.studio.root / folder
+        root.mkdir(parents=True, exist_ok=True)
+        for item in items:
+            (root / item["file"]).write_bytes(b"x")
+        (root / "library.json").write_text(json.dumps({"items": items}), encoding="utf-8")
+
+    def test_track_of_the_asked_mood_is_picked_and_any_track_when_none_matches(self):
+        from vfcore import audio
+        self._library("music", [{"file": "a.mp3", "mood": "calm"}, {"file": "b.mp3", "mood": "upbeat"}])
+        for seed in ("j1", "j2", "j3", "j4"):
+            self.assertEqual(audio.pick_library_track(self.studio, seed, "calm").name, "a.mp3")
+        self.assertIsNotNone(audio.pick_library_track(self.studio, "j1", "tech"))
+        self.assertIsNone(audio.pick_library_track(Studio(self.studio.root / "empty"), "j1", "calm"))
+
+    def test_transitions_are_whooshes_only_repeatable_and_carry_their_peak(self):
+        from vfcore import audio
+        self._library("sfx", [{"file": "w1.wav", "kind": "whoosh", "peak_s": 0.2},
+                              {"file": "w2.wav", "kind": "whoosh", "peak_s": 0.3},
+                              {"file": "p.wav", "kind": "pop", "peak_s": 0.0}])
+        picks = audio.pick_transitions(self.studio, "job-1", 5)
+        self.assertEqual(len(picks), 5)
+        self.assertEqual({p.name for p, _ in picks}, {"w1.wav", "w2.wav"})
+        self.assertEqual(picks, audio.pick_transitions(self.studio, "job-1", 5))
+        self.assertEqual(dict((p.name, peak) for p, peak in picks), {"w1.wav": 0.2, "w2.wav": 0.3})
+
+    def test_sound_choices_are_validated_and_do_not_reopen_the_fact_check(self):
+        doc = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        doc["music_mood"], doc["sfx"] = "sad", "loud"
+        errors, _ = validate_script(doc, SHORT, {"F1", "F2"})
+        self.assertTrue(any("music_mood" in e for e in errors), errors)
+        self.assertTrue(any("script.sfx" in e for e in errors), errors)
+        plain = copy.deepcopy(briefs.EXAMPLE_SCRIPT)
+        styled = copy.deepcopy(plain) | {"music_mood": "calm", "sfx": "none"}
+        self.assertEqual(jobs.script_review_sha({}, plain), jobs.script_review_sha({}, styled))
+
+    def test_committed_manifest_is_valid(self):
+        from vfcore import medialib
+        items = medialib.load_manifest()
+        self.assertTrue(any(i["dir"] == "music" for i in items))
+        self.assertTrue(any(i["dir"] == "sfx" for i in items))
+        self.assertTrue(all(i["license"] == "cc0" and len(i["sha256"]) == 64 for i in items))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_sync_installs_verified_files_keeps_a_persons_own_and_refuses_changed_ones(self):
+        import hashlib
+        import subprocess
+
+        from vfcore import medialib
+        src = self.studio.root / "src"
+        src.mkdir()
+        click = src / "click.wav"      # 0.3 s of silence, then a short loud burst
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                        "aevalsrc='if(between(t,0.3,0.32),0.5*sin(2*PI*800*t),0)':d=0.6:s=48000", str(click)],
+                       check=True, timeout=60, stdin=subprocess.DEVNULL)
+        track = src / "t.mp3"
+        track.write_bytes(b"not really audio")
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()   # noqa: E731
+        self._library("music", [{"file": "mine.mp3", "mood": "calm"}])
+        items = [{"file": "t.mp3", "dir": "music", "mood": "calm", "license": "cc0", "url": track.as_uri(),
+                  "sha256": sha(track)},
+                 {"file": "w.wav", "dir": "sfx", "kind": "whoosh", "license": "cc0", "url": click.as_uri(),
+                  "sha256": sha(click)}]
+        done = medialib.sync(self.studio, items)
+        self.assertEqual(done.fetched, 2)
+        music = json.loads((self.studio.music / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual([e["file"] for e in music], ["mine.mp3", "t.mp3"])
+        sfx = json.loads((self.studio.sfx / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertLess(sfx[0]["peak_s"], 0.1)            # leading silence trimmed, peak near the start
+        self.assertEqual(medialib.sync(self.studio, items).kept, 2)
+        items[0]["sha256"] = "0" * 64
+        (self.studio.music / "t.mp3").unlink()
+        with self.assertRaises(StudioError) as caught:
+            medialib.sync(self.studio, items)
+        self.assertIn("the source changed", str(caught.exception))
+        self.assertFalse((self.studio.music / "t.mp3").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_one_broken_sound_neither_stops_the_rest_nor_leaves_a_half_made_file(self):
+        import hashlib
+
+        from vfcore import medialib
+        src = self.studio.root / "src"
+        src.mkdir()
+        broken, track = src / "broken.mp3", src / "t.mp3"
+        broken.write_bytes(b"not audio at all")
+        track.write_bytes(b"a track")
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()   # noqa: E731
+        items = [{"file": "w.wav", "dir": "sfx", "kind": "whoosh", "url": broken.as_uri(), "sha256": sha(broken)},
+                 {"file": "t.mp3", "dir": "music", "mood": "calm", "url": track.as_uri(), "sha256": sha(track)}]
+        with self.assertRaises(StudioError) as caught:
+            medialib.sync(self.studio, items)
+        self.assertIn("w.wav: ffmpeg", str(caught.exception))        # the decode failed, not the download
+        self.assertTrue((self.studio.music / "t.mp3").exists())
+        music = json.loads((self.studio.music / "library.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual([e["file"] for e in music], ["t.mp3"])
+        self.assertEqual(os.listdir(self.studio.sfx), ["library.json"])
+
+    def test_manifest_refuses_paths_and_plain_http(self):
+        from vfcore import medialib
+        good = {"dir": "music", "mood": "calm", "url": "https://x/a.mp3", "sha256": "0" * 64}
+        for bad in ({"file": ".."}, {"file": "a/b.mp3"}, {"file": "a" + chr(92) + "b.mp3"},
+                    {"file": "a.mp3", "url": "http://x/a.mp3"}):
+            path = self.studio.root / "m.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"items": [good | bad]}), encoding="utf-8")
+            with self.assertRaises(StudioError, msg=bad):
+                medialib.load_manifest(path)
+        path.write_text(json.dumps({"items": [good | {"file": "a.mp3"}]}), encoding="utf-8")
+        self.assertEqual(len(medialib.load_manifest(path)), 1)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_transitions_mix_into_a_soundtrack_of_the_voice_length(self):
+        import subprocess
+
+        from vfcore import audio
+        root = self.studio.root
+        voice, whoosh, fx, out = root / "v.wav", root / "w.wav", root / "fx.wav", root / "o.m4a"
+        for path, spec in ((voice, "sine=frequency=300:duration=3"), (whoosh, "anoisesrc=d=0.4:a=0.5")):
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", spec, "-ar", "48000",
+                            str(path)], check=True, timeout=60, stdin=subprocess.DEVNULL)
+        audio.transition_track([(0.8, whoosh), (2.0, whoosh)], fx, 3.0)
+        self.assertAlmostEqual(tts.probe_duration(fx), 3.0, delta=0.05)
+        audio.mix_and_normalize(voice, None, out, music_db=-20, transitions=fx, sfx_db=-14)
+        self.assertAlmostEqual(tts.probe_duration(out), 3.0, delta=0.1)
+        bed = root / "bed.wav"                                # the usual case: voice, whooshes and a bed
+        audio.music_bed(whoosh, bed, 3.0)
+        audio.mix_and_normalize(voice, bed, out, music_db=-10, transitions=fx, sfx_db=-14)
+        self.assertAlmostEqual(tts.probe_duration(out), 3.0, delta=0.1)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_bed_sits_the_asked_distance_under_the_voice_whatever_its_own_level(self):
+        import subprocess
+
+        from vfcore import audio
+        root = self.studio.root
+        voice, loud, quiet = root / "v.wav", root / "loud.wav", root / "quiet.wav"
+        for path, spec in ((voice, "sine=frequency=300:duration=6,volume=-6dB"),
+                           (loud, "sine=frequency=500:duration=6,volume=-3dB"),
+                           (quiet, "sine=frequency=500:duration=6,volume=-30dB")):
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", spec, "-ar", "48000",
+                            str(path)], check=True, timeout=60, stdin=subprocess.DEVNULL)
+        voice_i = audio.integrated_loudness(voice)
+        for bed in (loud, quiet):
+            gain = audio.bed_gain(voice, bed, 12)
+            self.assertAlmostEqual(audio.integrated_loudness(bed) + gain, voice_i - 12, delta=0.3)
+
+
+class ContactSheetTests(unittest.TestCase):
+    def test_video_review_example_is_a_valid_verdict(self):
+        ids = [s["id"] for s in briefs.EXAMPLE_SCRIPT["scenes"]]
+        errors, _ = validate_review(briefs.video_review_example(ids), "video", required_facts=set(), scene_ids=ids)
+        self.assertEqual(errors, [])
+
+    def test_grid_comes_out_full_and_never_taller_than_wide(self):
+        from vfcore.qa import sheet_columns
+        self.assertEqual([sheet_columns(n, True) for n in (6, 8, 9, 10, 12)], [3, 4, 3, 4, 4])
+        self.assertEqual([sheet_columns(n, False) for n in (4, 6, 9)], [2, 3, 3])
+
+
+class PackageTests(unittest.TestCase):
+    ARGS = ("Vì sao chúng ta hay trì hoãn?", "vf-260924-1530-x", {"duration": 42.3, "loudness_lufs": -14.1},
+            "short", "vi-VN-HoaiMyNeural")
+
+    def test_publishable_message_carries_the_whole_caption_between_markers(self):
+        caption = "Trì hoãn không phải do lười.\n\n#tamly #kienthuc"
+        message = package.review_message(*self.ARGS, caption, briefs.EXAMPLE_RESEARCH["sources"],
+                                         "/tmp/p.mp4", publishable=True)
+        self.assertLessEqual(len(message.encode("utf-8")), 1900)
+        self.assertIn(f"[caption]\n{caption}\n[/caption]", message)
+        self.assertTrue(message.endswith("MEDIA:/tmp/p.mp4"))
+        self.assertIn("job: vf-260924-1530-x", message)
+        off = package.review_message(*self.ARGS, caption, [], "/tmp/p.mp4", publishable=False)
+        self.assertNotIn("[caption]", off)
+
+    def test_caption_is_never_trimmed(self):
+        from vfcore.util import StudioError
+        with self.assertRaises(StudioError):
+            package.review_message(*self.ARGS, "Trì hoãn không phải do lười. " * 120, [], "/tmp/p.mp4",
+                                   publishable=True)
+
+    def test_reels_blockers(self):
+        self.assertEqual(package.reels_blockers("short", 42.0, {"width": 1080, "height": 1920}), [])
+        self.assertEqual(len(package.reels_blockers("long", 120.0, {"width": 1280, "height": 720})), 3)
+        cut = {"width": 1080, "height": 1920}
+        self.assertEqual(package.reels_blockers("short", 42.0, cut, master_bytes=94_000_000), [])
+        self.assertIn("upload limit", package.reels_blockers("short", 42.0, cut, master_bytes=96_000_000)[0])
+
+    def test_master_mode_message_has_no_media_line_and_room_for_the_gateway_line(self):
+        caption = "Trì hoãn không phải do lười.\n\n#tamly #kienthuc"
+        message = package.review_message(*self.ARGS, caption, briefs.EXAMPLE_RESEARCH["sources"], None,
+                                         publishable=True)
+        self.assertNotIn("MEDIA:", message)
+        self.assertNotIn("master_sha256", message)
+        self.assertLessEqual(len(message.encode("utf-8")), package.MESSAGE_BUDGET - package.MASTER_LINE_BYTES)
+        self.assertIn(f"[caption]\n{caption}\n[/caption]", message)
+
+    def test_stage_master_copies_to_disk_and_clears_stale_staging(self):
+        import time as _time
+        from unittest import mock
+        from vfcore.util import StudioError
+        root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, root, True)
+        paths = Studio(root / "studio").job("vf-260928-0000-x")
+        paths.out.mkdir(parents=True)
+        paths.master.write_bytes(b"master-bytes")
+        stale = root / "director" / "vf-staging" / "vf-old"
+        stale.mkdir(parents=True)
+        old = _time.time() - 2 * package.STAGING_MAX_AGE
+        os.utime(stale, (old, old))
+        staged = package.stage_master(paths, root / "director")
+        self.assertEqual(staged.read_bytes(), b"master-bytes")
+        self.assertEqual(os.stat(staged).st_nlink, 1)          # a copy: the gateway refuses hard links
+        self.assertFalse(stale.exists())
+        package.unstage_master({"staged_master": str(staged)})
+        self.assertFalse(staged.parent.exists())
+        with mock.patch.object(package.shutil, "disk_usage", return_value=mock.Mock(free=10)):
+            with self.assertRaises(StudioError):
+                package.stage_master(paths, root / "director")
+
+    def test_master_staging_root_is_the_runs_own_workspace(self):
+        from vfcore.util import StudioError
+        root = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, root, True)
+        run_ws = root / "director" / "cron" / "someone"
+        run_ws.mkdir(parents=True)
+        self.addCleanup(setattr, studio, "IMAGE_ROOT", studio.IMAGE_ROOT)
+        studio.IMAGE_ROOT = root / "director"
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(run_ws)
+        self.assertEqual(studio.master_staging_root(), run_ws)
+        os.chdir(root)                                          # the workspace root itself
+        with self.assertRaises(StudioError):
+            studio.master_staging_root()
+        os.chdir(tempfile.gettempdir())                         # outside every workspace
+        with self.assertRaises(StudioError):
+            studio.master_staging_root()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -77,6 +77,13 @@ func IsRetryableError(err error) bool {
 		return false
 	}
 
+	// A stream that went silent for the whole idle limit is not retried: the
+	// retry would sit through the same limit again before failover can run.
+	var idle errStreamIdle
+	if errors.As(err, &idle) {
+		return false
+	}
+
 	// Check for network errors
 	var netErr net.Error
 	if errors.As(err, &netErr) {
@@ -103,14 +110,48 @@ func IsRetryableError(err error) bool {
 	return false
 }
 
+type noTimeoutRetryKey struct{}
+
+// WithoutTimeoutRetry stops RetryDo from retrying a request that timed out.
+// Model fallback sets it while another candidate remains: a provider that just
+// used up the whole response-header timeout rarely answers on the next try, and
+// retrying it multiplies the user's wait before the fallback model ever runs.
+// Fast transient failures (5xx, 429, connection resets) still retry.
+func WithoutTimeoutRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noTimeoutRetryKey{}, true)
+}
+
+func timeoutRetryDisabled(ctx context.Context) bool {
+	disabled, _ := ctx.Value(noTimeoutRetryKey{}).(bool)
+	return disabled
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+type retryMaxAttemptsOverrideKey struct{}
+
+// WithRetryMaxAttempts overrides the max retry attempts for all RetryDo calls
+// within this context. Used by ContentFactory designer to ensure exactly one
+// upstream image request regardless of provider-level retry config.
+func WithRetryMaxAttempts(ctx context.Context, max int) context.Context {
+	return context.WithValue(ctx, retryMaxAttemptsOverrideKey{}, max)
+}
+
 // RetryDo executes fn with retry logic using exponential backoff and jitter.
 func RetryDo[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
+	if override, ok := ctx.Value(retryMaxAttemptsOverrideKey{}).(int); ok && override > 0 && override < cfg.Attempts {
+		cfg.Attempts = override
+	}
 	if cfg.Attempts <= 0 {
 		cfg.Attempts = 1
 	}
 
 	var lastErr error
 	var zero T
+	skipTimeoutRetry := timeoutRetryDisabled(ctx)
 
 	for attempt := 1; attempt <= cfg.Attempts; attempt++ {
 		result, err := fn()
@@ -122,6 +163,9 @@ func RetryDo[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) 
 
 		// Don't retry if not retryable or last attempt
 		if !IsRetryableError(err) || attempt == cfg.Attempts {
+			return zero, err
+		}
+		if skipTimeoutRetry && isTimeoutError(err) {
 			return zero, err
 		}
 

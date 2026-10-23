@@ -58,6 +58,7 @@ func (e *PipUpdateExecutor) Update(ctx context.Context, name, toVersion string, 
 	args = append(args, name)
 
 	cmd := exec.CommandContext(cctx, pipBinary, args...)
+	cmd.Env = scrubbedProcessEnv()
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

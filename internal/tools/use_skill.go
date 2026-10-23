@@ -47,3 +47,8 @@ func (t *UseSkillTool) Execute(_ context.Context, args map[string]any) *Result {
 
 	return NewResult(fmt.Sprintf("Skill %q activated. Proceed to read the skill's SKILL.md with read_file.", name))
 }
+
+// Capabilities marks use_skill read-only: it only records the activation and tells the agent to read SKILL.md.
+func (t *UseSkillTool) Capabilities() []ToolCapability {
+	return []ToolCapability{CapReadOnly}
+}

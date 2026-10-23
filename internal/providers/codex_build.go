@@ -97,6 +97,8 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 		}
 	}
 
+	instructions, input = moveDynamicPromptToInputHead(instructions, input)
+
 	body := map[string]any{
 		"model":  model,
 		"input":  input,
@@ -140,6 +142,12 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 		body["reasoning"] = map[string]any{"effort": level}
 	}
 
+	// Routes every call of one session to the same prompt cache, so the
+	// repeated system prompt + history prefix is billed as cached input.
+	if key, ok := req.Options[OptPromptCacheKey].(string); ok && key != "" {
+		body["prompt_cache_key"] = key
+	}
+
 	return body
 }
 
@@ -163,6 +171,14 @@ func (p *CodexProvider) doRequest(ctx context.Context, body any) (io.ReadCloser,
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("OpenAI-Beta", "responses=v1")
+	// The ChatGPT backend keys prompt-cache affinity on the session_id header;
+	// the body prompt_cache_key alone is ignored there (membrane#77 measured
+	// 0 cached tokens with body-only, ~99% with the header).
+	if m, ok := body.(map[string]any); ok {
+		if key, ok := m["prompt_cache_key"].(string); ok && key != "" {
+			httpReq.Header.Set("session_id", key)
+		}
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -196,4 +212,34 @@ func toFcID(id string) string {
 	// Replace invalid characters (e.g. colons from session keys) with underscores.
 	id = invalidFcIDChars.ReplaceAllString(id, "_")
 	return "fc_" + id
+}
+
+// moveDynamicPromptToInputHead keeps only the stable part of the system prompt
+// (above CacheBoundaryMarker) in instructions and moves the per-turn part
+// (sender, chat, date, USER.md, runtime) into a developer message at input[0].
+//
+// The ChatGPT backend reuses its prompt cache only when a request extends an
+// earlier request exactly (measured 2026-09-30: every hit equals the previous
+// request length, and an identical 33K-token history in the middle of a
+// request was not reused). So the per-turn part must sit at the same position
+// in every request of a session: at input[0] the history of all earlier turns
+// stays cached whenever it is unchanged (same sender, same day), and a change
+// of it still leaves instructions + tools cached. It must not be kept in the
+// history per turn instead: it carries the sender's USER.md, and a group
+// session is shared by several senders.
+func moveDynamicPromptToInputHead(instructions string, input []any) (string, []any) {
+	before, after, ok := strings.Cut(instructions, CacheBoundaryMarker)
+	if !ok {
+		return instructions, input
+	}
+	stable := strings.TrimSpace(before)
+	dynamic := strings.TrimSpace(after)
+	if dynamic == "" {
+		return stable, input
+	}
+
+	out := make([]any, 0, len(input)+1)
+	out = append(out, map[string]any{"role": "developer", "content": dynamic})
+	out = append(out, input...)
+	return stable, out
 }

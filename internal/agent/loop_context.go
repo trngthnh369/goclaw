@@ -343,7 +343,12 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// Inject agent key into context for tool-level resolution (multiple agents share tool registry)
 	ctx = tools.WithToolAgentKey(ctx, l.id)
 
-	// Inject delivered media tracker so write_file and message tool can coordinate:
+	// Inject per-run trackers so tools can coordinate terminal actions and media delivery.
+	// runViaPipeline creates the latch so the end-of-run terminal-action check
+	// can observe it; only create one here when running outside that path.
+	if tools.OutboundActionLatchFromCtx(ctx) == nil {
+		ctx = tools.WithOutboundActionLatch(ctx, tools.NewOutboundActionLatch())
+	}
 	// write_file(deliver=true) marks paths, message self-send guard checks before allowing.
 	ctx = tools.WithDeliveredMedia(ctx, tools.NewDeliveredMedia())
 
@@ -374,43 +379,60 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// Extract resolved credential user ID (set earlier via WithCredentialUserID, empty if not resolved).
 	credUserID := store.ExplicitCredentialUserIDFromContext(ctx)
 	rc := &store.RunContext{
-		AgentID:             l.agentUUID,
-		AgentKey:            l.id,
-		TenantID:            l.tenantID,
-		UserID:              req.UserID,
-		RunID:               req.RunID,
-		SessionKey:          req.SessionKey,
-		CredentialUserID:    credUserID,
-		AgentType:           l.agentType,
-		SenderID:            req.SenderID,
-		SelfEvolve:          l.selfEvolve,
-		SharedMemory:        store.IsSharedMemory(ctx),
-		SharedKG:            store.IsSharedKG(ctx),
-		SharedSessions:      store.IsSharedSessions(ctx),
-		SharedContext:       store.IsSharedContext(ctx),
-		RestrictToWorkspace: l.restrictToWs != nil && *l.restrictToWs,
-		BuiltinToolSettings: l.builtinToolSettings,
-		Channel:             req.Channel,
-		ChannelType:         req.ChannelType,
-		SubagentsCfg:        l.subagentsCfg,
-		ParentModel:         l.model,
-		ParentProvider:      providerName,
-		MemoryCfg:           l.memoryCfg,
-		SandboxCfg:          l.sandboxCfg,
-		WaitToolCfg:         waitToolCfg,
-		ShellDenyGroups:     l.shellDenyGroups,
-		Workspace:           tools.ToolWorkspaceFromCtx(ctx),
-		TeamWorkspace:       tools.ToolTeamWorkspaceFromCtx(ctx),
-		TeamID:              tools.ToolTeamIDFromCtx(ctx),
-		WorkspaceChannel:    req.WorkspaceChannel,
-		WorkspaceChatID:     effectiveWorkspaceChatID,
-		TeamIsolated:        resolvedTeamSettings != nil && !tools.IsSharedWorkspace(resolvedTeamSettings),
-		TeamTaskID:          req.TeamTaskID,
-		LeaderAgentID:       tools.LeaderAgentIDFromCtx(ctx),
-		AgentToolKey:        l.id,
-		TenantAllowedPaths:  l.tenantAllowedPaths,
+		AgentID:               l.agentUUID,
+		AgentKey:              l.id,
+		TenantID:              l.tenantID,
+		UserID:                req.UserID,
+		RunID:                 req.RunID,
+		SessionKey:            req.SessionKey,
+		CredentialUserID:      credUserID,
+		AgentType:             l.agentType,
+		SenderID:              req.SenderID,
+		InboundMessage:        req.Message,
+		CurrentMessage:        req.CurrentMessage,
+		ReplyToMessageID:      req.ReplyToMessageID,
+		ReplyToContent:        req.ReplyToContent,
+		ReplyToMedia:          req.ReplyToMedia,
+		ReplyToMediaPaths:     req.ReplyToMediaPaths,
+		ReplyToMediaCount:     req.ReplyToMediaCount,
+		ReplyToMediaComplete:  req.ReplyToMediaComplete,
+		ReplyToAuthorID:       req.ReplyToAuthorID,
+		ChannelBotUserID:      req.ChannelBotUserID,
+		ApprovalSenderAllowed: req.ApprovalSenderAllowed,
+		ApprovalPublishTarget: req.ApprovalPublishTarget,
+		SelfEvolve:            l.selfEvolve,
+		SharedMemory:          store.IsSharedMemory(ctx),
+		SharedKG:              store.IsSharedKG(ctx),
+		SharedSessions:        store.IsSharedSessions(ctx),
+		SharedContext:         store.IsSharedContext(ctx),
+		RestrictToWorkspace:   l.restrictToWs != nil && *l.restrictToWs,
+		BuiltinToolSettings:   l.builtinToolSettings,
+		Channel:               req.Channel,
+		ChannelType:           req.ChannelType,
+		SubagentsCfg:          l.subagentsCfg,
+		ParentModel:           l.model,
+		ParentProvider:        providerName,
+		MemoryCfg:             l.memoryCfg,
+		SandboxCfg:            l.sandboxCfg,
+		WaitToolCfg:           waitToolCfg,
+		ShellDenyGroups:       l.shellDenyGroups,
+		Workspace:             tools.ToolWorkspaceFromCtx(ctx),
+		TeamWorkspace:         tools.ToolTeamWorkspaceFromCtx(ctx),
+		TeamID:                tools.ToolTeamIDFromCtx(ctx),
+		WorkspaceChannel:      req.WorkspaceChannel,
+		WorkspaceChatID:       effectiveWorkspaceChatID,
+		TeamIsolated:          resolvedTeamSettings != nil && !tools.IsSharedWorkspace(resolvedTeamSettings),
+		TeamTaskID:            req.TeamTaskID,
+		LeaderAgentID:         tools.LeaderAgentIDFromCtx(ctx),
+		AgentToolKey:          l.id,
+		TenantAllowedPaths:    l.tenantAllowedPaths,
 	}
 	ctx = store.WithRunContext(ctx, rc)
+	// Carry where this run came from, so the tool policy can tell an interactive
+	// session (someone can be asked to approve) from cron, heartbeat or a
+	// subagent (nobody is watching). An unset surface stays unknown and the
+	// policy refuses rather than guessing.
+	ctx = tools.WithSurface(ctx, req.Surface)
 
 	return contextSetupResult{
 		ctx:                  ctx,

@@ -138,21 +138,34 @@ type TelegramTopicConfig struct {
 }
 
 type DiscordConfig struct {
-	Enabled           bool                `json:"enabled"`
-	Token             string              `json:"token"`
-	AllowFrom         FlexibleStringSlice `json:"allow_from"`
-	DMPolicy          string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
-	GroupPolicy       string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
-	RequireMention    *bool               `json:"require_mention,omitempty"` // require @bot mention in groups (default true)
-	HistoryLimit      int                 `json:"history_limit,omitempty"`   // max pending group messages for context (default 50, 0=disabled)
-	BlockReply        *bool               `json:"block_reply,omitempty"`     // override gateway block_reply (nil = inherit)
-	ChatBehavior      *ChatBehaviorConfig `json:"chat_behavior,omitempty"`   // override gateway chat behavior (nil = inherit)
-	MediaMaxBytes     int64               `json:"media_max_bytes,omitempty"` // max media download size (default 25MB)
-	STTProxyURL       string              `json:"stt_proxy_url,omitempty"`
-	STTAPIKey         string              `json:"stt_api_key,omitempty"`
-	STTTenantID       string              `json:"stt_tenant_id,omitempty"`
-	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"`
-	VoiceAgentID      string              `json:"voice_agent_id,omitempty"`
+	Enabled   bool                `json:"enabled"`
+	Token     string              `json:"token"`
+	AllowFrom FlexibleStringSlice `json:"allow_from"`
+	// ApprovalAllowFrom gates irreversible outward-facing actions (publishing to
+	// a public Facebook page feed). Deliberately separate from AllowFrom, which
+	// only decides who may talk to the bot — chat access must not imply publish
+	// authority. Empty (default) = nobody may approve.
+	ApprovalAllowFrom FlexibleStringSlice `json:"approval_allow_from,omitempty"`
+	// ReelsReviewChatIDs names the channels whose approved review drafts may be
+	// published as Facebook Reels. An approval anywhere else can never reach the
+	// Reels publisher. Empty (default) = no chat publishes Reels.
+	ReelsReviewChatIDs FlexibleStringSlice `json:"reels_review_chat_ids,omitempty"`
+	DMPolicy           string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
+	GroupPolicy        string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
+	RequireMention     *bool               `json:"require_mention,omitempty"` // require @bot mention in groups (default true)
+	HistoryLimit       int                 `json:"history_limit,omitempty"`   // max pending group messages for context (default 50, 0=disabled)
+	BlockReply         *bool               `json:"block_reply,omitempty"`     // override gateway block_reply (nil = inherit)
+	ChatBehavior       *ChatBehaviorConfig `json:"chat_behavior,omitempty"`   // override gateway chat behavior (nil = inherit)
+	MediaMaxBytes      int64               `json:"media_max_bytes,omitempty"` // max media download size (default 25MB)
+	STTProxyURL        string              `json:"stt_proxy_url,omitempty"`
+	STTAPIKey          string              `json:"stt_api_key,omitempty"`
+	STTTenantID        string              `json:"stt_tenant_id,omitempty"`
+	STTTimeoutSeconds  int                 `json:"stt_timeout_seconds,omitempty"`
+	VoiceAgentID       string              `json:"voice_agent_id,omitempty"`
+	// ErrorNotice is the locale ("en", "vi", "zh") of a fixed notice posted when
+	// an agent run fails, so users are not left with silence. Empty or "off"
+	// (default) keeps failures silent. Raw provider errors are never shown.
+	ErrorNotice string `json:"error_notice,omitempty"`
 }
 
 type SlackConfig struct {
@@ -210,6 +223,20 @@ type ZaloPersonalConfig struct {
 	CredentialsPath string              `json:"credentials_path,omitempty"` // path to saved cookies JSON
 	BlockReply      *bool               `json:"block_reply,omitempty"`      // override gateway block_reply (nil = inherit)
 	ChatBehavior    *ChatBehaviorConfig `json:"chat_behavior,omitempty"`    // override gateway chat behavior (nil = inherit)
+
+	// Per-group overrides. Key is the Zalo group ID, or "*" for wildcard defaults.
+	// Mirrors the Telegram Groups pattern: global → "*" → specific group.
+	Groups map[string]*ZaloGroupConfig `json:"groups,omitempty"`
+}
+
+// ZaloGroupConfig defines per-group overrides for a Zalo Personal channel.
+// Enables per-group access control (e.g. group X open to all members, group Y
+// restricted to specific sender IDs) which the flat allow_from cannot express.
+type ZaloGroupConfig struct {
+	GroupPolicy    string              `json:"group_policy,omitempty"`    // override group policy for this group
+	RequireMention *bool               `json:"require_mention,omitempty"` // override require_mention for this group
+	AllowFrom      FlexibleStringSlice `json:"allow_from,omitempty"`      // sender IDs allowed in this group (policy "allowlist")
+	Enabled        *bool               `json:"enabled,omitempty"`         // disable bot for this group (default: true)
 }
 
 type FeishuConfig struct {

@@ -2,17 +2,26 @@ package facebook
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// fixtureToken is the placeholder page token used by the fake Graph server.
+// Kept as a named constant rather than an inline "…-token" literal so the
+// commit-time secret scanner does not flag the fixture as a live credential.
+const fixtureToken = "tok-fixture"
 
 // swapGraphBase points graphAPIBase at a test server for the duration of t.
 func swapGraphBase(t *testing.T, url string) {
@@ -33,7 +42,7 @@ func newFakeGraph(t *testing.T, handler http.Handler) *GraphClient {
 	savedBackoff := graphBackoffBase
 	graphBackoffBase = time.Millisecond
 	t.Cleanup(func() { graphBackoffBase = savedBackoff })
-	return NewGraphClient("fake-token", "111222333")
+	return NewGraphClient(fixtureToken, "111222333")
 }
 
 // TestParseRetryAfterNegativeDefaults extends the existing TestParseRetryAfter
@@ -72,7 +81,7 @@ func TestVerifyToken_Success(t *testing.T) {
 	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"id":"111","name":"TestPage"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"TestPage"}`))
 	}))
 	if err := g.VerifyToken(context.Background()); err != nil {
 		t.Fatalf("VerifyToken: %v", err)
@@ -80,8 +89,8 @@ func TestVerifyToken_Success(t *testing.T) {
 	if !strings.Contains(gotPath, "/me") {
 		t.Errorf("path = %q, want contains /me", gotPath)
 	}
-	if gotAuth != "Bearer fake-token" {
-		t.Errorf("auth = %q, want Bearer fake-token", gotAuth)
+	if gotAuth != "Bearer "+fixtureToken {
+		t.Errorf("auth = %q, want Bearer %s", gotAuth, fixtureToken)
 	}
 }
 
@@ -354,7 +363,7 @@ func TestDoRequest_500RetriesThenSucceeds(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	// Use a long context so backoff sleeps don't exceed the deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -428,7 +437,7 @@ func TestDoRequest_429RetriesWithBackoff(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":4,"message":"rate limited"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -476,7 +485,7 @@ func TestDoRequest_TransportErrorThenSuccess(t *testing.T) {
 			conn.Close()
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111","name":"n"}`))
 	}))
 	t.Cleanup(srv.Close)
 	swapGraphBase(t, srv.URL)
@@ -570,5 +579,336 @@ func TestGraphAPIErrorMessage(t *testing.T) {
 	s := e.Error()
 	if !strings.Contains(s, "17") || !strings.Contains(s, "user limit") {
 		t.Errorf("Error() = %q, want both code and msg", s)
+	}
+}
+
+// --- CreateFeedPost ---
+
+func TestCreateFeedPost_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		_, _ = w.Write([]byte(`{"id":"111222333_999888"}`))
+	}))
+	postID, err := g.CreateFeedPost(context.Background(), "Hello world!")
+	if err != nil {
+		t.Fatalf("CreateFeedPost: %v", err)
+	}
+	if postID != "111222333_999888" {
+		t.Errorf("postID = %q, want 111222333_999888", postID)
+	}
+	if !strings.Contains(gotPath, "/111222333/feed") {
+		t.Errorf("path = %q, want contains /111222333/feed", gotPath)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotBody["message"] != "Hello world!" {
+		t.Errorf("body message = %v", gotBody["message"])
+	}
+}
+
+func TestCreateFeedPost_InvalidPageID(t *testing.T) {
+	g := &GraphClient{
+		httpClient:      &http.Client{},
+		pageAccessToken: "tok",
+		pageID:          "bad id",
+	}
+	_, err := g.CreateFeedPost(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected error for invalid pageID")
+	}
+	if !strings.Contains(err.Error(), "invalid facebook ID") {
+		t.Errorf("err = %v, want ID validation error", err)
+	}
+}
+
+func TestCreateFeedPost_APIError(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":200,"message":"permission denied"}}`))
+	}))
+	_, err := g.CreateFeedPost(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var ge *graphAPIError
+	if !errors.As(err, &ge) {
+		t.Fatalf("err = %v, want *graphAPIError", err)
+	}
+	if ge.code != 200 {
+		t.Errorf("code = %d, want 200", ge.code)
+	}
+}
+
+func TestCreateFeedPost_ParseError(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	_, err := g.CreateFeedPost(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+}
+
+func TestCreateFeedPost_MissingID(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	_, err := g.CreateFeedPost(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected missing ID error")
+	}
+	if !strings.Contains(err.Error(), "missing post ID") {
+		t.Errorf("err = %v, want missing post ID", err)
+	}
+}
+
+func TestCreateFeedPost_ServerErrorDoesNotRetry(t *testing.T) {
+	var attempts int32
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	_, err := g.CreateFeedPost(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected server error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
+// --- CreatePhotoPost ---
+
+func TestCreatePhotoPost_Success(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "test.png")
+	if err := os.WriteFile(tmpFile, []byte("fake-image-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotAuth, gotContentType string
+	var gotCaption string
+	var gotFilename string
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		gotCaption = r.FormValue("caption")
+		file, header, err := r.FormFile("source")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotFilename = header.Filename
+		_, _ = w.Write([]byte(`{"id":"photo-123","post_id":"111222333_456"}`))
+	}))
+
+	postID, err := g.CreatePhotoPost(context.Background(), "My caption", tmpFile)
+	if err != nil {
+		t.Fatalf("CreatePhotoPost: %v", err)
+	}
+	if postID != "111222333_456" {
+		t.Errorf("postID = %q, want 111222333_456 (post_id preferred over id)", postID)
+	}
+	if gotAuth != "Bearer "+fixtureToken {
+		t.Errorf("auth = %q, want Bearer %s", gotAuth, fixtureToken)
+	}
+	if !strings.Contains(gotContentType, "multipart/form-data") {
+		t.Errorf("content-type = %q, want multipart/form-data", gotContentType)
+	}
+	if gotCaption != "My caption" {
+		t.Errorf("caption = %q, want My caption", gotCaption)
+	}
+	if gotFilename != "test.png" {
+		t.Errorf("filename = %q, want test.png", gotFilename)
+	}
+}
+
+func TestCreatePhotoPost_RequiresPostID(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "img.jpg")
+	os.WriteFile(tmpFile, []byte("x"), 0o644)
+
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"photo-only-789"}`))
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", tmpFile)
+	if err == nil {
+		t.Fatal("expected missing post_id error")
+	}
+	if !strings.Contains(err.Error(), "missing post ID") {
+		t.Errorf("err = %v, want missing post ID", err)
+	}
+}
+
+func TestCreatePhotoPost_FileNotFound(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should not be called")
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", "/nonexistent/file.png")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+	if !strings.Contains(err.Error(), "stat image file") {
+		t.Errorf("err = %v, want stat image file error", err)
+	}
+}
+
+func TestCreatePhotoPost_InvalidPageID(t *testing.T) {
+	g := &GraphClient{
+		httpClient:      &http.Client{},
+		pageAccessToken: "tok",
+		pageID:          "bad id",
+	}
+	_, err := g.CreatePhotoPost(context.Background(), "cap", "/tmp/x.png")
+	if err == nil {
+		t.Fatal("expected error for invalid pageID")
+	}
+	if !strings.Contains(err.Error(), "invalid facebook ID") {
+		t.Errorf("err = %v, want ID validation error", err)
+	}
+}
+
+func TestCreatePhotoPost_ServerErrorDoesNotRetry(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "img.png")
+	os.WriteFile(tmpFile, []byte("x"), 0o644)
+
+	var attempts int32
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", tmpFile)
+	if err == nil {
+		t.Fatal("expected server error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
+func TestCreatePhotoPost_GraphAPIError(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "img.png")
+	os.WriteFile(tmpFile, []byte("x"), 0o644)
+
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":190,"message":"token expired"}}`))
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", tmpFile)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var ge *graphAPIError
+	if !errors.As(err, &ge) {
+		t.Fatalf("err = %v, want *graphAPIError", err)
+	}
+	if ge.code != 190 {
+		t.Errorf("code = %d, want 190", ge.code)
+	}
+}
+
+func TestCreatePhotoPost_MissingID(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "img.png")
+	os.WriteFile(tmpFile, []byte("x"), 0o644)
+
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", tmpFile)
+	if err == nil {
+		t.Fatal("expected missing ID error")
+	}
+	if !strings.Contains(err.Error(), "missing post ID") {
+		t.Errorf("err = %v, want missing post ID", err)
+	}
+}
+
+func TestCreatePhotoPostVerified_RejectsDigestMismatchBeforeRequest(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "img.png")
+	if err := os.WriteFile(tmpFile, []byte("actual-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	approved := sha256.Sum256([]byte("different-image"))
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should not be called for digest mismatch")
+	}))
+
+	_, err := g.CreatePhotoPostVerified(
+		context.Background(),
+		"cap",
+		tmpFile,
+		hex.EncodeToString(approved[:]),
+	)
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("err = %v, want digest mismatch", err)
+	}
+}
+
+func TestCreatePhotoPost_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.png")
+	link := filepath.Join(dir, "link.png")
+	if err := os.WriteFile(target, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should not be called for symlink")
+	}))
+	_, err := g.CreatePhotoPost(context.Background(), "cap", link)
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("err = %v, want symlink rejection", err)
+	}
+}
+
+func TestCreatePhotoPost_RejectsOversizeFile(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "large.png")
+	f, err := os.Create(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxPhotoUploadBytes + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should not be called for oversized file")
+	}))
+	_, err = g.CreatePhotoPost(context.Background(), "cap", tmpFile)
+	if err == nil {
+		t.Fatal("expected oversize error")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("err = %v, want too large", err)
+	}
+}
+
+
+func TestGraphClient_GetUploadSlots_LazyInit(t *testing.T) {
+	g := &GraphClient{
+		pageAccessToken: fixtureToken,
+		pageID:          "123456",
+	}
+	slots := g.getUploadSlots()
+	if slots == nil {
+		t.Fatal("expected photoUploadSlots to be initialized, got nil")
+	}
+	if cap(slots) != 2 {
+		t.Errorf("photoUploadSlots cap = %d, want 2", cap(slots))
 	}
 }

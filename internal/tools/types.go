@@ -101,6 +101,15 @@ type ChannelSenderAware interface {
 	SetChannelSender(ChannelSender)
 }
 
+// OutboundDispatcher sends a full OutboundMessage synchronously (with metadata/media).
+// Implemented by channels.Manager.DispatchOutbound.
+type OutboundDispatcher func(ctx context.Context, msg bus.OutboundMessage) error
+
+// OutboundDispatcherAware tools can receive an outbound dispatcher.
+type OutboundDispatcherAware interface {
+	SetOutboundDispatcher(OutboundDispatcher)
+}
+
 // ChannelTenantChecker returns the tenant UUID for a channel instance.
 // Used by the message tool to prevent cross-tenant sends.
 // Returns (tenantID, exists). Zero tenantID means legacy/config-based channel.
@@ -109,6 +118,15 @@ type ChannelTenantChecker func(channelName string) (tenantID uuid.UUID, exists b
 // ChannelTenantCheckerAware tools can receive a channel tenant checker.
 type ChannelTenantCheckerAware interface {
 	SetChannelTenantChecker(ChannelTenantChecker)
+}
+
+// ReelsReviewChatChecker reports whether a channel instance's config lists
+// chatID as a Reels review chat. Implemented by channels.Manager.IsReelsReviewChat.
+type ReelsReviewChatChecker func(channelName, chatID string) bool
+
+// ReelsReviewChatCheckerAware tools can receive a Reels review chat checker.
+type ReelsReviewChatCheckerAware interface {
+	SetReelsReviewChatChecker(ReelsReviewChatChecker)
 }
 
 // ChannelAware is optionally implemented by tools that only work on specific channel types.

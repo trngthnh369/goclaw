@@ -48,6 +48,15 @@ const (
 	TeamTaskStatusStale      = "stale"
 )
 
+const (
+	DependencyPolicyTerminal        = "terminal"
+	DependencyPolicySuccessRequired = "success_required"
+)
+
+const (
+	ExecutionModeManaged = "managed"
+)
+
 // Team task list filter constants (for ListTasks statusFilter parameter).
 const (
 	TeamTaskFilterActive    = "active" // pending + in_progress + blocked
@@ -110,6 +119,11 @@ type TeamTaskData struct {
 	TaskType         string     `json:"task_type" db:"task_type"`
 	TaskNumber       int        `json:"task_number,omitempty" db:"task_number"`
 	Identifier       string     `json:"identifier,omitempty" db:"identifier"`
+	BatchID          *uuid.UUID `json:"batch_id,omitempty" db:"batch_id"`
+	IdempotencyKey   string     `json:"idempotency_key,omitempty" db:"idempotency_key"`
+	TaskRole         string     `json:"task_role,omitempty" db:"task_role"`
+	DependencyPolicy string     `json:"dependency_policy,omitempty" db:"dependency_policy"`
+	ExecutionMode    string     `json:"execution_mode,omitempty" db:"execution_mode"`
 	CreatedByAgentID *uuid.UUID `json:"created_by_agent_id,omitempty" db:"created_by_agent_id"`
 	AssigneeUserID   string     `json:"assignee_user_id,omitempty" db:"assignee_user_id"`
 	ParentID         *uuid.UUID `json:"parent_id,omitempty" db:"parent_id"`

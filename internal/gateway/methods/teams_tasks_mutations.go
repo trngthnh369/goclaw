@@ -340,10 +340,14 @@ func (m *TeamsMethods) dispatchTaskToAgent(ctx context.Context, task *store.Team
 	if team, err := m.teamStore.GetTeam(ctx, teamID); err == nil && team != nil && agentID == team.LeadAgentID {
 		slog.Warn("teams.tasks.dispatch: blocked dispatch to lead agent",
 			"task_id", taskID, "agent_id", agentID, "team_id", teamID)
-		_ = m.teamStore.UpdateTask(ctx, taskID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": "Cannot dispatch task to the team lead — reassign to a team member",
-		})
+		// UpdateTask cannot change the status (column whitelist): use the
+		// lifecycle methods; the task is pending/blocked or already assigned.
+		reason := "Cannot dispatch task to the team lead — reassign to a team member"
+		if err := m.teamStore.FailPendingTask(ctx, taskID, teamID, reason); err != nil {
+			if err := m.teamStore.FailTask(ctx, taskID, teamID, reason); err != nil {
+				slog.Warn("teams.tasks.dispatch: could not fail task", "task_id", taskID, "error", err)
+			}
+		}
 		return
 	}
 
@@ -403,11 +407,18 @@ func (m *TeamsMethods) dispatchTaskToAgent(ctx context.Context, task *store.Team
 	// from the task at creation time. Without this, group-scope tasks
 	// dispatched from the dashboard would hit the empty-sender DENY rule in
 	// CheckFileWriterPermission (#915 Flow F).
+	// The display name always comes from the same source as the sender.
 	if dispatchSender := store.SenderIDFromContext(ctx); dispatchSender != "" {
 		meta["origin_sender_id"] = dispatchSender
+		if name := store.SenderNameFromContext(ctx); name != "" {
+			meta["origin_sender_name"] = name
+		}
 	} else if task.Metadata != nil {
 		if taskSender, _ := task.Metadata["origin_sender_id"].(string); taskSender != "" {
 			meta["origin_sender_id"] = taskSender
+			if name, _ := task.Metadata["origin_sender_name"].(string); name != "" {
+				meta["origin_sender_name"] = name
+			}
 		}
 	}
 	// Propagate RBAC role so the teammate's permission checks can bypass

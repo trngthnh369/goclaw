@@ -24,7 +24,7 @@ type contactResolveEntry struct {
 // Mirrors the pattern in config_permissions.go (permCacheTTL).
 type contactResolveCache struct {
 	mu    sync.RWMutex
-	items map[string]contactResolveEntry // key: "tenantID:channelType:senderID"
+	items map[string]contactResolveEntry // key: "tenantID:channelType:channelInstance:senderID"
 }
 
 func newContactResolveCache() *contactResolveCache {
@@ -59,12 +59,12 @@ func (s *PGContactStore) InvalidateContactResolveCache() {
 
 // ResolveTenantUserID looks up a contact's merged tenant-user identity.
 // Uses an in-memory cache with 60s TTL to avoid per-message DB queries.
-func (s *PGContactStore) ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error) {
+func (s *PGContactStore) ResolveTenantUserID(ctx context.Context, channelType, channelInstance, senderID string) (string, error) {
 	tid := store.TenantIDFromContext(ctx)
 	if tid == uuid.Nil {
 		return "", nil
 	}
-	cacheKey := tid.String() + ":" + channelType + ":" + senderID
+	cacheKey := tid.String() + ":" + channelType + ":" + channelInstance + ":" + senderID
 
 	// Check cache.
 	if s.resolveCache != nil {
@@ -77,10 +77,11 @@ func (s *PGContactStore) ResolveTenantUserID(ctx context.Context, channelType, s
 	var tenantUserID string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tu.user_id FROM channel_contacts cc
-		 JOIN tenant_users tu ON cc.merged_id = tu.id
-		 WHERE cc.tenant_id = $1 AND cc.channel_type = $2 AND cc.sender_id = $3
-		 AND cc.merged_id IS NOT NULL`,
-		tid, channelType, senderID,
+			 JOIN tenant_users tu ON cc.merged_id = tu.id
+			 WHERE cc.tenant_id = $1 AND cc.channel_type = $2
+			 AND COALESCE(cc.channel_instance, '') = $3 AND cc.sender_id = $4
+			 AND cc.merged_id IS NOT NULL`,
+		tid, channelType, channelInstance, senderID,
 	).Scan(&tenantUserID)
 
 	if errors.Is(err, sql.ErrNoRows) {

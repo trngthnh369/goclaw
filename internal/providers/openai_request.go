@@ -14,16 +14,22 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 	// Tool results are folded into plain user messages to preserve context.
 	inputMessages := req.Messages
 
-	// Compute provider capability once: does this endpoint support Google's thought_signature?
-	// We check providerType, name, apiBase, and the model string (robust detection for proxies/OpenRouter).
-	supportsThoughtSignature := strings.Contains(strings.ToLower(p.providerType), "gemini") ||
+	// Does this endpoint enforce Google's thought_signature? We check providerType,
+	// name, apiBase, and the model string (robust detection for proxies/OpenRouter).
+	enforcesThoughtSignature := strings.Contains(strings.ToLower(p.providerType), "gemini") ||
 		strings.Contains(strings.ToLower(p.name), "gemini") ||
 		strings.Contains(strings.ToLower(p.apiBase), "generativelanguage") ||
 		strings.Contains(strings.ToLower(model), "gemini") ||
 		strings.ToLower(p.providerType) == "vertex" ||
 		strings.Contains(strings.ToLower(p.apiBase), "aiplatform")
+	supportsThoughtSignature := p.geminiCompat || enforcesThoughtSignature
 
-	if supportsThoughtSignature {
+	// geminiCompat alone does not collapse. It marks a proxy that translates the
+	// request itself (CLIProxyAPI/Antigravity): it never returns a signature and
+	// accepts a plain tool-call replay. Collapsing there erases the model's own
+	// calls from its history, so it repeats its last call: a reviewer on ag-pro
+	// rewrote the same file 25 times instead of running the next command.
+	if enforcesThoughtSignature {
 		inputMessages = collapseToolCallsWithoutSig(inputMessages)
 	}
 
@@ -283,6 +289,9 @@ func buildToolNameIndex(msgs []Message) map[string]string {
 // routes by model string. Narrower than the supportsThoughtSignature gate —
 // we require explicit intent before forwarding reasoning_effort on proxies.
 func (p *OpenAIProvider) isGeminiRoute(model string) bool {
+	if p.geminiCompat {
+		return true
+	}
 	if strings.Contains(strings.ToLower(p.apiBase), "generativelanguage") {
 		return true
 	}

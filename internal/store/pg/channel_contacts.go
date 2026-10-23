@@ -30,7 +30,7 @@ func (s *PGContactStore) UpsertContact(ctx context.Context, channelType, channel
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO channel_contacts (channel_type, channel_instance, sender_id, user_id, display_name, username, peer_kind, contact_type, thread_id, thread_type, tenant_id)
 		VALUES ($1, NULLIF($2,''), $3, NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), NULLIF($10,''), $11)
-		ON CONFLICT (tenant_id, channel_type, sender_id, COALESCE(thread_id, '')) DO UPDATE SET
+		ON CONFLICT (tenant_id, channel_type, COALESCE(channel_instance, ''), sender_id, COALESCE(thread_id, '')) DO UPDATE SET
 			display_name     = COALESCE(NULLIF($5,''), channel_contacts.display_name),
 			username         = COALESCE(NULLIF($6,''), channel_contacts.username),
 			user_id          = COALESCE(NULLIF($4,''), channel_contacts.user_id),
@@ -145,7 +145,7 @@ func (s *PGContactStore) CountContacts(ctx context.Context, opts store.ContactLi
 	return count, err
 }
 
-func (s *PGContactStore) GetContactsBySenderIDs(ctx context.Context, senderIDs []string) (map[string]store.ChannelContact, error) {
+func (s *PGContactStore) GetContactsBySenderIDs(ctx context.Context, senderIDs []string, channelInstance string) (map[string]store.ChannelContact, error) {
 	if len(senderIDs) == 0 {
 		return map[string]store.ChannelContact{}, nil
 	}
@@ -163,13 +163,19 @@ func (s *PGContactStore) GetContactsBySenderIDs(ctx context.Context, senderIDs [
 	args = append(args, tid)
 	tenantPH := fmt.Sprintf("$%d", len(args))
 
+	instanceClause := ""
+	if channelInstance != "" {
+		args = append(args, channelInstance)
+		instanceClause = fmt.Sprintf(" AND COALESCE(channel_instance, '') = $%d", len(args))
+	}
+
 	query := fmt.Sprintf(`SELECT DISTINCT ON (sender_id)
 		id, channel_type, channel_instance, sender_id, user_id,
 		display_name, username, avatar_url, peer_kind, contact_type, thread_id, thread_type, merged_id,
 		first_seen_at, last_seen_at
 		FROM channel_contacts
-		WHERE sender_id IN (%s) AND tenant_id = %s
-		ORDER BY sender_id, last_seen_at DESC`, strings.Join(placeholders, ","), tenantPH)
+		WHERE sender_id IN (%s) AND tenant_id = %s%s
+		ORDER BY sender_id, last_seen_at DESC`, strings.Join(placeholders, ","), tenantPH, instanceClause)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

@@ -1,0 +1,36 @@
+# Rebuild only the Go binary and drop it onto the existing runtime image.
+#
+# Dockerfile.claude-cli builds FROM a prebuilt goclaw image and does NOT compile
+# Go, so code changes never reach the container through it. The full Dockerfile
+# does compile, but it also rebuilds the web UI (pnpm) and the Python layer,
+# which is heavy enough to have wedged Docker Desktop on this host.
+#
+# This file keeps the runtime layer (web UI assets, skills, migrations, Python)
+# from the existing image and replaces just /app/goclaw.
+#
+# Usage:
+#   docker build -f Dockerfile.p0patch -t goclaw:v3.14.0-group-sync .
+#   docker compose ... build goclaw && docker compose ... up -d goclaw
+#
+# Tag the current base first so there is a rollback point:
+#   docker tag goclaw:v3.14.0-group-sync goclaw:v3.14.0-pre-<date>
+
+ARG BASE_IMAGE=goclaw:v3.14.0-group-sync
+ARG VERSION=v3.14.0
+
+FROM golang:1.26-bookworm AS builder
+ARG VERSION
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags="-s -w -X github.com/nextlevelbuilder/goclaw/cmd.Version=${VERSION}" \
+    -o /out/goclaw . && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/pkg-helper ./cmd/pkg-helper
+
+FROM ${BASE_IMAGE}
+COPY --from=builder /out/goclaw /app/goclaw
+COPY --from=builder /out/pkg-helper /app/pkg-helper
+# Migrations ship as files, not embedded — keep them in step with the binary.
+COPY migrations /app/migrations

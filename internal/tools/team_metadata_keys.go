@@ -12,6 +12,10 @@ const (
 	// so permission checks (e.g. CheckFileWriterPermission) attribute to the
 	// original user rather than a synthetic "subagent:<id>" / "notification:system" string.
 	MetaOriginSenderID   = "origin_sender_id"
+	// MetaOriginSenderName carries that sender's display name, so a re-ingress
+	// turn (e.g. the lead's announce) renders the same "User:" line as the turn
+	// that started the work; any difference there costs the whole prompt cache.
+	MetaOriginSenderName = "origin_sender_name"
 	// MetaOriginRole carries the caller's RBAC role through dispatch + re-ingress
 	// so permission checks can bypass per-user grants for authenticated admins
 	// (e.g. dashboard user dispatches a task that writes files in a group chat).

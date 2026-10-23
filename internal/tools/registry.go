@@ -32,6 +32,11 @@ type Registry struct {
 	// deferredActivator is called when a tool is not in the registry but may be
 	// a deferred MCP tool. Returns true if the tool was successfully activated.
 	deferredActivator func(name string) bool
+
+	// authorizer gates non-read-only calls. Nil means no policy is wired and
+	// every call proceeds, which is the behaviour before a policy exists; it is
+	// not a fallback a wired deployment should ever hit, so Clone must carry it.
+	authorizer ToolAuthorizer
 }
 
 func NewRegistry() *Registry {
@@ -70,6 +75,41 @@ func (r *Registry) TryActivateDeferred(name string) bool {
 	return fn(name)
 }
 
+// SetToolAuthorizer installs the policy consulted before every non-read-only
+// tool call. Passing nil removes the gate.
+func (r *Registry) SetToolAuthorizer(az ToolAuthorizer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.authorizer = az
+}
+
+// authorize consults the policy for calls that can have side effects.
+//
+// A tool counts as read-only only when it says so and does not also claim to
+// mutate: IsReadOnly alone would let a tool declaring both slip past the gate
+// while still having side effects.
+func (r *Registry) authorize(ctx context.Context, tool Tool, args map[string]any) error {
+	r.mu.RLock()
+	az := r.authorizer
+	r.mu.RUnlock()
+	if az == nil {
+		return nil
+	}
+
+	name := tool.Name()
+	meta := r.GetMetadata(name)
+	if meta.IsReadOnly() && !meta.IsMutating() {
+		return nil
+	}
+
+	return az.AuthorizeTool(ctx, ToolAuthzRequest{
+		Tool:         name,
+		Meta:         meta,
+		Args:         args,
+		SystemReason: SystemToolCallReason(ctx),
+	})
+}
+
 // SetRateLimiter enables per-key tool rate limiting.
 func (r *Registry) SetRateLimiter(rl *ToolRateLimiter) {
 	r.rateLimiter = rl
@@ -81,10 +121,17 @@ func (r *Registry) SetScrubbing(enabled bool) {
 }
 
 // Register adds a tool to the registry.
+//
+// A tool implementing CapabilityAware has its capabilities recorded here;
+// everything else falls back to inferMetadata at lookup time.
 func (r *Registry) Register(tool Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tools[tool.Name()] = tool
+	name := tool.Name()
+	r.tools[name] = tool
+	if ca, ok := tool.(CapabilityAware); ok {
+		r.metadata[name] = ToolMetadata{Name: name, Capabilities: ca.Capabilities()}
+	}
 }
 
 // RegisterWithMetadata adds a tool with explicit capability metadata.
@@ -220,6 +267,14 @@ func (r *Registry) ExecuteWithContext(ctx context.Context, name string, args map
 					strings.Join(req, ", ")))
 			}
 		}
+	}
+
+	// Policy gate. Placed here, after aliases are resolved and after any caller
+	// has finished rewriting args, so the decision applies to the call that
+	// actually runs — and so every entry point into the registry is covered,
+	// not just the agent pipeline.
+	if err := r.authorize(ctx, tool, args); err != nil {
+		return ErrorResult(err.Error())
 	}
 
 	start := time.Now()
@@ -359,6 +414,10 @@ func (r *Registry) Clone() *Registry {
 		toolGroups:  make(map[string][]string, len(r.toolGroups)),
 		rateLimiter: r.rateLimiter,
 		scrubbing:   r.scrubbing,
+		// Subagents run on a clone. Dropping the authorizer here would leave
+		// every tool call inside a child run ungated — the same shape as the
+		// bypass this factory caused once before.
+		authorizer: r.authorizer,
 	}
 	maps.Copy(clone.tools, r.tools)
 	maps.Copy(clone.metadata, r.metadata)

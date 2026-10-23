@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -28,14 +29,16 @@ func (m *ExecApprovalMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodApprovalsDeny, m.handleDeny)
 }
 
-func (m *ExecApprovalMethods) handleList(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+func (m *ExecApprovalMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.manager == nil {
 		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 			"pending": []any{},
 		}))
 		return
 	}
-	pending := m.manager.ListPending()
+	// ctx carries the caller's tenant/master scope — the manager filters on it,
+	// so an operator in one tenant cannot enumerate another tenant's approvals.
+	pending := m.manager.ListPending(ctx)
 
 	type pendingInfo struct {
 		ID        string `json:"id"`
@@ -67,8 +70,11 @@ func (m *ExecApprovalMethods) handleApprove(ctx context.Context, client *gateway
 	}
 
 	var params struct {
-		ID     string `json:"id"`
-		Always bool   `json:"always"` // true = allow-always, false = allow-once
+		ID string `json:"id"`
+		// Always is still accepted for wire compatibility but no longer grants a
+		// standing allowlist entry: the old allow-always store was process-global,
+		// cross-tenant and unrevocable. Every approval is now single-use.
+		Always bool `json:"always"`
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
@@ -79,12 +85,14 @@ func (m *ExecApprovalMethods) handleApprove(ctx context.Context, client *gateway
 		return
 	}
 
-	decision := tools.ApprovalAllowOnce
 	if params.Always {
-		decision = tools.ApprovalAllowAlways
+		slog.Warn("exec approval: allow-always requested but no longer supported; approving once",
+			"id", params.ID)
 	}
 
-	if err := m.manager.Resolve(params.ID, decision); err != nil {
+	decision := tools.ApprovalAllowOnce
+
+	if err := m.manager.Resolve(ctx, params.ID, decision); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, err.Error()))
 		return
 	}
@@ -115,7 +123,7 @@ func (m *ExecApprovalMethods) handleDeny(ctx context.Context, client *gateway.Cl
 		return
 	}
 
-	if err := m.manager.Resolve(params.ID, tools.ApprovalDeny); err != nil {
+	if err := m.manager.Resolve(ctx, params.ID, tools.ApprovalDeny); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, err.Error()))
 		return
 	}

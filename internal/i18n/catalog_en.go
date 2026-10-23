@@ -184,6 +184,7 @@ func init() {
 		MsgStatusPhaseDefault:  "Phase: Processing...",
 		MsgCancelledReply:      "✋ Cancelled. What would you like to do next?",
 		MsgInjectedAck:         "Got it, I'll incorporate that into what I'm working on.",
+		MsgRunFailedNotice:     "⚠️ I couldn't finish a reply this time (the AI service is busy or too slow). Please try again in a few minutes.",
 
 		// Knowledge Graph
 		MsgEntityIDRequired:       "entity_id is required",

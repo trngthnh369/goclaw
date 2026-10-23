@@ -294,6 +294,35 @@ func (m *Manager) ChannelTypeForName(name string) string {
 // ChannelTenantID returns the tenant UUID for a channel instance.
 // Zero UUID means legacy/config-based channel (no tenant scope).
 // Returns (tenantID, exists).
+// IsReelsReviewChat reports whether the named channel instance lists chatID
+// as a Reels review chat. Channels without that notion answer false.
+func (m *Manager) IsReelsReviewChat(channelName, chatID string) bool {
+	m.mu.RLock()
+	ch, ok := m.channels[channelName]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	rc, ok := ch.(interface{ IsReelsReviewChat(string) bool })
+	return ok && rc.IsReelsReviewChat(chatID)
+}
+
+// ErrorNoticeLocale returns the locale of the fixed failure notice the named
+// channel instance opted into, or "" when failures stay silent.
+func (m *Manager) ErrorNoticeLocale(channelName string) string {
+	m.mu.RLock()
+	ch, ok := m.channels[channelName]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	en, ok := ch.(ErrorNoticeChannel)
+	if !ok {
+		return ""
+	}
+	return en.ErrorNoticeLocale()
+}
+
 func (m *Manager) ChannelTenantID(channelName string) (uuid.UUID, bool) {
 	m.mu.RLock()
 	ch, ok := m.channels[channelName]

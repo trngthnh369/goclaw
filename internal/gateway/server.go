@@ -156,6 +156,7 @@ func (s *Server) BuildMux() *http.ServeMux {
 
 	// HTTP API endpoints
 	mux.HandleFunc("/health", s.handleHealth)
+	httpapi.RegisterRunReceiptRoute(mux)
 
 	// OpenAI-compatible chat completions
 	isManaged := s.agentStore != nil
@@ -775,6 +776,7 @@ func StartTestServer(s *Server, ctx context.Context) (addr string, start func())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
+	httpapi.RegisterRunReceiptRoute(mux)
 
 	isManaged := s.agentStore != nil
 	chatHandler := httpapi.NewChatCompletionsHandler(s.agents, s.sessions, isManaged)

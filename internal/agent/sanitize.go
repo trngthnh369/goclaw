@@ -46,6 +46,9 @@ func SanitizeAssistantContent(content string) string {
 	// 3. Strip thinking/reasoning tags (<think>, <thinking>, <thought>, <antThinking>)
 	content = stripThinkingTags(content)
 
+	// 3b. Strip an untagged reasoning preamble ("思考过程：..." / "Thinking Process:")
+	content = stripLeakedReasoningPreamble(content)
+
 	// 4. Strip <final> tags (keep content inside)
 	content = stripFinalTags(content)
 
@@ -194,6 +197,44 @@ func stripThinkingTags(content string) string {
 		result = pat.ReplaceAllString(result, "")
 	}
 	return strings.TrimSpace(result)
+}
+
+// --- 3b. Untagged reasoning preamble ---
+
+// Some models (seen with Gemini behind an OpenAI-compatible proxy) print their
+// plan as ordinary content under a header such as "思考过程：" and glue the real
+// answer straight after a hand-off sentence ("Let's write the response!").
+// Saved into history, that plan makes every later turn heavier. The preamble is
+// cut only when the header opens the message AND a hand-off is found; without a
+// clear boundary the content is kept whole rather than risk deleting the answer.
+var (
+	leakedReasoningHeader = regexp.MustCompile(
+		`^\s*(?:\*\*|#+\s*)?(?:思考过程|思考過程|(?i:thinking process|thought process))(?:\*\*)?\s*[:：]`)
+	leakedReasoningHandoffs = []*regexp.Regexp{
+		// A "Final Answer:" label is deliberately not a hand-off: a reply that
+		// shows its working on request legitimately ends with one.
+		regexp.MustCompile(`(?i)let'?s (?:now )?(?:write|draft|compose|produce|generate|output|craft|finalize)(?: out| up)? (?:the |my |a |our )?(?:final )?(?:response|answer|reply|output)\s*[.!]+`),
+	}
+)
+
+func stripLeakedReasoningPreamble(content string) string {
+	if !leakedReasoningHeader.MatchString(content) {
+		return content
+	}
+	cut := -1
+	for _, pat := range leakedReasoningHandoffs {
+		if loc := pat.FindStringIndex(content); loc != nil && (cut < 0 || loc[1] < cut) {
+			cut = loc[1]
+		}
+	}
+	if cut < 0 || strings.TrimSpace(content[cut:]) == "" {
+		slog.Warn("sanitize: leaked reasoning header without a hand-off, kept as is",
+			"len", len(content))
+		return content
+	}
+	slog.Info("sanitize: stripped leaked reasoning preamble",
+		"stripped_len", cut, "kept_len", len(content)-cut)
+	return strings.TrimSpace(content[cut:])
 }
 
 // --- 4. <final> tags ---

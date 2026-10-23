@@ -12,6 +12,7 @@ tests/
 /config.json
 openclaw-go
 *.exe
+test_*.go
 tmp/
 .claude/
 .vscode/

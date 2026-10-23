@@ -29,9 +29,26 @@ func (c *Channel) checkDMPolicy(ctx context.Context, senderID, chatID string) bo
 }
 
 // checkGroupPolicy enforces group access policy (allowlist/pairing).
+// rc is the per-group resolved config (global → "*" → specific group).
 // Returns false if the group is blocked by policy; does NOT check @mention gating.
-func (c *Channel) checkGroupPolicy(ctx context.Context, senderID, groupID string) bool {
-	result := c.CheckGroupPolicy(ctx, senderID, groupID, c.config.GroupPolicy)
+func (c *Channel) checkGroupPolicy(ctx context.Context, senderID, groupID string, rc resolvedGroupConfig) bool {
+	if !rc.enabled {
+		slog.Debug("zalo_personal group message rejected: group disabled", "group_id", groupID)
+		return false
+	}
+
+	// Per-group allowlist: the group having its own config entry implies the group
+	// itself is allowed; senderID must match that group's allow_from (AND semantics).
+	if rc.perGroupAllow && rc.groupPolicy == "allowlist" {
+		if rc.senderInAllowFrom(senderID) {
+			return true
+		}
+		slog.Debug("zalo_personal group message rejected by per-group allowlist",
+			"group_id", groupID, "sender_id", senderID)
+		return false
+	}
+
+	result := c.CheckGroupPolicy(ctx, senderID, groupID, rc.groupPolicy)
 	switch result {
 	case channels.PolicyAllow:
 		return true
@@ -40,7 +57,7 @@ func (c *Channel) checkGroupPolicy(ctx context.Context, senderID, groupID string
 		c.sendPairingReply(ctx, groupSenderID, groupID)
 		return false
 	default:
-		slog.Debug("zalo_personal group message rejected by policy", "group_id", groupID, "policy", c.config.GroupPolicy)
+		slog.Debug("zalo_personal group message rejected by policy", "group_id", groupID, "policy", rc.groupPolicy)
 		return false
 	}
 }

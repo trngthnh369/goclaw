@@ -3,48 +3,80 @@ package facebook
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 const (
-	graphAPIVersion = "v25.0"
-	maxRetries      = 3
+	graphAPIVersion     = "v25.0"
+	maxRetries          = 3
+	maxPhotoUploadBytes = 25 << 20 // 25 MiB protects the shared gateway from oversized uploads.
 	// maxRetryAfterSec caps the Retry-After sleep to prevent goroutine stalls on abnormal values.
 	maxRetryAfterSec = 60
 )
 
 // graphAPIBase is the Graph API root. Declared as a variable so tests can
 // override it with an httptest.NewServer URL.
-var graphAPIBase = "https://graph.facebook.com"
+var (
+	graphAPIBase = "https://graph.facebook.com"
+)
 
 // fbIDPattern validates Facebook object IDs: numeric or "{num}_{num}" form (post IDs).
 var fbIDPattern = regexp.MustCompile(`^\d+(_\d+)?$`)
 
 // GraphClient wraps the Facebook Graph API for a single page instance.
 type GraphClient struct {
-	httpClient      *http.Client
-	pageAccessToken string
-	pageID          string
+	httpClient       *http.Client
+	pageAccessToken  string
+	pageID           string
+	photoUploadSlots chan struct{}
+	slotsOnce        sync.Once
+}
+
+func (g *GraphClient) getUploadSlots() chan struct{} {
+	g.slotsOnce.Do(func() {
+		if g.photoUploadSlots == nil {
+			g.photoUploadSlots = make(chan struct{}, 2)
+		}
+	})
+	return g.photoUploadSlots
 }
 
 // NewGraphClient creates a new GraphClient for the given page.
 func NewGraphClient(pageAccessToken, pageID string) *GraphClient {
 	return &GraphClient{
-		httpClient:      &http.Client{Timeout: 15 * time.Second},
-		pageAccessToken: pageAccessToken,
-		pageID:          pageID,
+		httpClient:       &http.Client{Timeout: 15 * time.Second},
+		pageAccessToken:  pageAccessToken,
+		pageID:           pageID,
+		photoUploadSlots: make(chan struct{}, 2),
 	}
 }
 
-// VerifyToken checks the page access token by calling GET /me.
+// VerifyToken checks that the credential really is a Page access token for the
+// configured page, by calling GET /me and comparing the identity it returns.
+//
+// The comparison is the whole point. GET /me answers with whoever owns the
+// token: a Page token names the page, but a user or Business-Manager system-user
+// token names that identity instead. Without the check this logged
+// "page token verified" for a system-user token and returned nil, so a
+// misconfigured channel started clean and only failed later at publish time with
+// an opaque Graph error — that shipped and hid a broken credential for three days.
 func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	data, err := g.doRequest(ctx, http.MethodGet, "/me?fields=id,name", nil)
 	if err != nil {
@@ -57,8 +89,42 @@ func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("facebook: token verification parse error: %w", err)
 	}
+	if result.ID != g.pageID {
+		slog.Error("facebook: credential is not a Page token for the configured page",
+			"configured_page_id", g.pageID, "token_identity_id", result.ID, "token_identity_name", result.Name)
+		return fmt.Errorf(
+			"facebook: page_access_token belongs to %q (id %s), not the configured page %s — "+
+				"exchange it for a Page token first (GET /%s?fields=access_token)",
+			result.Name, result.ID, g.pageID, g.pageID)
+	}
 	slog.Info("facebook: page token verified", "page_id", result.ID, "name", result.Name)
 	return nil
+}
+
+// GetPostPermalink returns the canonical URL of a published post.
+//
+// The URL must be fetched, not assembled. Graph reports permalinks under the
+// page's own numeric id, which is not the page_id used to publish: a post to
+// page 1193343723865442 came back as
+// facebook.com/122104624239290721/posts/122104618611290721. A hand-built
+// "facebook.com/{page_id}/posts/{id}" link therefore renders as unavailable,
+// which is exactly what happened when one was handed to an operator who needed
+// to take the post down.
+func (g *GraphClient) GetPostPermalink(ctx context.Context, postID string) (string, error) {
+	if err := validateFBID(postID); err != nil {
+		return "", fmt.Errorf("facebook: get permalink: %w", err)
+	}
+	data, err := g.doRequest(ctx, http.MethodGet, "/"+postID+"?fields=permalink_url", nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		PermalinkURL string `json:"permalink_url"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("facebook: permalink parse error: %w", err)
+	}
+	return result.PermalinkURL, nil
 }
 
 // SubscribeApp subscribes the app to the page's webhook events.
@@ -178,18 +244,213 @@ func (g *GraphClient) SendTypingOn(ctx context.Context, recipientID string) erro
 	return err
 }
 
+// CreateFeedPost publishes a text post to the page feed. Returns the post ID.
+func (g *GraphClient) CreateFeedPost(ctx context.Context, message string) (string, error) {
+	if err := validateFBID(g.pageID); err != nil {
+		return "", fmt.Errorf("facebook: create feed post: %w", err)
+	}
+	path := fmt.Sprintf("/%s/feed", g.pageID)
+	body := map[string]string{"message": message}
+	data, err := g.doRequestOnce(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return "", fmt.Errorf("facebook: create feed post: %w", err)
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("facebook: parse feed post result: %w", err)
+	}
+	if result.ID == "" {
+		return "", fmt.Errorf("facebook: feed post response missing post ID")
+	}
+	return result.ID, nil
+}
+
+// CreatePhotoPost uploads a local image with caption to the page feed.
+func (g *GraphClient) CreatePhotoPost(ctx context.Context, caption, filePath string) (string, error) {
+	return g.CreatePhotoPostVerified(ctx, caption, filePath, "")
+}
+
+// CreatePhotoPostVerified uploads the exact approved image. The file is opened
+// once, identity-checked against its lstat result, optionally digest-verified,
+// then streamed from that same handle to avoid TOCTOU and large in-memory buffers.
+func (g *GraphClient) CreatePhotoPostVerified(
+	ctx context.Context,
+	caption string,
+	filePath string,
+	expectedSHA256 string,
+) (string, error) {
+	if err := validateFBID(g.pageID); err != nil {
+		return "", fmt.Errorf("facebook: create photo post: %w", err)
+	}
+
+	preInfo, err := os.Lstat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("facebook: stat image file: %w", err)
+	}
+	if err := tools.CheckHardlink(filePath); err != nil {
+		return "", fmt.Errorf("facebook: image file check failed: %w", err)
+	}
+	if preInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("facebook: image file must not be a symlink")
+	}
+	if !preInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("facebook: image file must be a regular file")
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("facebook: open image file: %w", err)
+	}
+	defer f.Close()
+
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("facebook: inspect opened image file: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(preInfo, openedInfo) {
+		return "", fmt.Errorf("facebook: image file identity changed before upload")
+	}
+	if openedInfo.Size() > maxPhotoUploadBytes {
+		return "", fmt.Errorf("facebook: image file too large: %d bytes exceeds %d", openedInfo.Size(), maxPhotoUploadBytes)
+	}
+
+	if expectedSHA256 != "" {
+		expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
+		decoded, decodeErr := hex.DecodeString(expectedSHA256)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("facebook: invalid approved image digest")
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, io.LimitReader(f, maxPhotoUploadBytes+1)); err != nil {
+			return "", fmt.Errorf("facebook: hash image file: %w", err)
+		}
+		if actual := hex.EncodeToString(h.Sum(nil)); actual != expectedSHA256 {
+			return "", fmt.Errorf("facebook: approved image digest mismatch")
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return "", fmt.Errorf("facebook: rewind image file: %w", err)
+		}
+	}
+
+	slots := g.getUploadSlots()
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(pipeWriter)
+	contentType := multipartWriter.FormDataContentType()
+	apiURL := fmt.Sprintf("%s/%s/%s/photos", graphAPIBase, graphAPIVersion, g.pageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, pipeReader)
+	if err != nil {
+		pipeReader.Close()
+		pipeWriter.Close()
+		return "", fmt.Errorf("facebook: build photo upload request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+g.pageAccessToken)
+	req.Header.Set("Content-Type", contentType)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeErr := func() error {
+			if err := multipartWriter.WriteField("caption", caption); err != nil {
+				return fmt.Errorf("write caption field: %w", err)
+			}
+			part, err := multipartWriter.CreateFormFile("source", filepath.Base(filePath))
+			if err != nil {
+				return fmt.Errorf("create form file: %w", err)
+			}
+			written, err := io.Copy(part, io.LimitReader(f, maxPhotoUploadBytes+1))
+			if err != nil {
+				return fmt.Errorf("copy image data: %w", err)
+			}
+			if written > maxPhotoUploadBytes {
+				return fmt.Errorf("image file exceeds %d bytes", maxPhotoUploadBytes)
+			}
+			return multipartWriter.Close()
+		}()
+		if writeErr != nil {
+			_ = pipeWriter.CloseWithError(writeErr)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		writeDone <- writeErr
+	}()
+
+	uploadClient := &http.Client{Timeout: 60 * time.Second}
+	resp, requestErr := uploadClient.Do(req)
+	if requestErr != nil {
+		_ = pipeReader.CloseWithError(requestErr)
+	}
+	writeErr := <-writeDone
+	_ = pipeReader.Close()
+	if requestErr != nil {
+		return "", fmt.Errorf("facebook: photo upload: %w", requestErr)
+	}
+	if writeErr != nil {
+		resp.Body.Close()
+		return "", fmt.Errorf("facebook: stream photo upload: %w", writeErr)
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("facebook: read photo upload response: %w", readErr)
+	}
+
+	g.logRateLimit(resp)
+
+	if resp.StatusCode >= 400 {
+		var apiErr graphErrorBody
+		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error.Code != 0 {
+			return "", &graphAPIError{code: apiErr.Error.Code, msg: apiErr.Error.Message}
+		}
+		return "", fmt.Errorf("facebook: photo upload http %d", resp.StatusCode)
+	}
+
+	var result struct {
+		PostID string `json:"post_id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("facebook: parse photo upload result: %w", err)
+	}
+	if result.PostID == "" {
+		return "", fmt.Errorf("facebook: photo upload response missing post ID")
+	}
+	return result.PostID, nil
+}
+
 // graphBackoffBase is the base unit for exponential retry backoff in doRequest.
 // Production default = 1s, giving 1s, 2s, 4s... per attempt.
 // Tests override to 1ms via newFakeGraph so retry tests don't burn 6s of real
 // wall-clock time. Production behavior is unchanged.
 var graphBackoffBase = 1 * time.Second
 
+// doRequestOnce executes a single Graph API call without retries.
+// Use for non-idempotent publishing endpoints where retrying an ambiguous
+// timeout/5xx can create duplicate public posts.
+func (g *GraphClient) doRequestOnce(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return g.doRequestWithAttempts(ctx, method, path, body, 1)
+}
+
 // doRequest executes a Graph API call with retries on transient errors.
 // The page access token is passed via Authorization header (never in the URL).
 func (g *GraphClient) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return g.doRequestWithAttempts(ctx, method, path, body, maxRetries)
+}
+
+func (g *GraphClient) doRequestWithAttempts(ctx context.Context, method, path string, body any, attempts int) ([]byte, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
 	apiURL := fmt.Sprintf("%s/%s%s", graphAPIBase, graphAPIVersion, path)
 
-	for attempt := range maxRetries {
+	for attempt := range attempts {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * graphBackoffBase
 			select {
@@ -220,7 +481,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
-			if attempt < maxRetries-1 {
+			if attempt < attempts-1 {
 				slog.Warn("facebook: api request error, retrying", "attempt", attempt+1, "err", err)
 				continue
 			}
@@ -237,7 +498,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 		g.logRateLimit(resp)
 
 		// Retry on 5xx.
-		if resp.StatusCode >= 500 && attempt < maxRetries-1 {
+		if resp.StatusCode >= 500 && attempt < attempts-1 {
 			slog.Warn("facebook: server error, retrying", "status", resp.StatusCode, "attempt", attempt+1)
 			continue
 		}
@@ -252,7 +513,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 					return nil, &graphAPIError{code: apiErr.Error.Code, msg: apiErr.Error.Message}
 				}
 				// Rate limited: sleep and retry (capped).
-				if resp.StatusCode == 429 && attempt < maxRetries-1 {
+				if resp.StatusCode == 429 && attempt < attempts-1 {
 					retryAfter := parseRetryAfter(resp)
 					slog.Warn("facebook: rate limited", "retry_after", retryAfter)
 					select {
@@ -271,7 +532,7 @@ func (g *GraphClient) doRequest(ctx context.Context, method, path string, body a
 	}
 
 	// All attempts exhausted (only reachable when every iteration took the continue path).
-	return nil, fmt.Errorf("facebook: max retries exceeded")
+	return nil, fmt.Errorf("facebook: max attempts exceeded")
 }
 
 // logRateLimit parses the X-Business-Use-Case-Usage header and warns when approaching limits.
@@ -334,6 +595,18 @@ type graphAPIError struct {
 func (e *graphAPIError) Error() string {
 	return fmt.Sprintf("facebook graph api error %d: %s", e.code, e.msg)
 }
+
+// APIErrorCode and APIErrorMessage expose the Graph API's own diagnostic so
+// callers outside this package can log WHY a request failed.
+//
+// They exist because logging err.Error() blindly is unsafe here: a transport
+// failure surfaces as *url.Error, whose text embeds the full request URL
+// including the access_token query parameter. Callers therefore log the detail
+// only for errors that implement this pair — Facebook's own message, which
+// never contains our credential.
+func (e *graphAPIError) APIErrorCode() int { return e.code }
+
+func (e *graphAPIError) APIErrorMessage() string { return e.msg }
 
 // IsAuthError returns true when the error is an expired or invalid token.
 func IsAuthError(err error) bool {

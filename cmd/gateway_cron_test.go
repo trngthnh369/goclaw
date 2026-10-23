@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/cron"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -64,6 +67,57 @@ func TestCronJobHandlerInjectsPayloadCredentialUserID(t *testing.T) {
 	}
 	if gotCredentialUserID != wantCredentialUserID {
 		t.Fatalf("credential user ID in scheduled context = %q, want %q", gotCredentialUserID, wantCredentialUserID)
+	}
+}
+
+func TestCronJobHandlerLoopKilledRunIsNotDelivered(t *testing.T) {
+	mb := bus.New()
+	defer mb.Close()
+
+	killMsg := "CRITICAL: 38 consecutive read-only tool calls (37 unique files). Stopping — write your findings before reading more."
+	sched := scheduler.NewScheduler(
+		scheduler.DefaultLanes(),
+		scheduler.QueueConfig{
+			Mode:          scheduler.QueueModeQueue,
+			Cap:           1,
+			Drop:          scheduler.DropOld,
+			DebounceMs:    0,
+			MaxConcurrent: 1,
+		},
+		func(context.Context, agent.RunRequest) (*agent.RunResult, error) {
+			return &agent.RunResult{Content: killMsg, LoopKilled: true}, nil
+		},
+	)
+	defer sched.Stop()
+
+	handler := makeCronJobHandler(sched, mb, &config.Config{}, nil, nil, nil)
+
+	result, err := handler(&store.CronJob{
+		ID:             uuid.NewString(),
+		TenantID:       uuid.New(),
+		Name:           "morning-briefing",
+		AgentID:        "news-briefer",
+		UserID:         "user-1",
+		Stateless:      true,
+		Deliver:        true,
+		DeliverChannel: "discord",
+		DeliverTo:      "chat-1",
+		Payload:        store.CronPayload{Kind: "agent_turn", Message: "run briefing"},
+	})
+	if result != nil {
+		t.Fatalf("cron result = %#v, want nil for a loop-killed run", result)
+	}
+	if _, ok := errors.AsType[*cron.PermanentError](err); !ok {
+		t.Fatalf("err = %v, want a permanent error so the run is not retried", err)
+	}
+	if !strings.Contains(err.Error(), killMsg) {
+		t.Fatalf("err = %q, want it to carry the detector message", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if got, ok := mb.SubscribeOutbound(ctx); ok {
+		t.Fatalf("loop-killed output was delivered: %#v", got)
 	}
 }
 

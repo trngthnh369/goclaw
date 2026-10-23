@@ -330,3 +330,38 @@ func TestHTTPError_ErrorString(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+type timeoutNetError struct{}
+
+func (timeoutNetError) Error() string   { return "net/http: timeout awaiting response headers" }
+func (timeoutNetError) Timeout() bool   { return true }
+func (timeoutNetError) Temporary() bool { return true }
+
+func TestRetryDo_WithoutTimeoutRetry_StopsOnTimeout(t *testing.T) {
+	cfg := RetryConfig{Attempts: 3, MinDelay: time.Millisecond}
+	var calls int
+	ctx := WithoutTimeoutRetry(context.Background())
+	_, err := RetryDo(ctx, cfg, func() (string, error) {
+		calls++
+		return "", fmt.Errorf("provider: request failed: %w", timeoutNetError{})
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if calls != 1 {
+		t.Fatalf("timeout should not retry when disabled: got %d calls, want 1", calls)
+	}
+}
+
+func TestRetryDo_WithoutTimeoutRetry_StillRetriesServerErrors(t *testing.T) {
+	cfg := RetryConfig{Attempts: 3, MinDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond}
+	var calls int
+	ctx := WithoutTimeoutRetry(context.Background())
+	_, _ = RetryDo(ctx, cfg, func() (string, error) {
+		calls++
+		return "", &HTTPError{Status: 503, Body: "unavailable"}
+	})
+	if calls != 3 {
+		t.Fatalf("5xx should keep retrying: got %d calls, want 3", calls)
+	}
+}

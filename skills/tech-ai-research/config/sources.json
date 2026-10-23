@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "hacker-news",
+      "type": "hacker_news",
+      "enabled": true,
+      "base_url": "https://hacker-news.firebaseio.com",
+      "authority": 0.75,
+      "lookback_items": 80,
+      "limit": 25,
+      "topics": ["ai", "developer-tools", "infrastructure"]
+    },
+    {
+      "id": "github-releases",
+      "type": "github_releases",
+      "enabled": true,
+      "base_url": "https://api.github.com",
+      "authority": 0.8,
+      "limit_per_repo": 3,
+      "repos": [
+        "anthropics/claude-code",
+        "modelcontextprotocol/servers",
+        "huggingface/transformers",
+        "vllm-project/vllm",
+        "microsoft/autogen",
+        "langchain-ai/langchain"
+      ],
+      "topics": ["developer-tools", "ai-agents", "infrastructure"]
+    },
+    {
+      "id": "hugging-face-papers",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://huggingface.co/papers/rss",
+      "authority": 0.85,
+      "topics": ["ai-models", "research"]
+    },
+    {
+      "id": "arxiv-ai",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://export.arxiv.org/rss/cs.AI",
+      "authority": 0.8,
+      "min_interval_seconds": 3,
+      "topics": ["research"]
+    },
+    {
+      "id": "openai-blog",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://openai.com/news/rss.xml",
+      "authority": 0.95,
+      "topics": ["official-ai"]
+    },
+    {
+      "id": "x-twitter",
+      "type": "x_api",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.6,
+      "topics": ["deferred"]
+    },
+    {
+      "id": "reddit",
+      "type": "reddit_oauth",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.55,
+      "topics": ["deferred"]
+    }
+  ],
+  "allowed_hosts": [
+    "hacker-news.firebaseio.com",
+    "hn.algolia.com",
+    "api.github.com",
+    "github.com",
+    "huggingface.co",
+    "export.arxiv.org",
+    "openai.com",
+    "deepmind.google",
+    "ai.googleblog.com",
+    "www.microsoft.com",
+    "blogs.nvidia.com",
+    "aws.amazon.com"
+  ],
+  "retention": {
+    "raw_runs_days": 14,
+    "source_health_days": 90,
+    "digests_days": 30
+  },
+  "scoring": {
+    "candidate_limit": 18
+  },
+  "scheduler": {
+    "minute": 17,
+    "hour_interval": 2,
+    "catch_up_lateness_minutes": 150
+  }
+}

@@ -340,7 +340,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 			// This lets agents "request permission" from admin to install packages.
 			if t.approvalMgr != nil && matchesAny(normalizedCommand, pkgInstallPatterns) {
 				slog.Info("exec: package install requires approval", "command", truncateCmd(command, 100), "agent", t.agentID)
-				decision, err := t.approvalMgr.RequestApproval(command, t.agentID, 2*time.Minute)
+				decision, err := t.approvalMgr.RequestApproval(ctx, command, t.agentID, 2*time.Minute)
 				if err != nil {
 					return ErrorResult(fmt.Sprintf("package install approval: %v", err))
 				}
@@ -405,7 +405,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		case "deny":
 			return ErrorResult("command denied by exec approval policy")
 		case "ask":
-			decision, err := t.approvalMgr.RequestApproval(command, t.agentID, 2*time.Minute)
+			decision, err := t.approvalMgr.RequestApproval(ctx, command, t.agentID, 2*time.Minute)
 			if err != nil {
 				return ErrorResult(fmt.Sprintf("exec approval: %v", err))
 			}
@@ -579,6 +579,11 @@ func (t *ExecTool) executeOnHost(ctx context.Context, command, cwd string) *Resu
 		dynKeys = staticCredentialEnvKeys
 	}
 	cmd.Env = scrubCredentialEnv(os.Environ(), dynKeys)
+	// Appended after the scrub, so an inherited variable of the same name is
+	// replaced by this run's own token.
+	if tok := RunReceiptToken(ctx); tok != "" {
+		cmd.Env = append(cmd.Env, RunReceiptEnv+"="+tok)
+	}
 
 	// Place the child in its own process group so killProcessGroup(-pgid, sig)
 	// reaches the shell and all of its forked children.

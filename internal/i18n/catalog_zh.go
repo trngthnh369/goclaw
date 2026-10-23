@@ -184,6 +184,7 @@ func init() {
 		MsgStatusPhaseDefault:  "阶段：处理中...",
 		MsgCancelledReply:      "✋ 已取消。您接下来想做什么？",
 		MsgInjectedAck:         "收到，我会在当前任务中处理。",
+		MsgRunFailedNotice:     "⚠️ 这次没能完成回复（AI 服务繁忙或响应过慢）。请几分钟后再试。",
 
 		// Knowledge Graph
 		MsgEntityIDRequired:       "entity_id 是必填项",

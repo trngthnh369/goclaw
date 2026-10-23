@@ -1,4 +1,5 @@
-// Package security provides SSRF-safe HTTP utilities for outbound webhook calls.
+// Package security provides SSRF-safe HTTP utilities for outbound webhook calls
+// and the credential check for environment variables passed to subprocesses.
 // All production webhook HTTP clients MUST use NewSafeClient to prevent
 // admin-configured hooks from probing internal infrastructure.
 package security

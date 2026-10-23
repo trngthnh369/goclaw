@@ -16,11 +16,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -175,6 +177,23 @@ type ChatBehaviorChannel interface {
 // how model reasoning should be delivered to end users.
 type ReasoningDeliveryChannel interface {
 	ReasoningDeliveryConfig() (mode string, legacyReasoningStream *bool)
+}
+
+// ErrorNoticeChannel is optionally implemented by public-facing channels that
+// can post a fixed notice when an agent run fails. It returns the notice
+// locale, or "" to keep failures silent.
+type ErrorNoticeChannel interface {
+	ErrorNoticeLocale() string
+}
+
+// ResolveErrorNoticeLocale turns a channel's error_notice setting into a
+// supported locale, or "" when the notice is off or the value is unknown.
+func ResolveErrorNoticeLocale(setting string) string {
+	setting = strings.ToLower(strings.TrimSpace(setting))
+	if setting == "" || setting == "off" || !i18n.IsSupported(setting) {
+		return ""
+	}
+	return setting
 }
 
 // WebhookChannel extends Channel with an HTTP handler that can be mounted
@@ -377,7 +396,9 @@ func (c *BaseChannel) CheckGroupPolicy(ctx context.Context, senderID, chatID, gr
 	case "disabled":
 		return PolicyDeny
 	case "allowlist":
-		if c.IsAllowed(senderID) {
+		// allow_from may list group chat IDs (allow the whole group) or
+		// individual sender IDs — accept either.
+		if c.IsAllowed(chatID) || c.IsAllowed(senderID) {
 			return PolicyAllow
 		}
 		return PolicyDeny
@@ -677,10 +698,18 @@ type PendingCompactable interface {
 	SetPendingCompaction(cfg *CompactionConfig)
 }
 
-// Truncate shortens a string to maxLen, appending "..." if truncated.
+// Truncate shortens a string to at most maxLen bytes, appending "..." if truncated.
+//
+// The cut lands on a rune boundary. A byte cut inside a multi-byte character (every
+// accented Vietnamese letter is 2-3 bytes) left invalid UTF-8 that Postgres refuses,
+// so a reply quoting a long bot message was dropped from group history.
 func Truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	cut := max(maxLen, 0)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

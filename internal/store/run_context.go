@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -21,15 +22,27 @@ type runContextKey struct{}
 // accessor functions (which fall back to individual keys when RunContext is absent).
 type RunContext struct {
 	// Identity
-	AgentID          uuid.UUID
-	AgentKey         string
-	TenantID         uuid.UUID
-	UserID           string
-	RunID            string
-	SessionKey       string
-	CredentialUserID string // resolved tenant user for credential lookups (empty = use UserID)
-	AgentType        string
-	SenderID         string
+	AgentID               uuid.UUID
+	AgentKey              string
+	TenantID              uuid.UUID
+	UserID                string
+	RunID                 string
+	SessionKey            string
+	CredentialUserID      string // resolved tenant user for credential lookups (empty = use UserID)
+	AgentType             string
+	SenderID              string
+	InboundMessage        string // enriched message that triggered this run
+	CurrentMessage        string // raw current user message without quoted/history context
+	ReplyToMessageID      string // source channel message ID being replied to, when available
+	ReplyToContent        string // source channel message content being replied to, when available
+	ReplyToMedia          string // newline-separated filename=sha256 entries from the replied-to message
+	ReplyToMediaPaths     []string
+	ReplyToMediaCount     int    // number of attachments declared by the replied-to message
+	ReplyToMediaComplete  bool   // true only when every declared attachment was downloaded and hashed
+	ReplyToAuthorID       string // author ID of the replied-to message
+	ChannelBotUserID      string // authenticated bot user ID for the source channel instance
+	ApprovalSenderAllowed bool   // sender is explicitly allowlisted for public-post approval
+	ApprovalPublishTarget string // publish target the channel instance binds to this chat ("reels"), empty when none
 
 	// Flags
 	SelfEvolve          bool
@@ -72,6 +85,17 @@ func WithRunContext(ctx context.Context, rc *RunContext) context.Context {
 }
 
 // RunContextFromCtx extracts RunContext from context. Returns nil if not set.
+// IsAllowlistedReplyToBot reports whether the turn that started this run is an
+// explicitly allowlisted person replying to a message this channel's bot wrote.
+// Public-post approval checks the same facts, one by one, for its error text.
+func (rc *RunContext) IsAllowlistedReplyToBot() bool {
+	return rc != nil && rc.ApprovalSenderAllowed &&
+		strings.TrimSpace(rc.SenderID) != "" &&
+		strings.TrimSpace(rc.ReplyToMessageID) != "" &&
+		strings.TrimSpace(rc.ChannelBotUserID) != "" &&
+		rc.ReplyToAuthorID == rc.ChannelBotUserID
+}
+
 func RunContextFromCtx(ctx context.Context) *RunContext {
 	rc, _ := ctx.Value(runContextKey{}).(*RunContext)
 	return rc

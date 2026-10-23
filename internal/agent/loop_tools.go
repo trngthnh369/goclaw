@@ -119,6 +119,18 @@ func (l *Loop) processToolResult(
 
 	action = toolResultContinue
 
+	// A tool may declare the run finished when the correct output is already
+	// determined and repeating the call cannot help. Checked before the loop
+	// detector, whose generic thresholds only fire after several wasted round
+	// trips — too late for a one-shot guard, where the second identical refusal
+	// is already pointless.
+	if result.EndRun {
+		slog.Info("tool ended run", "agent", l.id, "tool", registryName, "run", req.RunID)
+		rs.finalContent = result.ForLLM
+		rs.endRunRequested = true
+		return toolMsg, nil, toolResultBreak
+	}
+
 	// Check for tool call loop after recording result.
 	if level, msg := rs.loopDetector.detect(registryName, argsHash); level != "" {
 		if level == "critical" {

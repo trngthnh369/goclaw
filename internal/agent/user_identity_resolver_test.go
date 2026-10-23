@@ -10,11 +10,15 @@ import (
 
 // mockResolver is a test double that returns pre-configured resolutions.
 type mockResolver struct {
-	mergedMap map[string]string // "channelType:senderID" → resolved tenant user ID
+	mergedMap map[string]string // "channelType:channelInstance:senderID" → resolved tenant user ID
 }
 
-func (m *mockResolver) ResolveTenantUserID(_ context.Context, channelType, senderID string) (string, error) {
-	key := channelType + ":" + senderID
+func (m *mockResolver) ResolveTenantUserID(_ context.Context, channelType, channelInstance, senderID string) (string, error) {
+	key := channelType + ":" + channelInstance + ":" + senderID
+	if resolved, ok := m.mergedMap[key]; ok {
+		return resolved, nil
+	}
+	key = channelType + ":" + senderID
 	if resolved, ok := m.mergedMap[key]; ok {
 		return resolved, nil
 	}
@@ -40,6 +44,12 @@ func TestResolveCredentialUserID(t *testing.T) {
 			req:        RunRequest{UserID: "12345", ChannelType: "telegram", PeerKind: "direct"},
 			mergedMap:  map[string]string{},
 			wantUserID: "12345",
+		},
+		{
+			name:       "DM: sender merged only for matching channel instance",
+			req:        RunRequest{UserID: "12345", Channel: "tg-b", ChannelType: "telegram", PeerKind: "direct"},
+			mergedMap:  map[string]string{"telegram:tg-a:12345": "alice@co.com", "telegram:tg-b:12345": "bob@co.com"},
+			wantUserID: "bob@co.com",
 		},
 		{
 			name:       "DM: already resolved by consumer_normal — no double resolve",
@@ -127,10 +137,10 @@ func TestExtractGroupChatID(t *testing.T) {
 	}{
 		{"group:telegram:-100456", "-100456"},
 		{"group:discord:123", "123"},
-		{"guild:123:user:456", ""},  // not group: prefix
-		{"12345", ""},               // plain user ID
-		{"group:", ""},              // incomplete
-		{"group:channel", ""},       // missing third part
+		{"guild:123:user:456", ""}, // not group: prefix
+		{"12345", ""},              // plain user ID
+		{"group:", ""},             // incomplete
+		{"group:channel", ""},      // missing third part
 		{"group:tg:-100456", "-100456"},
 	}
 

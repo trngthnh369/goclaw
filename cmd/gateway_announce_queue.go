@@ -14,6 +14,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	orch "github.com/nextlevelbuilder/goclaw/internal/orchestration"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
+	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -24,6 +25,10 @@ type announceEntry struct {
 	MemberDisplayName string // display name (e.g. "Nhà Nghiên Cứu"), empty if not set
 	Content           string
 	Media             []agent.MediaResult
+	OriginUserID      string // user scope of the turn that created this entry's task
+	OriginSenderID    string // real user who created this entry's task (#915)
+	OriginSenderName  string // that user's display name, for the prompt's User line
+	OriginRole        string // that user's RBAC role at task creation
 }
 
 // teamAnnounceQueue uses BatchQueue for producer-consumer synchronization.
@@ -43,6 +48,7 @@ type announceRouting struct {
 	OrigChatID       string
 	OrigPeerKind     string
 	OrigLocalKey     string
+	OrigChannelType  string // platform type (e.g. "discord"); the prompt must match the user's turn
 	OriginUserID     string
 	TeamID           string
 	TeamWorkspace    string
@@ -82,22 +88,7 @@ func processAnnounceLoop(
 
 		content := buildMergedAnnounceContent(entries, snapshot, r.TeamWorkspace)
 
-		req := agent.RunRequest{
-			SessionKey:       r.LeadSessionKey,
-			Message:          content,
-			Channel:          r.OrigChannel,
-			ChatID:           r.OrigChatID,
-			PeerKind:         r.OrigPeerKind,
-			LocalKey:         r.OrigLocalKey,
-			UserID:           r.OriginUserID,
-			RunID:            fmt.Sprintf("teammate-announce-%s-%d", r.LeadAgent, len(entries)),
-			RunKind:          "announce",
-			HideInput:        true,
-			Stream:           false,
-			TeamID:           r.TeamID,
-			ParentTraceID:    r.ParentTraceID,
-			ParentRootSpanID: r.ParentRootSpanID,
-		}
+		req := buildTeamAnnounceRunRequest(r, entries, content)
 		// Collect all media from entries.
 		for _, e := range entries {
 			for _, mr := range e.Media {
@@ -232,4 +223,135 @@ func buildMergedAnnounceContent(entries []announceEntry, taskBoardSnapshot, team
 	}
 
 	return sb.String()
+}
+
+// buildTeamAnnounceRunRequest builds the lead's run for a batch of member
+// results. It carries the channel type, user scope and group guidance of the
+// user's turn that created the tasks, so the lead runs in the same context
+// (workspace, USER.md, memory) and the stable part of its system prompt matches
+// that turn, which keeps the provider prompt cache warm. Sender and role come
+// from announceBatchPrivilege. Per-topic prompts, channel self-identity and
+// Bitrix24 hints are not carried: those only land in the dynamic prompt part.
+func buildTeamAnnounceRunRequest(r announceRouting, entries []announceEntry, content string) agent.RunRequest {
+	senderID, senderName, role := announceBatchPrivilege(r, entries)
+	req := agent.RunRequest{
+		Surface:          tools.SurfaceSubagent,
+		SessionKey:       r.LeadSessionKey,
+		Message:          content,
+		Channel:          r.OrigChannel,
+		ChannelType:      r.OrigChannelType,
+		ChatID:           r.OrigChatID,
+		PeerKind:         r.OrigPeerKind,
+		LocalKey:         r.OrigLocalKey,
+		UserID:           announceBatchUserID(r, entries),
+		SenderID:         senderID,
+		SenderName:       senderName,
+		Role:             role,
+		RunID:            fmt.Sprintf("teammate-announce-%s-%d", r.LeadAgent, len(entries)),
+		RunKind:          "announce",
+		HideInput:        true,
+		Stream:           false,
+		TeamID:           r.TeamID,
+		ParentTraceID:    r.ParentTraceID,
+		ParentRootSpanID: r.ParentRootSpanID,
+	}
+	if r.OrigPeerKind == string(sessions.PeerGroup) {
+		req.ExtraSystemPrompt = groupChatExtraPrompt()
+	}
+	return req
+}
+
+// announceSenderID keeps only a real user as the announce turn's sender; an
+// internal sender (teammate:, system:, ...) must not be attributed writes.
+func announceSenderID(sender string) string {
+	if sender == "" || bus.IsInternalSender(sender) {
+		return ""
+	}
+	return sender
+}
+
+// announceSenderName returns the origin sender's display name, only when that
+// sender is kept by announceSenderID.
+func announceSenderName(meta map[string]string) string {
+	if announceSenderID(meta[tools.MetaOriginSenderID]) == "" {
+		return ""
+	}
+	return sanitizeSenderName(meta[tools.MetaOriginSenderName])
+}
+
+// announceBatchPrivilege returns the sender and role the lead's announce turn
+// acts with. A batch merges every result that completes while the lead is busy,
+// keyed by lead+team+chat, so it can hold tasks created by different users in
+// one group. Their write permissions must not mix: only a batch whose entries
+// all share one sender and role inherits them; otherwise the turn runs with no
+// sender, which denies group writes as before (#915). The sender's display name
+// follows the sender, so the announce prompt shows the same User line as the
+// turn that created the tasks.
+func announceBatchPrivilege(r announceRouting, entries []announceEntry) (senderID, senderName, role string) {
+	senderID, role, mixed := commonOriginPrivilege(len(entries), func(i int) (string, string) {
+		return entries[i].OriginSenderID, entries[i].OriginRole
+	})
+	if mixed {
+		slog.Warn("security.team_announce.mixed_origin",
+			"session", r.LeadSessionKey, "team_id", r.TeamID, "batch_size", len(entries))
+	}
+	if senderID != "" {
+		senderName = firstSenderName(len(entries), func(i int) string { return entries[i].OriginSenderName })
+	}
+	return senderID, senderName, role
+}
+
+// firstSenderName returns the first non-empty display name among n batch items
+// that share one sender: a task created before names were stored has none.
+func firstSenderName(n int, at func(i int) string) string {
+	for i := 0; i < n; i++ {
+		if name := at(i); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// commonOriginPrivilege returns the sender and role that all n batch items
+// share. When any item differs it returns two empty strings and mixed=true:
+// a lead turn over results from different users must not act with any one of
+// their permissions (#915).
+func commonOriginPrivilege(n int, at func(i int) (sender, role string)) (sender, role string, mixed bool) {
+	if n == 0 {
+		return "", "", false
+	}
+	sender, role = at(0)
+	for i := 1; i < n; i++ {
+		if s, r := at(i); tools.SenderIdentity(s) != tools.SenderIdentity(sender) || r != role {
+			return "", "", true
+		}
+	}
+	return sender, role, false
+}
+
+// announceBatchUserID picks the user scope (workspace, USER.md, memory) for the
+// lead's announce turn. A batch whose tasks all came from one user runs in that
+// user's scope. A batch mixing users in a group runs in the shared group scope,
+// so one user's private context is not loaded into a reply that summarizes
+// another user's results in the group. Outside groups a session belongs to one
+// user, so a mismatch there only means an entry predates origin_user_id and the
+// routing user is kept.
+func announceBatchUserID(r announceRouting, entries []announceEntry) string {
+	if len(entries) == 0 {
+		return r.OriginUserID
+	}
+	first := entries[0].OriginUserID
+	for _, e := range entries[1:] {
+		if e.OriginUserID == first {
+			continue
+		}
+		if r.OrigPeerKind == string(sessions.PeerGroup) && r.OrigChatID != "" {
+			return groupScopeUserID(r.OrigChannel, r.OrigChatID)
+		}
+		return r.OriginUserID
+	}
+	if first == "" {
+		return r.OriginUserID
+	}
+	return first
 }

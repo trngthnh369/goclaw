@@ -77,8 +77,10 @@ var mcpServerAllowedFields = map[string]bool{
 	"agent_id": true, "config": true, "settings": true,
 }
 
+// Instance name and channel type are immutable because contact identity and
+// merged-user resolution are scoped by both values.
 var channelInstanceAllowedFields = map[string]bool{
-	"name": true, "channel_type": true, "credentials": true, "agent_id": true,
+	"credentials": true, "agent_id": true,
 	"enabled": true, "group_policy": true, "allow_from": true,
 	"metadata": true, "webhook_secret": true, "config": true,
 	"display_name": true,

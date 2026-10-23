@@ -95,7 +95,7 @@ func processNormalMessage(
 			userID = fmt.Sprintf("guild:%s:user:%s", guildID, msg.SenderID)
 		} else {
 			groupID := msg.ChatID
-			userID = fmt.Sprintf("group:%s:%s", msg.Channel, groupID)
+			userID = groupScopeUserID(msg.Channel, groupID)
 		}
 	}
 
@@ -152,7 +152,7 @@ func processNormalMessage(
 		if chType == "" {
 			chType = msg.Channel
 		}
-		if resolved, err := deps.ContactCollector.ResolveTenantUserID(ctx, chType, senderNumeric); err == nil && resolved != "" {
+		if resolved, err := deps.ContactCollector.ResolveTenantUserID(ctx, chType, msg.Channel, senderNumeric); err == nil && resolved != "" {
 			slog.Debug("contact.resolved_tenant_user", "sender", senderNumeric, "tenant_user", resolved)
 			userID = resolved
 		}
@@ -258,12 +258,7 @@ func processNormalMessage(
 	// Group-aware system prompt: help the LLM adapt tone and behavior for group chats.
 	var extraPrompt string
 	if peerKind == string(sessions.PeerGroup) {
-		extraPrompt = "You are in a GROUP chat (multiple participants), not a private 1-on-1 DM.\n" +
-			"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
-			"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
-			"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
-			"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
-			"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
+		extraPrompt = groupChatExtraPrompt()
 	}
 
 	// Append per-topic system prompt (from group/topic config hierarchy).
@@ -424,12 +419,14 @@ func processNormalMessage(
 	// senders without propagation keep their on-wire value and hit F1's
 	// deny-in-group rule (safe default).
 	effectiveSenderID := msg.SenderID
+	effectiveSenderName := resolveSenderName(msg)
 	if bus.IsInternalSender(effectiveSenderID) {
 		// Defense-in-depth: if a propagation bug ever writes a synthetic
 		// value into MetaOriginSenderID, do NOT honour it. We want only real
 		// user senders to override the on-wire synthetic.
 		if realSender := msg.Metadata[tools.MetaOriginSenderID]; realSender != "" && !bus.IsInternalSender(realSender) {
 			effectiveSenderID = realSender
+			effectiveSenderName = sanitizeSenderName(msg.Metadata[tools.MetaOriginSenderName])
 		}
 	}
 	// Role propagation: carry the RBAC role of the originating actor so
@@ -438,14 +435,28 @@ func processNormalMessage(
 	// upstream dispatch set MetaOriginRole.
 	effectiveRole := msg.Metadata[tools.MetaOriginRole]
 
+	replyToMediaCount := 0
+	_, _ = fmt.Sscanf(msg.Metadata["reply_to_media_count"], "%d", &replyToMediaCount)
+
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
-		SessionKey:   sessionKey,
-		Message:      msg.Content,
-		Media:        reqMedia,
-		ForwardMedia: fwdMedia,
-		Channel:      msg.Channel,
-		ChannelType:  resolveChannelType(deps.ChannelMgr, msg.Channel),
+		Surface:               tools.SurfaceForPeerKind(peerKind),
+		SessionKey:            sessionKey,
+		Message:               msg.Content,
+		CurrentMessage:        msg.Metadata["current_message"],
+		ReplyToMessageID:      msg.Metadata["reply_to_message_id"],
+		ReplyToContent:        msg.Metadata["reply_to_content"],
+		ReplyToMedia:          msg.Metadata["reply_to_media"],
+		ReplyToMediaCount:     replyToMediaCount,
+		ReplyToMediaComplete:  msg.Metadata["reply_to_media_complete"] == "true",
+		ReplyToAuthorID:       msg.Metadata["reply_to_author_id"],
+		ChannelBotUserID:      msg.Metadata["channel_bot_user_id"],
+		ApprovalSenderAllowed: msg.Metadata["approval_sender_allowed"] == "true",
+		ApprovalPublishTarget: msg.Metadata["approval_publish_target"],
+		Media:                 reqMedia,
+		ForwardMedia:          fwdMedia,
+		Channel:               msg.Channel,
+		ChannelType:           resolveChannelType(deps.ChannelMgr, msg.Channel),
 		// Forward Bitrix24 portal domain from channel metadata so the
 		// system prompt can teach the LLM the correct entity URL host.
 		// Empty for non-bitrix24 channels — section is skipped downstream.
@@ -458,7 +469,7 @@ func processNormalMessage(
 		UserID:             userID,
 		SenderID:           effectiveSenderID,
 		Role:               effectiveRole,
-		SenderName:         resolveSenderName(msg),
+		SenderName:         effectiveSenderName,
 		RunID:              runID,
 		Stream:             providerStream,
 		HistoryLimit:       msg.HistoryLimit,
@@ -514,8 +525,9 @@ func processNormalMessage(
 			errContent := formatAgentError(outcome.Err)
 			if deps.ChannelMgr != nil {
 				if ct := deps.ChannelMgr.ChannelTypeForName(channel); isExternalChannel(ct) {
-					slog.Info("inbound: suppressed error for external channel", "channel", channel, "type", ct)
-					errContent = ""
+					noticeLocale := deps.ChannelMgr.ErrorNoticeLocale(channel)
+					slog.Info("inbound: suppressed error for external channel", "channel", channel, "type", ct, "notice_locale", noticeLocale)
+					errContent = externalChannelErrorContent(noticeLocale)
 				}
 			}
 			deps.MsgBus.PublishOutbound(bus.OutboundMessage{
@@ -697,4 +709,15 @@ func isSafeBitrixEntityToken(s string, maxLen int) bool {
 		}
 	}
 	return true
+}
+
+// groupChatExtraPrompt is the group-chat guidance every run of a group
+// session gets, the user's turn and the lead's team announce turn alike.
+func groupChatExtraPrompt() string {
+	return "You are in a GROUP chat (multiple participants), not a private 1-on-1 DM.\n" +
+		"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
+		"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
+		"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
+		"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
+		"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
 }

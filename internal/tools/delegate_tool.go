@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,19 +33,40 @@ type DelegateRunFunc func(ctx context.Context, req DelegateRequest) (DelegateRes
 
 // DelegateRequest describes a delegation dispatch.
 type DelegateRequest struct {
-	FromAgentID uuid.UUID
+	FromAgentID  uuid.UUID
 	FromAgentKey string
 	ToAgentKey   string
 	Task         string
 	DelegationID string
 	UserID       string
 	SenderID     string // real acting sender preserved through delegate announce re-ingress (#915)
+	SenderName   string // that sender's display name, so the announce turn renders the same User line
 	Role         string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
 	TenantID     string
 	Channel      string
 	ChatID       string
 	PeerKind     string
 	SessionKey   string
+}
+
+const contentFactoryDesignerDelegationActionKey = "contentfactory-designer-delegation"
+
+// ContentFactory deployment constants. These are temporary — the audit gate is
+// bound to a mutable agent_key, so renaming the agent disables it and another
+// tenant reusing the name inherits it. Tracked for a move into team settings
+// keyed by team UUID.
+const (
+	contentFactoryDirectorAgentKey = "cf-director"
+	contentFactoryDesignerAgentKey = "cf-designer"
+)
+
+// ContentFactoryGatedAssignee reports whether an agent key may only be reached
+// through the audited delegate path. The team_tasks auto-dispatch path performs
+// no audit check, so it must refuse these targets outright rather than try to
+// reproduce the gate (before managed runs exist there is no per-batch audit row
+// for a dispatcher to read).
+func ContentFactoryGatedAssignee(agentKey string) bool {
+	return agentKey == contentFactoryDesignerAgentKey
 }
 
 // DelegateTool implements the `delegate` tool for inter-agent task delegation.
@@ -90,7 +116,7 @@ func (t *DelegateTool) Parameters() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in seconds for sync mode (default: 300)",
+				"description": "Timeout in seconds. sync: default 300, capped at 600. async: default 600, honored up to 3600 for long background pipelines.",
 			},
 		},
 		"required": []string{"agent_key", "task"},
@@ -104,13 +130,7 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 	if mode == "" {
 		mode = "async"
 	}
-	timeoutSec := 300
-	if ts, ok := args["timeout"].(float64); ok && int(ts) > 0 {
-		timeoutSec = int(ts)
-	}
-	if timeoutSec > 600 {
-		timeoutSec = 600 // hard cap to prevent resource exhaustion
-	}
+	timeoutSec := resolveDelegateTimeoutSec(mode, args)
 
 	if agentKey == "" || task == "" {
 		return ErrorResult("agent_key and task are required")
@@ -138,6 +158,37 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 		return ErrorResult(fmt.Sprintf("no delegation link from current agent to %q", agentKey))
 	}
 
+	fromAgentKey := store.AgentKeyFromContext(ctx)
+	if fromAgentKey == "" {
+		fromAgentKey = ToolAgentKeyFromCtx(ctx)
+	}
+	// The audit gate keys on the caller identity. An unresolvable caller must
+	// not silently skip it — for a gated target, no identity means no delegation.
+	if agentKey == contentFactoryDesignerAgentKey && fromAgentKey == "" {
+		slog.Warn("security.delegate.gate_caller_unresolved", "to", agentKey)
+		return ErrorResult("cannot delegate to cf-designer without a resolved caller identity")
+	}
+	isContentFactoryDesignerDelegation := fromAgentKey == contentFactoryDirectorAgentKey && agentKey == contentFactoryDesignerAgentKey
+	if isContentFactoryDesignerDelegation {
+		if !auditVerdictPassLine.MatchString(task) || !safeToSendLine.MatchString(task) {
+			return ErrorResult("cf-designer delegation requires AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes, each at the start of its own line (a trailing note such as \"(round 2)\" is fine)")
+		}
+		if mode != "sync" {
+			return ErrorResult("cf-designer delegation must use sync mode")
+		}
+		latch := OutboundActionLatchFromCtx(ctx)
+		if latch == nil {
+			return ErrorResult("cf-designer delegation requires a run-scoped latch")
+		}
+		if !latch.TryReserve(contentFactoryDesignerDelegationActionKey) {
+			result, _ := json.Marshal(map[string]any{
+				"agent":  agentKey,
+				"status": "duplicate_suppressed",
+			})
+			return NewResult(string(result))
+		}
+	}
+
 	delegationID := uuid.New().String()
 	// Audit-trail identity = actor (real sender). Groups audit actions to the
 	// individual user rather than the group principal (#915).
@@ -151,6 +202,7 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 		DelegationID: delegationID,
 		UserID:       actorID,
 		SenderID:     store.SenderIDFromContext(ctx),
+		SenderName:   store.SenderNameFromContext(ctx),
 		Role:         store.RoleFromContext(ctx),
 		TenantID:     store.TenantIDFromContext(ctx).String(),
 		Channel:      ToolChannelFromCtx(ctx),
@@ -204,13 +256,39 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *Result
 	}
 
 	if mode == "sync" {
-		return t.executeSyncMode(ctx, req, timeoutSec)
+		return t.executeSyncMode(ctx, req, timeoutSec, isContentFactoryDesignerDelegation)
 	}
-	return t.executeAsyncMode(ctx, req)
+	return t.executeAsyncMode(ctx, req, timeoutSec)
+}
+
+// resolveDelegateTimeoutSec resolves the run deadline (seconds) from the caller's args,
+// mode-aware:
+//   sync : default 300, hard cap 600 (unchanged).
+//   async: default 600 when `timeout` is OMITTED (preserves the historical hardcoded
+//          10-minute background budget — do NOT fall to the 300 parse default, which would
+//          silently halve every existing async delegation); an explicit value is honored up
+//          to 3600 so a long inter-agent pipeline can finish instead of dying at 10 minutes.
+func resolveDelegateTimeoutSec(mode string, args map[string]any) int {
+	explicit, hasTimeout := 0, false
+	if ts, ok := args["timeout"].(float64); ok && int(ts) > 0 {
+		explicit, hasTimeout = int(ts), true
+	}
+	def, capSec := 300, 600
+	if mode == "async" {
+		def, capSec = 600, 3600
+	}
+	timeoutSec := def
+	if hasTimeout {
+		timeoutSec = explicit
+	}
+	if timeoutSec > capSec {
+		timeoutSec = capSec
+	}
+	return timeoutSec
 }
 
 // executeSyncMode blocks until the delegatee completes or timeout.
-func (t *DelegateTool) executeSyncMode(ctx context.Context, req DelegateRequest, timeoutSec int) *Result {
+func (t *DelegateTool) executeSyncMode(ctx context.Context, req DelegateRequest, timeoutSec int, requireExactlyOneImage bool) *Result {
 	syncCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
@@ -233,21 +311,115 @@ func (t *DelegateTool) executeSyncMode(ctx context.Context, req DelegateRequest,
 		MediaCount:   len(dr.Media),
 	})
 
+	media := t.stageSyncDelegateMedia(ctx, req.DelegationID, dr.Media)
+	if requireExactlyOneImage {
+		imageCount := 0
+		for _, m := range media {
+			if strings.HasPrefix(m.MimeType, "image/") {
+				imageCount++
+			}
+		}
+		if imageCount != 1 {
+			return ErrorResult(fmt.Sprintf("ContentFactory designer must produce exactly 1 staged image, got %d", imageCount))
+		}
+	}
+	mediaJSON := make([]map[string]string, 0, len(media))
+	for _, m := range media {
+		mediaJSON = append(mediaJSON, map[string]string{
+			"path":      m.Path,
+			"mime_type": m.MimeType,
+			"filename":  m.Filename,
+			"media_ref": "MEDIA:" + m.Path,
+		})
+	}
+
 	resultJSON, _ := json.Marshal(map[string]any{
 		"delegation_id": req.DelegationID,
 		"agent":         req.ToAgentKey,
 		"status":        "completed",
 		"content":       dr.Content,
+		"media":         mediaJSON,
 	})
 	r := NewResult(string(resultJSON))
-	r.Media = dr.Media
+	r.Media = media
 	return r
 }
 
-// executeAsyncMode spawns a goroutine and returns immediately.
-func (t *DelegateTool) executeAsyncMode(ctx context.Context, req DelegateRequest) *Result {
+func (t *DelegateTool) stageSyncDelegateMedia(ctx context.Context, delegationID string, media []bus.MediaFile) []bus.MediaFile {
+	if len(media) == 0 {
+		return nil
+	}
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		return media
+	}
+	stageDir := filepath.Join(workspace, "delegations", delegationID)
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		slog.Warn("delegate.media_stage_dir_failed", "delegation_id", delegationID, "error", err)
+		return media
+	}
+
+	staged := make([]bus.MediaFile, 0, len(media))
+	for i, m := range media {
+		if m.Path == "" {
+			continue
+		}
+		src := filepath.Clean(m.Path)
+		if realSrc, err := filepath.EvalSymlinks(src); err == nil {
+			src = realSrc
+		}
+		if wsReal, err := filepath.EvalSymlinks(workspace); err == nil && isPathInside(src, wsReal) {
+			staged = append(staged, m)
+			continue
+		}
+
+		name := m.Filename
+		if name == "" {
+			name = filepath.Base(src)
+		}
+		if name == "." || name == string(filepath.Separator) {
+			name = fmt.Sprintf("delegate-media-%d", i+1)
+		}
+		dst := filepath.Join(stageDir, filepath.Base(name))
+		if err := copyDelegateMediaFile(src, dst); err != nil {
+			slog.Warn("delegate.media_stage_failed", "delegation_id", delegationID, "src", src, "error", err)
+			continue
+		}
+		staged = append(staged, bus.MediaFile{Path: dst, MimeType: m.MimeType, Filename: filepath.Base(dst), Caption: m.Caption})
+	}
+	if len(staged) == 0 {
+		return media
+	}
+	return staged
+}
+
+func copyDelegateMediaFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// executeAsyncMode spawns a goroutine and returns immediately. timeoutSec bounds the
+// detached run (default 600s; up to 3600s when the caller passes an explicit timeout) so a
+// long inter-agent pipeline can complete instead of being killed at a fixed 10 minutes.
+func (t *DelegateTool) executeAsyncMode(ctx context.Context, req DelegateRequest, timeoutSec int) *Result {
 	// Detach from parent cancel but add a deadline to prevent goroutine leaks.
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(timeoutSec)*time.Second)
+
+	// A long detached async run has no cron run-log; leave a start marker so a silently
+	// failing daily chain is diagnosable from logs (paired with EventDelegateFailed below).
+	slog.Info("delegate.async.start", "to", req.ToAgentKey, "from", req.FromAgentKey, "timeout_sec", timeoutSec)
 
 	go func() {
 		defer cancel()
@@ -300,6 +472,9 @@ func (t *DelegateTool) announceToParent(req DelegateRequest, content string, med
 	}
 	if req.SenderID != "" {
 		meta[MetaOriginSenderID] = req.SenderID
+		if req.SenderName != "" {
+			meta[MetaOriginSenderName] = req.SenderName
+		}
 	}
 	if req.Role != "" {
 		meta[MetaOriginRole] = req.Role
@@ -343,3 +518,12 @@ func (t *DelegateTool) emitEvent(ctx context.Context, eventType eventbus.EventTy
 	})
 }
 
+// The designer gate reads the auditor's verdict off its own line. The word
+// boundary is what stops substring spoofing ("PASSIVE", "yesterday"); the rest
+// of the line is free text, because the director routinely annotates the
+// verdict ("PASS (round 2)") and a gate that rejected that cost the run its
+// image — the draft then went out as text only.
+var (
+	auditVerdictPassLine = regexp.MustCompile(`(?m)^[ \t]*AUDIT_VERDICT:[ \t]*PASS\b`)
+	safeToSendLine       = regexp.MustCompile(`(?m)^[ \t]*SAFE_TO_SEND_DISCORD:[ \t]*yes\b`)
+)

@@ -375,3 +375,65 @@ func TestClassifyChineseInputTooLong(t *testing.T) {
 		t.Errorf("expected context_overflow, got %s (reason: %s)", result.Kind, result.Reason)
 	}
 }
+
+// Bare-error sources on the tier-1 (Codex) path.
+//
+// These are plain fmt.Errorf/errors.New values, NOT *HTTPError, so ClassifyHTTPError
+// falls back to Classify(err, 0, err.Error()). Without a registered pattern they land on
+// FailoverUnknown, and ModelFallbackProvider.runOrdered returns immediately instead of
+// advancing to the next tier (model_fallback.go:170) — i.e. the whole fallback chain dies
+// on exactly the scenario it exists to handle. Each case below asserts the real string
+// emitted at the cited call site.
+
+func TestClassifyBareAuthTokenFailure(t *testing.T) {
+	// internal/providers/codex_build.go:162
+	err := errors.New("codex: get auth token: oauth: token expired and refresh failed")
+	result := ClassifyHTTPError(NewDefaultClassifier(), err)
+	if result.Reason == FailoverUnknown {
+		t.Fatal("bare auth-token error classified as FailoverUnknown — fallback chain would hard-stop")
+	}
+	if result.Reason != FailoverAuth {
+		t.Errorf("expected FailoverAuth, got %s", result.Reason)
+	}
+}
+
+func TestClassifyBareRouteEligibleFailure(t *testing.T) {
+	// internal/providers/chatgpt_oauth_router.go:164,192
+	err := errors.New("no route-eligible chatgpt_oauth providers available: openai-codex (exhausted)")
+	result := ClassifyHTTPError(NewDefaultClassifier(), err)
+	if result.Reason == FailoverUnknown {
+		t.Fatal("bare route-eligible error classified as FailoverUnknown — fallback chain would hard-stop")
+	}
+	if result.Reason != FailoverBilling {
+		t.Errorf("expected FailoverBilling, got %s", result.Reason)
+	}
+}
+
+func TestClassifyBareUsageCapExceeded(t *testing.T) {
+	// internal/usage/caps/service.go:20 (ErrCapExceeded), surfaced via the
+	// FallbackBeforeCall hook in loop_pipeline_callbacks.go.
+	err := errors.New("usage cap exceeded")
+	result := ClassifyHTTPError(NewDefaultClassifier(), err)
+	if result.Reason == FailoverUnknown {
+		t.Fatal("bare usage-cap error classified as FailoverUnknown — fallback chain would hard-stop")
+	}
+	if result.Reason != FailoverBilling {
+		t.Errorf("expected FailoverBilling, got %s", result.Reason)
+	}
+}
+
+// Guard the invariant these patterns exist to protect: a classified reason must let
+// runOrdered advance. Only context_overflow and FailoverUnknown stop the chain.
+func TestBareTierOneErrorsDoNotStopFallbackChain(t *testing.T) {
+	classifier := NewDefaultClassifier()
+	for _, msg := range []string{
+		"codex: get auth token: oauth: token expired and refresh failed",
+		"no route-eligible chatgpt_oauth providers available: openai-codex (exhausted)",
+		"usage cap exceeded",
+	} {
+		result := ClassifyHTTPError(classifier, errors.New(msg))
+		if result.Kind == "context_overflow" || result.Reason == FailoverUnknown {
+			t.Errorf("chain would hard-stop on %q (kind=%s reason=%s)", msg, result.Kind, result.Reason)
+		}
+	}
+}

@@ -411,3 +411,8 @@ func readCapped(path string, maxBytes int) ([]byte, bool, error) {
 	}
 	return buf, false, nil
 }
+
+// Capabilities marks vault_read read-only: it fetches a vault document by id and returns it.
+func (t *VaultReadTool) Capabilities() []ToolCapability {
+	return []ToolCapability{CapReadOnly}
+}

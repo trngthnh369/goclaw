@@ -2,8 +2,11 @@ package personal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
@@ -38,24 +41,33 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		}
 	}
 
-	// Send media attachments.
+	// Send media attachments. Failures are RETURNED, not just logged: a media-only message whose
+	// upload failed used to fall through to `return nil`, so callers saw a successful send while
+	// the recipient got nothing (the daily report marked itself published against an empty Zalo
+	// group for days). Text still goes out even if an attachment failed, so the caller gets both
+	// the delivered text and the real error.
+	var mediaErrs []error
 	for _, media := range msg.Media {
 		if protocol.IsImageFile(media.URL) {
 			if err := c.sendImage(ctx, sess, msg.ChatID, threadType, media.URL, media.Caption); err != nil {
 				slog.Warn("zalo_personal: failed to send image", "path", media.URL, "error", err)
+				mediaErrs = append(mediaErrs, fmt.Errorf("image %s: %w", filepath.Base(media.URL), err))
 			}
 		} else {
 			if err := c.sendFile(ctx, sess, msg.ChatID, threadType, media.URL); err != nil {
 				slog.Warn("zalo_personal: failed to send file", "path", media.URL, "error", err)
+				mediaErrs = append(mediaErrs, fmt.Errorf("file %s: %w", filepath.Base(media.URL), err))
 			}
 		}
 	}
 
 	// Send text content (if any remains after media).
 	if msg.Content != "" {
-		return c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content)
+		if err := c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content); err != nil {
+			mediaErrs = append(mediaErrs, err)
+		}
 	}
-	return nil
+	return errors.Join(mediaErrs...)
 }
 
 // sendImage uploads and sends an image file to a Zalo thread.

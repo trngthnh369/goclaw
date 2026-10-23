@@ -1,12 +1,19 @@
 package agent
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // TestPersistMedia_NamingScheme verifies that persistMedia produces:
@@ -152,5 +159,63 @@ func TestPersistMedia_BackfilledThreadAttachmentsCreateToolRefs(t *testing.T) {
 	}
 	if !gotKinds["document"] {
 		t.Fatalf("missing document ref: %#v", refs)
+	}
+}
+
+func TestPersistMedia_PreserveApprovalImageBytes(t *testing.T) {
+	workspace := t.TempDir()
+	sourcePath := filepath.Join(t.TempDir(), "approved.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatalf("encode PNG: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, encoded.Bytes(), 0600); err != nil {
+		t.Fatalf("write approved image: %v", err)
+	}
+	wantSHA := sha256.Sum256(encoded.Bytes())
+
+	var loop Loop
+	refs := loop.persistMedia("discord-approval", []bus.MediaFile{{
+		Path:          sourcePath,
+		MimeType:      "image/png",
+		Filename:      "approved.png",
+		PreserveBytes: true,
+	}}, workspace)
+	if len(refs) != 1 {
+		t.Fatalf("refs = %d, want 1: %#v", len(refs), refs)
+	}
+	if refs[0].MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", refs[0].MimeType)
+	}
+	if filepath.Ext(refs[0].Path) != ".png" {
+		t.Fatalf("path = %q, want .png extension", refs[0].Path)
+	}
+	got, err := os.ReadFile(refs[0].Path)
+	if err != nil {
+		t.Fatalf("read persisted approval image: %v", err)
+	}
+	if gotSHA := sha256.Sum256(got); gotSHA != wantSHA {
+		t.Fatalf("persisted approval image digest changed")
+	}
+
+	req := &RunRequest{
+		ReplyToMedia:         "approved.png=" + hex.EncodeToString(wantSHA[:]),
+		ReplyToMediaCount:    1,
+		ReplyToMediaComplete: true,
+	}
+	runContext := &store.RunContext{ReplyToMediaComplete: true}
+	ctx := store.WithRunContext(t.Context(), runContext)
+	bindReplyMediaPaths(ctx, req, refs)
+	if len(req.ReplyToMediaPaths) != 1 || req.ReplyToMediaPaths[0] != refs[0].Path {
+		t.Fatalf("request paths = %#v, want %q", req.ReplyToMediaPaths, refs[0].Path)
+	}
+	if len(runContext.ReplyToMediaPaths) != 1 || runContext.ReplyToMediaPaths[0] != refs[0].Path {
+		t.Fatalf("run context paths = %#v, want %q", runContext.ReplyToMediaPaths, refs[0].Path)
+	}
+	if !req.ReplyToMediaComplete || !runContext.ReplyToMediaComplete {
+		t.Fatal("exact-byte approval media should remain complete")
 	}
 }

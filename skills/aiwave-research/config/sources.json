@@ -1,0 +1,462 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "thecomingwave-youtube",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCCoUJTzD-gV_otqzFU85-MQ",
+      "authority": 0.9,
+      "limit": 10,
+      "topics": [
+        "podcast",
+        "framing"
+      ],
+      "note": "The Coming Wave Podcast — the show this pipeline models. FRAMING source, not news: episodes carry the recurring theses the brief builds on. Atom feed; the video description lives in media:group/media:description, which rss.py reads via the media-group fallback."
+    },
+    {
+      "id": "semianalysis",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://semianalysis.com/feed/",
+      "authority": 0.95,
+      "limit": 10,
+      "topics": [
+        "compute",
+        "supply-chain"
+      ]
+    },
+    {
+      "id": "trendforce",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.trendforce.com/news/feed/",
+      "authority": 0.85,
+      "limit": 20,
+      "topics": [
+        "compute",
+        "supply-chain",
+        "memory"
+      ]
+    },
+    {
+      "id": "datacenterdynamics",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.datacenterdynamics.com/en/rss/",
+      "authority": 0.85,
+      "limit": 20,
+      "topics": [
+        "compute",
+        "energy",
+        "capex"
+      ]
+    },
+    {
+      "id": "ieee-semiconductors",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://spectrum.ieee.org/feeds/topic/semiconductors.rss",
+      "authority": 0.8,
+      "limit": 20,
+      "topics": [
+        "compute",
+        "research"
+      ]
+    },
+    {
+      "id": "tomshardware",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.tomshardware.com/feeds.xml",
+      "authority": 0.7,
+      "limit": 25,
+      "topics": [
+        "compute",
+        "silicon"
+      ],
+      "note": "canonical https feed; /feeds/all 301s to an http:// URL which the client rejects"
+    },
+    {
+      "id": "theregister",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.theregister.com/headlines.atom",
+      "authority": 0.7,
+      "limit": 25,
+      "topics": [
+        "compute",
+        "enterprise"
+      ],
+      "note": "headlines.atom 301s to api.theregister.com — both hosts must be allowlisted"
+    },
+    {
+      "id": "nikkei-asia",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://asia.nikkei.com/rss/feed/nar",
+      "authority": 0.85,
+      "limit": 25,
+      "topics": [
+        "supply-chain",
+        "geopolitics",
+        "asia"
+      ]
+    },
+    {
+      "id": "utilitydive",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.utilitydive.com/feeds/news/",
+      "authority": 0.75,
+      "limit": 15,
+      "topics": [
+        "energy",
+        "grid"
+      ]
+    },
+    {
+      "id": "openai-news",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://openai.com/news/rss.xml",
+      "authority": 0.95,
+      "limit": 8,
+      "topics": [
+        "models",
+        "official"
+      ]
+    },
+    {
+      "id": "deepmind-blog",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://deepmind.google/blog/rss.xml",
+      "authority": 0.9,
+      "limit": 8,
+      "topics": [
+        "models",
+        "official"
+      ]
+    },
+    {
+      "id": "nvidia-blog",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://blogs.nvidia.com/feed/",
+      "authority": 0.8,
+      "limit": 12,
+      "topics": [
+        "compute",
+        "official"
+      ]
+    },
+    {
+      "id": "cnbc-tech",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+      "authority": 0.75,
+      "limit": 25,
+      "topics": [
+        "capital",
+        "earnings"
+      ]
+    },
+    {
+      "id": "techcrunch",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://techcrunch.com/feed/",
+      "authority": 0.65,
+      "limit": 20,
+      "topics": [
+        "capital",
+        "funding"
+      ]
+    },
+    {
+      "id": "theverge",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://theverge.com/rss/index.xml",
+      "authority": 0.65,
+      "limit": 15,
+      "topics": [
+        "compute",
+        "products"
+      ]
+    },
+    {
+      "id": "arstechnica",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://feeds.arstechnica.com/arstechnica/technology-lab",
+      "authority": 0.7,
+      "limit": 15,
+      "topics": [
+        "compute",
+        "research"
+      ]
+    },
+    {
+      "id": "cafef-kinh-te-so",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://cafef.vn/kinh-te-so.rss",
+      "authority": 0.75,
+      "limit": 25,
+      "topics": [
+        "vietnam",
+        "capital"
+      ]
+    },
+    {
+      "id": "vnexpress-so-hoa",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://vnexpress.net/rss/so-hoa.rss",
+      "authority": 0.7,
+      "limit": 25,
+      "topics": [
+        "vietnam",
+        "compute"
+      ]
+    },
+    {
+      "id": "reuters-tech",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.reuters.com/technology/rss",
+      "authority": 0.9,
+      "disabled_reason": "verified 2026-08-07: HTTP 401 (paywalled feed).",
+      "topics": [
+        "capital",
+        "geopolitics"
+      ]
+    },
+    {
+      "id": "anthropic-news",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.anthropic.com/rss.xml",
+      "authority": 0.95,
+      "disabled_reason": "verified 2026-08-07: HTTP 404, no public feed at that path.",
+      "topics": [
+        "models",
+        "official"
+      ]
+    },
+    {
+      "id": "vneconomy-cong-nghe",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://vneconomy.vn/cong-nghe.rss",
+      "authority": 0.8,
+      "disabled_reason": "verified 2026-08-07: HTTP 200 but zero <item> entries. Replaced by vietnamnet-cntt (verified 2026-08-07).",
+      "topics": [
+        "vietnam"
+      ]
+    },
+    {
+      "id": "x-twitter",
+      "type": "x_api",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.6,
+      "topics": [
+        "deferred"
+      ]
+    },
+    {
+      "id": "reddit",
+      "type": "reddit_oauth",
+      "enabled": false,
+      "requires_credentials": true,
+      "authority": 0.55,
+      "topics": [
+        "deferred"
+      ]
+    },
+    {
+      "id": "latitudemedia",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.latitudemedia.com/feed",
+      "authority": 0.8,
+      "limit": 12,
+      "topics": [
+        "energy",
+        "compute"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items. Closes the data-centre power gap the beat had — the probe's top item was 'Data centers have a Texas-sized energy problem'."
+    },
+    {
+      "id": "powermag",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.powermag.com/feed/",
+      "authority": 0.8,
+      "limit": 12,
+      "topics": [
+        "energy"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items, ~500-char summaries. Grid/generation trade press; carries data-centre interconnection load stories UtilityDive misses."
+    },
+    {
+      "id": "semiwiki",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://semiwiki.com/feed/",
+      "authority": 0.75,
+      "limit": 12,
+      "topics": [
+        "compute"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items, ~420-char summaries. Process/packaging depth (High-NA EUV, advanced packaging) that the general tech press does not carry."
+    },
+    {
+      "id": "digitimes",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://www.digitimes.com/rss/daily.xml",
+      "authority": 0.8,
+      "limit": 12,
+      "topics": [
+        "compute",
+        "capital",
+        "geopolitics"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items. Asia supply-chain reporting — order flow and component-level signals upstream of the earnings the capital beat sees later."
+    },
+    {
+      "id": "stratechery",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://stratechery.com/feed/",
+      "authority": 0.85,
+      "limit": 8,
+      "topics": [
+        "capital",
+        "compute"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items but ~140-char summaries (paywall previews). Analysis, not breaking news — useful as framing alongside the podcast feed."
+    },
+    {
+      "id": "vietnamnet-cntt",
+      "type": "rss",
+      "enabled": true,
+      "url": "https://vietnamnet.vn/rss/thong-tin-truyen-thong.rss",
+      "authority": 0.6,
+      "limit": 10,
+      "topics": [
+        "compute",
+        "capital"
+      ],
+      "note": "verified 2026-08-07: ok, 5 items. Replaces vneconomy-cong-nghe, which returns 200 with zero entries. Vietnam ICT/semiconductor coverage; the AI-anchor gate drops the ceremony filler."
+    },
+    {
+      "id": "datacenterfrontier",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.datacenterfrontier.com/feed/",
+      "authority": 0.8,
+      "disabled_reason": "verified 2026-08-07: HTTP 403 on both /feed/ and /rss/topic/energy-power — the publisher blocks the collector user-agent.",
+      "topics": [
+        "compute",
+        "energy"
+      ]
+    },
+    {
+      "id": "heatmap",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://heatmap.news/rss.xml",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-07: HTTP 404 — no RSS at the documented paths.",
+      "topics": [
+        "energy"
+      ]
+    },
+    {
+      "id": "rtoinsider",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.rtoinsider.com/feed/",
+      "authority": 0.75,
+      "disabled_reason": "verified 2026-08-07: served malformed XML (mismatched tag at line 6) — rss.py cannot parse it and there is no HTML adapter.",
+      "topics": [
+        "energy"
+      ]
+    },
+    {
+      "id": "canarymedia",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.canarymedia.com/rss",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-07: feed is ok, but the sample was general clean-energy consumer news (EV trucks). Almost every item would fail has_ai_anchor and land in beat:offbeat, so it costs a fetch for nothing. Enable only if the beat widens beyond AI-linked power.",
+      "topics": [
+        "energy"
+      ]
+    },
+    {
+      "id": "eetimes",
+      "type": "rss",
+      "enabled": false,
+      "url": "https://www.eetimes.com/feed/",
+      "authority": 0.7,
+      "disabled_reason": "verified 2026-08-07: feed is ok but dominated by vendor product announcements (enclosures, connectors). Signal-to-noise is worse than semiwiki, which covers the same beat.",
+      "topics": [
+        "compute"
+      ]
+    }
+  ],
+  "allowed_hosts": [
+    "api.theregister.com",
+    "arstechnica.com",
+    "asia.nikkei.com",
+    "blogs.nvidia.com",
+    "cafef.vn",
+    "deepmind.google",
+    "feeds.arstechnica.com",
+    "heatmap.news",
+    "openai.com",
+    "semianalysis.com",
+    "semiwiki.com",
+    "spectrum.ieee.org",
+    "stratechery.com",
+    "techcrunch.com",
+    "theverge.com",
+    "vietnamnet.vn",
+    "vnexpress.net",
+    "www.canarymedia.com",
+    "www.cnbc.com",
+    "www.datacenterdynamics.com",
+    "www.datacenterfrontier.com",
+    "www.digitimes.com",
+    "www.eetimes.com",
+    "www.latitudemedia.com",
+    "www.powermag.com",
+    "www.rtoinsider.com",
+    "www.theregister.com",
+    "www.theverge.com",
+    "www.tomshardware.com",
+    "www.trendforce.com",
+    "www.utilitydive.com",
+    "www.youtube.com"
+  ],
+  "retention": {
+    "raw_runs_days": 14,
+    "source_health_days": 90,
+    "digests_days": 30
+  },
+  "scoring": {
+    "candidate_limit": 28
+  },
+  "scheduler": {
+    "minute": 30,
+    "hour_interval": 24,
+    "catch_up_lateness_minutes": 150
+  }
+}

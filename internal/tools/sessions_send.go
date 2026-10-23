@@ -115,6 +115,9 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *Re
 	sendMeta := map[string]string{}
 	if actorSender := store.SenderIDFromContext(ctx); actorSender != "" {
 		sendMeta[MetaOriginSenderID] = actorSender
+		if name := store.SenderNameFromContext(ctx); name != "" {
+			sendMeta[MetaOriginSenderName] = name
+		}
 	}
 	t.msgBus.PublishInbound(bus.InboundMessage{
 		Channel:  "system",

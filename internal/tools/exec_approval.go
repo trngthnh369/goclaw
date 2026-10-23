@@ -1,12 +1,18 @@
 package tools
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // ExecSecurity determines the overall security mode for command execution.
@@ -80,9 +86,24 @@ var safeBins = map[string]bool{
 type ApprovalDecision string
 
 const (
-	ApprovalAllowOnce   ApprovalDecision = "allow-once"
-	ApprovalAllowAlways ApprovalDecision = "allow-always"
-	ApprovalDeny        ApprovalDecision = "deny"
+	ApprovalAllowOnce ApprovalDecision = "allow-once"
+	ApprovalDeny      ApprovalDecision = "deny"
+)
+
+// ErrApprovalUnavailable is returned when a request cannot be parked at all
+// (shutting down, or too many approvals already waiting).
+var ErrApprovalUnavailable = errors.New("approval unavailable")
+
+// Limits on how many runs may sit parked on a human decision at once.
+//
+// A parked run holds a scheduler lane token for the whole timeout
+// (internal/scheduler/lanes.go: the token is only returned after fn() returns),
+// and the main lane is shared by every tenant. Without a cap, a handful of
+// unanswered approvals starve unrelated tenants, so we deny past the cap
+// instead of parking.
+const (
+	defaultMaxPendingGlobal   = 8
+	defaultMaxPendingPerScope = 3
 )
 
 // PendingApproval is an in-flight approval request.
@@ -91,25 +112,79 @@ type PendingApproval struct {
 	Command   string    `json:"command"`
 	AgentID   string    `json:"agentId"`
 	CreatedAt time.Time `json:"createdAt"`
-	resultCh  chan ApprovalDecision
+
+	// Scope decides who may see and resolve this approval. It is derived from
+	// the run context at request time, never from the tool struct: the exec
+	// tool is a shared singleton whose agentID is the literal "default".
+	TenantID   uuid.UUID `json:"-"`
+	SessionKey string    `json:"-"`
+	UserID     string    `json:"-"`
+	// unscoped is set when no run context was available. Such a request cannot
+	// be attributed to a tenant, so only master scope may see or resolve it.
+	unscoped bool
+
+	resultCh chan ApprovalDecision
+	// resolved makes resolution single-shot: exactly one of
+	// {Resolve, timeout, ctx cancel, shutdown drain} may win.
+	resolved bool
 }
 
-// ExecApprovalManager manages pending approval requests and the dynamic allowlist.
+// ExecApprovalManager manages pending approval requests.
 type ExecApprovalManager struct {
-	config       ExecApprovalConfig
-	pending      map[string]*PendingApproval
-	alwaysAllow  map[string]bool // patterns added via "allow-always" decisions
-	mu           sync.Mutex
-	nextID       int
+	config  ExecApprovalConfig
+	pending map[string]*PendingApproval
+	mu      sync.Mutex
+
+	maxPendingGlobal   int
+	maxPendingPerScope int
+
+	shuttingDown bool
 }
 
 // NewExecApprovalManager creates an approval manager with the given config.
 func NewExecApprovalManager(cfg ExecApprovalConfig) *ExecApprovalManager {
 	return &ExecApprovalManager{
-		config:      cfg,
-		pending:     make(map[string]*PendingApproval),
-		alwaysAllow: make(map[string]bool),
+		config:             cfg,
+		pending:            make(map[string]*PendingApproval),
+		maxPendingGlobal:   defaultMaxPendingGlobal,
+		maxPendingPerScope: defaultMaxPendingPerScope,
 	}
+}
+
+// approvalScope is the identity a pending approval is filed under.
+type approvalScope struct {
+	tenantID   uuid.UUID
+	sessionKey string
+	userID     string
+	unscoped   bool
+}
+
+// scopeFromContext derives the approval scope from the run context.
+//
+// Fail-closed: with no run context there is nothing to attribute the request
+// to, so it is marked unscoped and only master scope may act on it. Reading
+// the tool struct instead would be worse than useless — SetApprovalManager
+// passes the constant "default" as the agent id.
+func scopeFromContext(ctx context.Context) approvalScope {
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		return approvalScope{
+			tenantID:   rc.TenantID,
+			sessionKey: rc.SessionKey,
+			userID:     rc.UserID,
+		}
+	}
+	return approvalScope{unscoped: true}
+}
+
+// canAccess reports whether the caller's context may see or resolve pa.
+func canAccess(ctx context.Context, pa *PendingApproval) bool {
+	if store.IsMasterScope(ctx) {
+		return true
+	}
+	if pa.unscoped {
+		return false
+	}
+	return pa.TenantID == store.TenantIDFromContext(ctx)
 }
 
 // CheckCommand evaluates whether a command should be executed, blocked, or needs approval.
@@ -148,88 +223,161 @@ func (m *ExecApprovalManager) CheckCommand(command string) string {
 	return "allow"
 }
 
-// RequestApproval creates a pending approval and blocks until resolved or timeout.
-func (m *ExecApprovalManager) RequestApproval(command, agentID string, timeout time.Duration) (ApprovalDecision, error) {
+// RequestApproval creates a pending approval and blocks until it is resolved,
+// the run context is cancelled, the timeout expires, or the manager shuts down.
+//
+// The caller's ctx matters: without it an aborted run would leave a goroutine
+// parked on a lane token for the full timeout, and graceful shutdown would
+// block on wg.Wait() instead of denying.
+func (m *ExecApprovalManager) RequestApproval(ctx context.Context, command, agentID string, timeout time.Duration) (ApprovalDecision, error) {
+	scope := scopeFromContext(ctx)
+
 	m.mu.Lock()
-	m.nextID++
-	id := fmt.Sprintf("exec-%d", m.nextID)
+	if m.shuttingDown {
+		m.mu.Unlock()
+		return ApprovalDeny, fmt.Errorf("%w: gateway is shutting down", ErrApprovalUnavailable)
+	}
+	if len(m.pending) >= m.maxPendingGlobal {
+		m.mu.Unlock()
+		slog.Warn("security.approval_cap_reached", "scope", "global", "limit", m.maxPendingGlobal)
+		return ApprovalDeny, fmt.Errorf("%w: too many approvals already awaiting a decision", ErrApprovalUnavailable)
+	}
+	inScope := 0
+	for _, p := range m.pending {
+		if p.unscoped == scope.unscoped && p.TenantID == scope.tenantID {
+			inScope++
+		}
+	}
+	if inScope >= m.maxPendingPerScope {
+		m.mu.Unlock()
+		slog.Warn("security.approval_cap_reached", "scope", "tenant",
+			"tenant_id", scope.tenantID, "limit", m.maxPendingPerScope)
+		return ApprovalDeny, fmt.Errorf("%w: too many approvals already awaiting a decision for this tenant", ErrApprovalUnavailable)
+	}
+
+	id := uuid.NewString()
 	pa := &PendingApproval{
-		ID:        id,
-		Command:   command,
-		AgentID:   agentID,
-		CreatedAt: time.Now(),
-		resultCh:  make(chan ApprovalDecision, 1),
+		ID:         id,
+		Command:    command,
+		AgentID:    agentID,
+		CreatedAt:  time.Now(),
+		TenantID:   scope.tenantID,
+		SessionKey: scope.sessionKey,
+		UserID:     scope.userID,
+		unscoped:   scope.unscoped,
+		resultCh:   make(chan ApprovalDecision, 1),
 	}
 	m.pending[id] = pa
 	m.mu.Unlock()
 
-	slog.Info("exec approval requested", "id", id, "command", truncateCmd(command, 100))
+	slog.Info("exec approval requested", "id", id, "command", truncateCmd(command, 100),
+		"tenant_id", scope.tenantID, "session_key", scope.sessionKey, "unscoped", scope.unscoped)
 
-	// Wait for resolution or timeout
 	select {
 	case decision := <-pa.resultCh:
-		m.mu.Lock()
-		delete(m.pending, id)
-		m.mu.Unlock()
-
-		// If allow-always, add the command's base binary to the dynamic allowlist
-		if decision == ApprovalAllowAlways {
-			bin := extractBin(command)
-			if bin != "" {
-				m.mu.Lock()
-				m.alwaysAllow[bin] = true
-				m.mu.Unlock()
-				slog.Info("exec approval: added to always-allow", "bin", bin)
-			}
-		}
-
+		// Resolve (or the shutdown drain) already claimed it.
 		return decision, nil
 
+	case <-ctx.Done():
+		if !m.claim(id) {
+			return <-pa.resultCh, nil // lost the race; a real decision is already in flight
+		}
+		return ApprovalDeny, fmt.Errorf("approval cancelled: %w", ctx.Err())
+
 	case <-time.After(timeout):
-		m.mu.Lock()
-		delete(m.pending, id)
-		m.mu.Unlock()
+		if !m.claim(id) {
+			return <-pa.resultCh, nil
+		}
 		return ApprovalDeny, fmt.Errorf("approval timed out after %s", timeout)
 	}
 }
 
-// Resolve resolves a pending approval request.
-func (m *ExecApprovalManager) Resolve(id string, decision ApprovalDecision) error {
+// claim marks a pending approval resolved and removes it, returning true only
+// for the single caller that won. Every terminal path goes through it so an
+// operator can never be told "approved" for a call that actually timed out.
+func (m *ExecApprovalManager) claim(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	pa, ok := m.pending[id]
-	if !ok {
-		return fmt.Errorf("approval %q not found or already resolved", id)
+	if !ok || pa.resolved {
+		return false
+	}
+	pa.resolved = true
+	delete(m.pending, id)
+	return true
+}
+
+// Resolve resolves a pending approval request on behalf of the caller in ctx.
+func (m *ExecApprovalManager) Resolve(ctx context.Context, id string, decision ApprovalDecision) error {
+	notFound := fmt.Errorf("approval %q not found or already resolved", id)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	pa, ok := m.pending[id]
+	if !ok || pa.resolved {
+		return notFound
+	}
+	// Same error for "wrong tenant" as for "missing" — do not confirm existence
+	// to a caller outside the approval's scope.
+	if !canAccess(ctx, pa) {
+		slog.Warn("security.approval_cross_tenant_denied", "id", id,
+			"caller_tenant", store.TenantIDFromContext(ctx), "owner_tenant", pa.TenantID)
+		return notFound
 	}
 
-	pa.resultCh <- decision
+	pa.resolved = true
+	delete(m.pending, id)
+	pa.resultCh <- decision // buffered, never blocks
 	return nil
 }
 
-// ListPending returns all pending approval requests.
-func (m *ExecApprovalManager) ListPending() []*PendingApproval {
+// ListPending returns the pending approvals visible to the caller in ctx:
+// everything for master scope, otherwise the caller's own tenant.
+func (m *ExecApprovalManager) ListPending(ctx context.Context) []*PendingApproval {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	result := make([]*PendingApproval, 0, len(m.pending))
 	for _, pa := range m.pending {
-		result = append(result, pa)
+		if canAccess(ctx, pa) {
+			result = append(result, pa)
+		}
 	}
 	return result
 }
 
-// matchesAllowlist checks if a command matches any allowlist pattern or dynamic always-allow.
+// Shutdown stops accepting new approvals and denies everything still parked.
+//
+// Call this BEFORE cancelling runs and stopping lanes: a parked request holds a
+// lane token, so draining last would let Lane.Stop's wg.Wait() block until every
+// outstanding approval hit its full timeout.
+func (m *ExecApprovalManager) Shutdown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.shuttingDown = true
+	for id, pa := range m.pending {
+		if pa.resolved {
+			continue
+		}
+		pa.resolved = true
+		pa.resultCh <- ApprovalDeny
+		delete(m.pending, id)
+	}
+	slog.Info("exec approval: drained pending approvals as denied")
+}
+
+// matchesAllowlist checks if a command matches any configured allowlist pattern.
+//
+// There is deliberately no dynamic "allow-always" store. The previous one was a
+// process-global map keyed only by binary name, written by any operator's
+// allow-always decision and read for every agent in every tenant, with no way to
+// revoke it — one "always" on `pip` in one tenant allowlisted pip everywhere.
+// It was also lost on restart, so nothing durable depended on it.
 func (m *ExecApprovalManager) matchesAllowlist(command string) bool {
 	bin := extractBin(command)
-
-	// Check dynamic always-allow
-	m.mu.Lock()
-	if m.alwaysAllow[bin] {
-		m.mu.Unlock()
-		return true
-	}
-	m.mu.Unlock()
 
 	// Check static allowlist patterns
 	for _, pattern := range m.config.Allowlist {

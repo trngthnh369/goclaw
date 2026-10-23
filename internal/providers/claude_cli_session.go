@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // validCLIModels lists accepted model aliases for the Claude CLI.
@@ -294,9 +295,20 @@ func ResetCLISession(baseWorkDir, sessionKey string) {
 	}
 }
 
-// filterCLIEnv removes CLAUDE* env vars to prevent nested session conflicts.
-// Behavioral tuning vars are whitelisted so they can be set system-wide
-// and picked up by claude-cli subprocesses.
+// cliAuthEnv are the credentials the claude CLI authenticates with. Every other
+// credential-shaped variable is withheld: the CLI runs its own shell tools, so
+// anything it inherits (GOCLAW_ENCRYPTION_KEY, the Postgres DSN) is readable
+// by whatever the prompt asks it to run.
+var cliAuthEnv = map[string]struct{}{
+	"CLAUDE_CODE_OAUTH_TOKEN": {},
+	"ANTHROPIC_API_KEY":       {},
+	"ANTHROPIC_AUTH_TOKEN":    {},
+}
+
+// filterCLIEnv removes CLAUDE* env vars to prevent nested session conflicts,
+// and gateway credentials via security.IsSensitiveEnv. Behavioral tuning vars
+// are whitelisted so they can be set system-wide and picked up by claude-cli
+// subprocesses.
 func filterCLIEnv(environ []string) []string {
 	allowed := map[string]bool{
 		"CLAUDE_CODE_OAUTH_TOKEN":               true, // auth
@@ -305,11 +317,11 @@ func filterCLIEnv(environ []string) []string {
 	}
 	var filtered []string
 	for _, e := range environ {
-		key := e
-		if before, _, ok := strings.Cut(e, "="); ok {
-			key = before
-		}
+		key, value, _ := strings.Cut(e, "=")
 		if strings.HasPrefix(key, "CLAUDE") && !allowed[key] {
+			continue
+		}
+		if _, auth := cliAuthEnv[key]; !auth && security.IsSensitiveEnv(key, value) {
 			continue
 		}
 		filtered = append(filtered, e)

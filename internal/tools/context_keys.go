@@ -654,6 +654,88 @@ func WorkstationIDFromCtx(ctx context.Context) string {
 	return v
 }
 
+// --- Per-run outbound action latch (message terminal-action dedup) ---
+
+const ctxOutboundActionLatch toolContextKey = "tool_outbound_action_latch"
+
+// OutboundActionLatch reserves semantic outbound actions once per run.
+// Injected once per run; message uses it to prevent duplicate terminal sends.
+// Thread-safe: tools may execute in parallel goroutines.
+type OutboundActionLatch struct {
+	mu       sync.Mutex
+	reserved map[string]bool
+	results  map[string]string
+}
+
+// NewOutboundActionLatch creates an empty action latch.
+func NewOutboundActionLatch() *OutboundActionLatch {
+	return &OutboundActionLatch{reserved: make(map[string]bool)}
+}
+
+// TryReserve reserves key and returns true only for the first caller.
+func (l *OutboundActionLatch) TryReserve(key string) bool {
+	if l == nil || key == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.reserved[key] {
+		return false
+	}
+	l.reserved[key] = true
+	return true
+}
+
+// Reserved reports whether key is already reserved WITHOUT reserving it.
+// Callers that only want to observe progress must use this — TryReserve
+// mutates, so probing with it would consume the one-shot it is checking.
+func (l *OutboundActionLatch) Reserved(key string) bool {
+	if l == nil || key == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reserved[key]
+}
+
+// Remember stores what a reservation produced, so a later caller that is
+// refused can be told the result of the first attempt instead of a bare "already
+// done". Without it, telling an agent to "return the prior path" is unactionable
+// — it has no way to know that path — and the observed behaviour was retrying
+// the refused call until the iteration budget ran out.
+func (l *OutboundActionLatch) Remember(key, value string) {
+	if l == nil || key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.results == nil {
+		l.results = make(map[string]string)
+	}
+	l.results[key] = value
+}
+
+// Recall returns what Remember stored for key, or "".
+func (l *OutboundActionLatch) Recall(key string) string {
+	if l == nil || key == "" {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.results[key]
+}
+
+// WithOutboundActionLatch injects an outbound action latch into context.
+func WithOutboundActionLatch(ctx context.Context, latch *OutboundActionLatch) context.Context {
+	return context.WithValue(ctx, ctxOutboundActionLatch, latch)
+}
+
+// OutboundActionLatchFromCtx returns the outbound action latch, or nil.
+func OutboundActionLatchFromCtx(ctx context.Context) *OutboundActionLatch {
+	v, _ := ctx.Value(ctxOutboundActionLatch).(*OutboundActionLatch)
+	return v
+}
+
 // --- Delivered media tracker (write_file → message self-send dedup) ---
 
 const ctxDeliveredMedia toolContextKey = "tool_delivered_media"

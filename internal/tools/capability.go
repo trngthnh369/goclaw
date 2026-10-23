@@ -55,3 +55,20 @@ func inferMetadata(name string) ToolMetadata {
 	}
 	return meta
 }
+
+// CapabilityAware lets a tool declare its own capabilities instead of having
+// them guessed from its name.
+//
+// inferMetadata keys off a fixed list of tool names, which is fail-closed
+// (anything unknown is treated as mutating) but blind: a genuinely read-only
+// tool that is not on the list is classified as mutating, which excludes it from
+// parallel execution and — once the approval gate lands — would prompt a human
+// for a call that changes nothing. Declaring capabilities next to the tool keeps
+// the answer with the code that knows it.
+//
+// Tools that do not implement this keep the inferred defaults, so adding the
+// interface to one tool never affects another.
+type CapabilityAware interface {
+	Tool
+	Capabilities() []ToolCapability
+}

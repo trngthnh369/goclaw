@@ -2,14 +2,20 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,26 +23,203 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// maxReviewMessageBytes mirrors the Discord single-message content limit
+// enforced in channels/discord.sendMediaMessage. Duplicated to avoid a
+// tools→channels import cycle; keep the two in sync.
+// mediaSendTimeout bounds how long a media send waits for the channel worker's verdict. Generous
+// because it covers an upload to the platform (Zalo image upload over a slow link), but finite so
+// a wedged channel surfaces as "not confirmed" instead of hanging the caller.
+const mediaSendTimeout = 90 * time.Second
+
+const maxReviewMessageBytes = 2000
+
+// reviewTextBytesWithMedia returns the byte length of the text that would be
+// delivered alongside an image, or 0 when the draft carries no image (text-only
+// sends are chunked by the channel adapter and are not size-limited here).
+func reviewTextBytesWithMedia(message string) int {
+	if !embeddedMediaPattern.MatchString(message) {
+		return 0
+	}
+	text := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(message, ""))
+	return len(text)
+}
+
 // embeddedMediaPattern matches "MEDIA:" followed by a non-whitespace path.
 // Duplicated from agent.mediaPathPattern to avoid tools→agent import cycle.
-var embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
+var (
+	embeddedMediaPattern = regexp.MustCompile(`MEDIA:\S+`)
+	// internalNoisePattern blocks machine plumbing that no human asked for:
+	// delegate status envelopes and tool tracebacks. These are never a
+	// deliberate message to the reviewer, so they stay rejected outright.
+	internalNoisePattern = regexp.MustCompile(`(?i)(?:^\s*\{.*"(?:agent|delegation_id|task_id|status)".*\}\s*$|tool execution error:|context deadline exceeded)`)
+	// abortPhrasePattern used to be part of internalNoisePattern, which made the
+	// abort path unreachable: the director is told to send an abort notice to
+	// this same channel (CAPABILITIES "Every terminal Discord review or abort
+	// send"), but the natural wording for one was refused. A run that cannot
+	// abort out loud ends silently with nothing delivered — strictly worse than
+	// a blunt notice, because the review channel is internal and the
+	// irreversible boundary is the Facebook publish, which is guarded
+	// separately and byte-bound. Kept only to strip these phrases out of
+	// article drafts.
+	abortPhrasePattern = regexp.MustCompile(`(?i)(?:I was unable to complete this task|CRITICAL:|\[ABORT PIPELINE\])`)
+	// abortNoticePattern recognises a run giving up out loud. It is deliberately
+	// wider than abortPhrasePattern, which only strips alarm phrasing out of
+	// article drafts: every real abort notice this pipeline has sent said
+	// "Abort" somewhere and matched none of the three phrases above, so the
+	// narrow pattern would have silenced the abort path once drafts began
+	// requiring an image (2026-09-18).
+	abortNoticePattern = regexp.MustCompile(`(?i)(?:\babort\b|I was unable to complete this task|CRITICAL:)`)
+)
+
+const (
+	contentFactoryApprovalChannelID = "1530127001602625677"
+	contentFactoryFacebookChannel   = "fb-page"
+	contentFactoryFacebookTarget    = "feed"
+	feedPostLedgerDir               = ".goclaw/feed-post-ledger"
+	feedPostStagingDir              = ".goclaw/feed-post-staging"
+	maxFeedPostMediaBytes           = int64(25 << 20)
+	approvedReplyPayloadToken       = "APPROVED_REPLY"
+	contentFactoryTerminalKey       = "contentfactory-terminal"
+)
+
+// structuredAPIError is implemented by remote-API errors whose text is the
+// service's own diagnostic and therefore safe to log.
+//
+// This path used to log only the error's TYPE, which made a failed publish
+// undiagnosable: "*facebook.graphAPIError" says nothing about whether the token
+// was rejected, a permission was missing, or the payload was malformed. The
+// caution behind that choice was still sound, though — outboundDispatcher is
+// generic over every channel, so an error here can come from any transport, and
+// a transport failure arrives as *url.Error whose text embeds the full request
+// URL. Any channel that carries a credential in a query parameter would leak it.
+//
+// Opting in per error type keeps the diagnosis without betting on how every
+// present and future channel builds its URLs.
+type structuredAPIError interface {
+	APIErrorCode() int
+	APIErrorMessage() string
+}
+
+// safeAPIErrorAttrs returns loggable slog attributes describing err, or nothing
+// when err carries no vetted-safe detail.
+func safeAPIErrorAttrs(err error) []any {
+	var apiErr structuredAPIError
+	if !errors.As(err, &apiErr) {
+		return nil
+	}
+	return []any{"api_error_code", apiErr.APIErrorCode(), "api_error_message", apiErr.APIErrorMessage()}
+}
+
+// ContentFactoryTerminalActionPending reports whether agentKey is the
+// ContentFactory director and its one required terminal action — the review
+// draft (or abort notice) sent to the review channel — has not happened yet in
+// this run.
+//
+// The agent loop uses this to refuse to end a run on progress narration. That
+// invariant used to live only in the director's prompt, and prompts do not hold
+// it: runs on 2026-08-02 and 2026-08-05 both ended with an assistant turn that
+// announced the next delegation without emitting the tool call, and both were
+// recorded as status=ok with no review message ever sent.
+func ContentFactoryTerminalActionPending(ctx context.Context, agentKey string) bool {
+	if agentKey != contentFactoryDirectorAgentKey {
+		return false
+	}
+	latch := OutboundActionLatchFromCtx(ctx)
+	if latch == nil {
+		return false
+	}
+	return !latch.Reserved(contentFactoryTerminalKey)
+}
+
+var articleSHAPattern = regexp.MustCompile(`(?i)(?:\[Article SHA-256:\s*|article_sha256:|article_hash:)([a-fA-F0-9]{64})\]?`)
+
+type feedPostLedgerEntry struct {
+	Version          int       `json:"version"`
+	Status           string    `json:"status"`
+	TenantID         string    `json:"tenant_id"`
+	Channel          string    `json:"channel"`
+	Target           string    `json:"target"`
+	ReplyToMessageID string    `json:"reply_to_message_id"`
+	PayloadSHA256    string    `json:"payload_sha256"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type feedPostReservation struct {
+	path  string
+	entry feedPostLedgerEntry
+}
 
 // MessageTool allows the agent to proactively send messages to channels.
 type MessageTool struct {
-	workspace     string
-	restrict      bool
-	sender        ChannelSender
-	msgBus        *bus.MessageBus
-	tenantChecker ChannelTenantChecker
+	workspace          string
+	dataDir            string
+	restrict           bool
+	sender             ChannelSender
+	outboundDispatcher OutboundDispatcher
+	msgBus             *bus.MessageBus
+	tenantChecker      ChannelTenantChecker
+	reelsReviewChat    ReelsReviewChatChecker
+
+	approvalChannelID string
+	facebookChannel   string
+	facebookTarget    string
 }
 
 func NewMessageTool(workspace string, restrict bool) *MessageTool {
-	return &MessageTool{workspace: workspace, restrict: restrict}
+	return &MessageTool{
+		workspace:         workspace,
+		restrict:          restrict,
+		approvalChannelID: contentFactoryApprovalChannelID,
+		facebookChannel:   contentFactoryFacebookChannel,
+		facebookTarget:    contentFactoryFacebookTarget,
+	}
 }
 
+func (t *MessageTool) SetApprovalChannelID(id string) {
+	if id != "" {
+		t.approvalChannelID = id
+	}
+}
+
+func (t *MessageTool) SetFeedPostDestination(channel, target string) {
+	if channel != "" {
+		t.facebookChannel = channel
+	}
+	if target != "" {
+		t.facebookTarget = target
+	}
+}
+
+func (t *MessageTool) getApprovalChannelID() string {
+	if t.approvalChannelID != "" {
+		return t.approvalChannelID
+	}
+	return contentFactoryApprovalChannelID
+}
+
+func (t *MessageTool) getFacebookChannel() string {
+	if t.facebookChannel != "" {
+		return t.facebookChannel
+	}
+	return contentFactoryFacebookChannel
+}
+
+func (t *MessageTool) getFacebookTarget() string {
+	if t.facebookTarget != "" {
+		return t.facebookTarget
+	}
+	return contentFactoryFacebookTarget
+}
+
+func (t *MessageTool) SetDataDir(dataDir string)                      { t.dataDir = dataDir }
 func (t *MessageTool) SetChannelSender(s ChannelSender)               { t.sender = s }
+func (t *MessageTool) SetOutboundDispatcher(d OutboundDispatcher)     { t.outboundDispatcher = d }
 func (t *MessageTool) SetMessageBus(b *bus.MessageBus)                { t.msgBus = b }
 func (t *MessageTool) SetChannelTenantChecker(c ChannelTenantChecker) { t.tenantChecker = c }
+func (t *MessageTool) SetReelsReviewChatChecker(c ReelsReviewChatChecker) {
+	t.reelsReviewChat = c
+}
 
 func (t *MessageTool) Name() string { return "message" }
 func (t *MessageTool) Description() string {
@@ -49,8 +232,8 @@ func (t *MessageTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "Action to perform: 'send'",
-				"enum":        []string{"send"},
+				"description": "Action to perform: 'send' to deliver a message, 'post' to publish to a channel feed (e.g. Facebook page)",
+				"enum":        []string{"send", "post"},
 			},
 			"channel": map[string]any{
 				"type":        "string",
@@ -62,7 +245,7 @@ func (t *MessageTool) Parameters() map[string]any {
 			},
 			"message": map[string]any{
 				"type":        "string",
-				"description": "Message content to send. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'. The file will be uploaded as a document/photo/audio depending on its type.",
+				"description": "Message content to send. For action='post' after an approval, pass exactly 'APPROVED_REPLY': the gateway publishes the complete reviewed text and attachment itself, so never retype the article. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'.",
 			},
 			"forward": map[string]any{
 				"type":        "boolean",
@@ -72,6 +255,14 @@ func (t *MessageTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Quote the user's literal request when forward=true (e.g. 'gửi báo cáo này sang group dev'). Required when forward=true.",
 			},
+			"idempotency_key": map[string]any{
+				"type":        "string",
+				"description": "Optional per-run idempotency key. Required for ContentFactory terminal sends to the review channel; use contentfactory-terminal.",
+			},
+			"reels_master": map[string]any{
+				"type":        "string",
+				"description": "Video Factory only: path of the master video (inside your workspace) for a Reels review draft. Use with action='send', a [caption]...[/caption] block and no MEDIA: line; the gateway makes the review video from it, attaches it and publishes this master if the draft is approved.",
+			},
 		},
 		"required": []string{"action", "message"},
 	}
@@ -79,13 +270,23 @@ func (t *MessageTool) Parameters() map[string]any {
 
 func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result {
 	action := argString(args, "action")
-	if action != "send" {
-		return ErrorResult(fmt.Sprintf("unsupported action: %s (only 'send' is supported)", action))
+	if action != "send" && action != "post" {
+		return ErrorResult(fmt.Sprintf("unsupported action: %s (supported: 'send', 'post')", action))
 	}
 
 	message := argString(args, "message")
 	if message == "" {
 		return ErrorResult("message is required")
+	}
+	// The master_sha256 line marks a master-mode Reels draft and is written only
+	// by the gateway (sendReelsMasterDraft); an agent-written one could point an
+	// approval at a different video.
+	reelsMaster := strings.TrimSpace(argString(args, reelsMasterArg))
+	if reelsMaster != "" && action != "send" {
+		return ErrorResult("reels_master is only valid with action='send'")
+	}
+	if action == "send" && len(reelsMasterSHALines(message)) > 0 {
+		return ErrorResult("remove the master_sha256 line: the gateway writes it when you pass reels_master")
 	}
 
 	channel := argString(args, "channel")
@@ -97,12 +298,88 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	}
 
 	target := argString(args, "target")
+	if target == "" && action == "post" {
+		target = t.facebookTarget
+	}
 	if target == "" {
 		target = ToolChatIDFromCtx(ctx)
 	}
 	if target == "" {
 		return ErrorResult("target chat ID is required (no current chat in context)")
 	}
+	if action == "post" && (channel != t.facebookChannel || (target != t.facebookTarget && target != reelsTarget)) {
+		return ErrorResult(fmt.Sprintf("feed post destination must be %s/%s (or %s/%s for an approved Video Factory reel)",
+			t.facebookChannel, t.facebookTarget, t.facebookChannel, reelsTarget))
+	}
+	isContentFactoryReviewTarget := action == "send" && (target == t.getApprovalChannelID() || target == contentFactoryApprovalChannelID)
+	if isContentFactoryReviewTarget {
+		// Every rejection below must run BEFORE the latch is reserved. The latch
+		// is one-shot per run, so validating after reserving turns a recoverable
+		// mistake into a run with no review message and no way to retry.
+		if key := argString(args, "idempotency_key"); key != contentFactoryTerminalKey {
+			return ErrorResult(fmt.Sprintf("ContentFactory review-channel sends require idempotency_key=%q", contentFactoryTerminalKey))
+		}
+		if internalNoisePattern.MatchString(message) {
+			return ErrorResult("Internal status JSON and tool error tracebacks cannot be sent to the review channel. Send a clean article draft, or a plainly worded abort notice.")
+		}
+		// An abort notice may say why the pipeline stopped; a draft may not
+		// carry these phrases. Distinguished by whether an image is attached:
+		// a review draft always ships with one, an abort notice never does.
+		if !embeddedMediaPattern.MatchString(message) && abortNoticePattern.MatchString(message) {
+			// abort notice: allowed through, but recorded so a run that ends
+			// this way is visible without reading the channel.
+			slog.Warn("message.contentfactory_abort_notice", "target", target, "bytes", len(message))
+		} else if abortPhrasePattern.MatchString(message) {
+			return ErrorResult("An article draft cannot contain abort/error phrasing. Send the clean draft, or send the abort notice on its own without an image.")
+		} else if !embeddedMediaPattern.MatchString(message) {
+			// A draft with no image is not reviewable: approval binds the text
+			// and the image of ONE message, so an image sent afterwards can
+			// never join this draft. Runs kept ending this way when the
+			// cf-designer gate rejected a malformed handoff — the director gave
+			// up on the image, sent the text, and only then produced the image,
+			// which then had nowhere to go (2026-09-17, 2026-09-18).
+			return ErrorResult("A review draft must carry its audited image in the SAME message: delegate cf-designer (sync, with AUDIT_VERDICT: PASS and SAFE_TO_SEND_DISCORD: yes each starting their own line), then resend the article with MEDIA:<image path>. If no image can be produced, send an abort notice instead — it must contain the word ABORT.")
+		}
+		// A review draft carrying an image must go out as ONE message: the
+		// approval binds content and media from the single message the reviewer
+		// replies to (rc.ReplyToContent + rc.ReplyToMediaPaths). Chunking the
+		// text into a second message would leave the approver unable to approve
+		// both halves at once, so this fails closed rather than splitting.
+		//
+		// The budget is bytes but the writer's brief is characters, and
+		// Vietnamese runs well over one byte per character — a draft sized at
+		// the top of its allowed character range lands over the limit. Say how
+		// much to cut, in the unit the writer works in, so one revision is enough.
+		if n := reviewTextBytesWithMedia(message); n > maxReviewMessageBytes {
+			overBytes := n - maxReviewMessageBytes
+			text := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(message, ""))
+			cutChars := overBytes
+			if chars := len([]rune(text)); chars > 0 {
+				// Cut using this draft's own bytes-per-character, not a guess.
+				cutChars = int(float64(overBytes) * float64(chars) / float64(n))
+			}
+			return ErrorResult(fmt.Sprintf(
+				"review draft with an image is %d bytes; the platform limit is %d. Remove at least %d characters (~%d bytes) from the article body and resend. It will NOT be truncated, and the draft must stay one message.",
+				n, maxReviewMessageBytes, cutChars+1, overBytes))
+		}
+		if latch := OutboundActionLatchFromCtx(ctx); latch != nil && !latch.TryReserve(contentFactoryTerminalKey) {
+			// The terminal action already happened, so the run is over and the
+			// contract says answer NO_REPLY. End it here rather than returning a
+			// status the agent is free to ignore: a live abort-path test showed
+			// the director re-sending five more times after a successful notice,
+			// each getting the same suppression, until the loop detector killed
+			// the run — a run whose actual work had succeeded.
+			slog.Info("message.contentfactory_terminal_duplicate_suppressed",
+				"channel", channel, "target", target)
+			res := SilentResult("NO_REPLY")
+			res.EndRun = true
+			return res
+		}
+	}
+
+	// An abort notice goes to the same channel but is not something to approve.
+	isReviewDraftSend := isContentFactoryReviewTarget &&
+		(embeddedMediaPattern.MatchString(message) || !abortPhrasePattern.MatchString(message))
 
 	// Self-send guard: prevent agent from sending to its own chat via message tool.
 	// Text self-sends are always blocked (response goes through normal outbound).
@@ -112,9 +389,10 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	// (deliver=false then message MEDIA: blocked unconditionally).
 	ctxChannel := ToolChannelFromCtx(ctx)
 	ctxChatID := ToolChatIDFromCtx(ctx)
+	forward, _ := args["forward"].(bool)
 	isSelfSend := ctxChannel != "" && ctxChatID != "" && channel == ctxChannel && target == ctxChatID
-	if isSelfSend {
-		isMediaSend := embeddedMediaPattern.MatchString(message)
+	if isSelfSend && !forward {
+		isMediaSend := embeddedMediaPattern.MatchString(message) || reelsMaster != ""
 		if !isMediaSend {
 			return ErrorResult("You are already responding to this chat. Your response text will be delivered automatically. Do not use the message tool to send text to your own chat — just include the content in your response text. To deliver files, use write_file with deliver=true instead.")
 		}
@@ -179,6 +457,129 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		return res
 	}
 
+	if reelsMaster != "" {
+		return noticeOnSuccess(t.sendReelsMasterDraft(ctx, channel, target, message, reelsMaster))
+	}
+
+	// action="post": publish the exact Discord-reviewed payload to the fixed
+	// ContentFactory Facebook destination. Reservation happens before dispatch so
+	// duplicate approvals and ambiguous Graph API outcomes fail closed.
+	if action == "post" {
+		forward, _ := args["forward"].(bool)
+		reason := strings.TrimSpace(argString(args, "forward_reason"))
+		if target == reelsTarget {
+			return noticeOnSuccess(t.postReel(ctx, channel, message, forward, reason))
+		}
+		if err := t.validateFeedPostApprovalContext(ctx, forward, reason); err != nil {
+			return ErrorResult(err.Error())
+		}
+		if t.outboundDispatcher == nil {
+			return ErrorResult("post action requires synchronous outbound dispatcher")
+		}
+
+		rc := store.RunContextFromCtx(ctx)
+		if rc == nil || rc.AgentKey == "" {
+			return ErrorResult("feed post requires an authenticated publisher agent")
+		}
+		outMsg := bus.OutboundMessage{
+			Channel:  channel,
+			ChatID:   target,
+			Content:  message,
+			TenantID: rc.TenantID,
+			AgentID:  rc.AgentID,
+			Metadata: map[string]string{
+				"fb_mode":            "feed_post",
+				"publisher_agent_id": rc.AgentKey,
+			},
+		}
+		// Tell the publisher where to announce success. The post id is created
+		// inside the channel and cannot come back here — OutboundDispatcher
+		// returns only an error — so the channel has to send the confirmation
+		// itself. Without this the approver gets nothing after replying "duyệt":
+		// the director is instructed to answer NO_REPLY once its terminal tool
+		// returns, and the only message that did go out was a generic
+		// cross-target forward breadcrumb that never mentions publishing.
+		if origCh, origChat := ToolChannelFromCtx(ctx), ToolChatIDFromCtx(ctx); origCh != "" && origChat != "" {
+			outMsg.Metadata["notify_channel"] = origCh
+			outMsg.Metadata["notify_chat"] = origChat
+			outMsg.Metadata["review_message_id"] = rc.ReplyToMessageID
+		}
+		if strings.TrimSpace(message) == approvedReplyPayloadToken {
+			if res := t.bindApprovedReply(ctx, rc, &outMsg); res != nil {
+				return res
+			}
+		} else if strings.Contains(message, "MEDIA:") {
+			cleanMsg, embeddedMedia, err := t.extractFeedPostMedia(ctx, message)
+			if err != nil {
+				slog.Warn("message.feed_post_media_rejected", "reason", "validation_failed")
+				return ErrorResult("feed post media validation failed")
+			}
+			outMsg.Content = cleanMsg
+			outMsg.Media = embeddedMedia
+		}
+
+		if !feedPostContentMatchesApproval(outMsg.Content, rc.ReplyToContent, rc.ReplyToMedia) {
+			// The approver approved the Discord message, not the model's copy of
+			// it. When that message IS the article, publishing it verbatim is
+			// the binding, so a model that retyped a character wrong must not
+			// block the post. Digest modes stay strict: there the reply is only
+			// a pointer and the text has to come from the model.
+			if !isPlainReviewDraft(rc.ReplyToContent, rc.ReplyToMedia) {
+				return ErrorResult("feed post content does not match the approved Discord reply")
+			}
+			slog.Warn("message.feed_post_rebound_to_review",
+				"reply_to_message_id", rc.ReplyToMessageID,
+				"model_bytes", len(outMsg.Content),
+				"review_bytes", len(rc.ReplyToContent),
+			)
+			outMsg.Media = nil
+			if res := t.bindApprovedReply(ctx, rc, &outMsg); res != nil {
+				return res
+			}
+		}
+		approvedMediaSHA, err := approvedFeedPostMediaSHA(rc.ReplyToMedia, rc.ReplyToMediaCount)
+		if err != nil {
+			slog.Warn("message.feed_post_reply_media_rejected", "error", err)
+			return ErrorResult("approved Discord media metadata is invalid")
+		}
+		cleanupMedia, err := t.bindFeedPostMedia(ctx, outMsg.Media, approvedMediaSHA, maxFeedPostMediaBytes)
+		if err != nil {
+			slog.Warn("message.feed_post_media_mismatch", "reason", "binding_failed")
+			return ErrorResult("feed post media does not match the approved Discord reply")
+		}
+		defer cleanupMedia()
+		if approvedMediaSHA != "" {
+			outMsg.Metadata["approved_media_sha256"] = approvedMediaSHA
+		}
+
+		payloadSHA := feedPostPayloadSHA(outMsg.Content, approvedMediaSHA)
+		reservation, err := t.reserveFeedPost(ctx, rc, channel, target, payloadSHA)
+		if err != nil {
+			slog.Warn("message.feed_post_reservation_rejected", "error_type", fmt.Sprintf("%T", err))
+			return ErrorResult("feed post is already reserved; operator reconciliation is required")
+		}
+
+		slog.Warn("message.feed_post_approval",
+			"channel", channel,
+			"target", target,
+			"reply_to_message_id", rc.ReplyToMessageID,
+			"publisher_agent_id", rc.AgentKey,
+			"reason", reason,
+		)
+		if err := t.outboundDispatcher(ctx, outMsg); err != nil {
+			if markErr := reservation.mark("pending_unknown"); markErr != nil {
+				slog.Error("message.feed_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", markErr))
+			}
+			slog.Error("message.feed_post_dispatch_failed",
+				append([]any{"error_type", fmt.Sprintf("%T", err)}, safeAPIErrorAttrs(err)...)...)
+			return ErrorResult("feed post failed; status is unknown and automatic retry is blocked")
+		}
+		if err := reservation.mark("posted"); err != nil {
+			slog.Error("message.feed_post_reservation_update_failed", "error_type", fmt.Sprintf("%T", err))
+		}
+		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"posted","channel":"%s"}`, channel)))
+	}
+
 	// Handle MEDIA: prefix — send file as attachment instead of text.
 	if filePath, ok := t.resolveMediaPath(ctx, message); ok {
 		return noticeOnSuccess(t.sendMedia(ctx, channel, target, filePath))
@@ -199,12 +600,32 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		if isGroupContext(ctx) {
 			outMsg.Metadata = map[string]string{"group_id": target}
 		}
+		if isReviewDraftSend || (action == "send" && isReelsReviewDraft(message, embeddedMedia)) {
+			if outMsg.Metadata == nil {
+				outMsg.Metadata = map[string]string{}
+			}
+			outMsg.Metadata[MetaContentFactoryReviewDraft] = "true"
+		}
 		t.msgBus.PublishOutbound(outMsg)
 		// Mark each embedded media path as delivered.
 		if dm := DeliveredMediaFromCtx(ctx); dm != nil {
 			for _, att := range embeddedMedia {
 				dm.Mark(att.URL)
 			}
+		}
+		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"sent","channel":"%s","target":"%s"}`, channel, target)))
+	}
+
+	// A text-only review draft still needs its draft flag, which the plain
+	// sender cannot carry; the dispatcher is equally synchronous.
+	if isReviewDraftSend && t.outboundDispatcher != nil {
+		if err := t.outboundDispatcher(ctx, bus.OutboundMessage{
+			Channel:  channel,
+			ChatID:   target,
+			Content:  message,
+			Metadata: map[string]string{"group_id": target, MetaContentFactoryReviewDraft: "true"},
+		}); err != nil {
+			return ErrorResult(fmt.Sprintf("failed to send message: %v", err))
 		}
 		return noticeOnSuccess(SilentResult(fmt.Sprintf(`{"status":"sent","channel":"%s","target":"%s"}`, channel, target)))
 	}
@@ -243,6 +664,434 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	}
 
 	return ErrorResult("no channel sender or message bus available")
+}
+
+// bindApprovedReply replaces the outbound payload with the reviewed Discord
+// message itself: its full text and its single attachment.
+func (t *MessageTool) bindApprovedReply(ctx context.Context, rc *store.RunContext, outMsg *bus.OutboundMessage) *Result {
+	if strings.TrimSpace(rc.ReplyToContent) == "" {
+		return ErrorResult("approved Discord reply has no publishable content")
+	}
+	outMsg.Content = rc.ReplyToContent
+	if len(rc.ReplyToMediaPaths) > 1 {
+		return ErrorResult("approved Discord reply has too many bound media files")
+	}
+	if len(rc.ReplyToMediaPaths) == 1 {
+		resolved, err := t.resolveFeedPostMediaPath(ctx, "MEDIA:"+rc.ReplyToMediaPaths[0])
+		if err != nil {
+			return ErrorResult("approved Discord media path is unavailable")
+		}
+		outMsg.Media = []bus.MediaAttachment{{
+			URL:         resolved,
+			ContentType: mimeFromPath(resolved),
+		}}
+	}
+	return nil
+}
+
+// isPlainReviewDraft reports whether the reviewed Discord message carries the
+// article text itself, as opposed to a digest tag or an attached .md/.txt
+// document that stands in for a longer article.
+func isPlainReviewDraft(replyContent, replyMedia string) bool {
+	if strings.TrimSpace(replyContent) == "" || articleSHAPattern.MatchString(replyContent) {
+		return false
+	}
+	for line := range strings.SplitSeq(replyMedia, "\n") {
+		name, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		name = strings.ToLower(strings.TrimSpace(name))
+		if strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt") {
+			return false
+		}
+	}
+	return true
+}
+
+func feedPostContentMatchesApproval(postContent, replyContent, replyMedia string) bool {
+	postNormalized := normalizeApprovalContent(postContent)
+	if postNormalized == "" {
+		return false
+	}
+	replyNormalized := normalizeApprovalContent(replyContent)
+	if replyNormalized != "" && postNormalized == replyNormalized {
+		return true
+	}
+
+	// Go-computed SHA-256 hex digest match
+	h := sha256.Sum256([]byte(postNormalized))
+	postSHA := hex.EncodeToString(h[:])
+
+	// Match tag embedded in replyContent: [Article SHA-256: <hex>], article_sha256:<hex>, etc.
+	if match := articleSHAPattern.FindStringSubmatch(replyContent); len(match) == 2 {
+		if strings.EqualFold(match[1], postSHA) {
+			return true
+		}
+	}
+
+	// Match attached .md / .txt document hash in replyMedia
+	if replyMedia != "" {
+		lines := strings.Split(replyMedia, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			sep := strings.LastIndexByte(line, '=')
+			if sep <= 0 || sep >= len(line)-1 {
+				continue
+			}
+			filename := strings.ToLower(strings.TrimSpace(line[:sep]))
+			digest := strings.ToLower(strings.TrimSpace(line[sep+1:]))
+			if (strings.HasSuffix(filename, ".md") || strings.HasSuffix(filename, ".txt")) && len(digest) == 64 {
+				if strings.EqualFold(digest, postSHA) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func normalizeApprovalContent(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.TrimSpace(s)
+}
+
+func approvedFeedPostMediaSHA(replyMedia string, attachmentCount int) (string, error) {
+	if attachmentCount < 0 {
+		return "", fmt.Errorf("invalid attachment count")
+	}
+	if replyMedia == "" {
+		if attachmentCount == 0 {
+			return "", nil
+		}
+		return "", fmt.Errorf("approved media digest missing")
+	}
+
+	lines := strings.Split(strings.TrimSpace(replyMedia), "\n")
+	var imageEntries []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		sep := strings.LastIndexByte(line, '=')
+		if sep <= 0 || sep >= len(line)-1 {
+			continue
+		}
+		filename := strings.ToLower(strings.TrimSpace(line[:sep]))
+		if !strings.HasSuffix(filename, ".md") && !strings.HasSuffix(filename, ".txt") {
+			imageEntries = append(imageEntries, line)
+		}
+	}
+
+	if len(imageEntries) == 0 {
+		return "", nil
+	}
+	if len(imageEntries) > 1 {
+		return "", fmt.Errorf("expected at most one approved media attachment")
+	}
+
+	entry := imageEntries[0]
+	separator := strings.LastIndexByte(entry, '=')
+	if separator <= 0 || separator >= len(entry)-1 {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	digest := strings.ToLower(strings.TrimSpace(entry[separator+1:]))
+	if len(digest) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid approved media digest")
+	}
+	return digest, nil
+}
+
+func (t *MessageTool) bindFeedPostMedia(
+	ctx context.Context,
+	media []bus.MediaAttachment,
+	approvedSHA string,
+	maxBytes int64,
+) (func(), error) {
+	if len(media) == 0 {
+		if approvedSHA != "" {
+			return nil, fmt.Errorf("approved payload has media but post does not")
+		}
+		return func() {}, nil
+	}
+	if len(media) != 1 || approvedSHA == "" {
+		return nil, fmt.Errorf("post media count does not match approved payload")
+	}
+
+	preInfo, err := os.Lstat(media[0].URL)
+	if err != nil || preInfo.Mode()&os.ModeSymlink != 0 || !preInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("approved media source is not a regular file")
+	}
+	source, err := os.Open(media[0].URL)
+	if err != nil {
+		return nil, fmt.Errorf("open approved media: %w", err)
+	}
+	defer source.Close()
+	openedInfo, err := source.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(preInfo, openedInfo) {
+		return nil, fmt.Errorf("approved media identity changed")
+	}
+	if openedInfo.Size() > maxBytes {
+		return nil, fmt.Errorf("approved media exceeds size limit")
+	}
+
+	stateRoot := t.feedPostStateRoot(ctx)
+	if stateRoot == "" {
+		return nil, fmt.Errorf("gateway data directory unavailable for media staging")
+	}
+	stagingDir := filepath.Join(stateRoot, filepath.FromSlash(feedPostStagingDir))
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create media staging directory: %w", err)
+	}
+	staged, err := os.CreateTemp(stagingDir, "upload-*.media")
+	if err != nil {
+		return nil, fmt.Errorf("create media snapshot: %w", err)
+	}
+	stagedPath := staged.Name()
+	cleanup := func() { _ = os.Remove(stagedPath) }
+	if err := staged.Chmod(0o600); err != nil {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("secure media snapshot: %w", err)
+	}
+
+	h := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(staged, h), io.LimitReader(source, maxBytes+1))
+	if copyErr != nil || written > maxBytes {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("snapshot approved media")
+	}
+	if err := staged.Sync(); err != nil {
+		staged.Close()
+		cleanup()
+		return nil, fmt.Errorf("sync media snapshot: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("close media snapshot: %w", err)
+	}
+	if actualSHA := hex.EncodeToString(h.Sum(nil)); actualSHA != approvedSHA {
+		cleanup()
+		return nil, fmt.Errorf("post media digest mismatch")
+	}
+
+	media[0].URL = stagedPath
+	return cleanup, nil
+}
+
+func hashFeedPostFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func feedPostPayloadSHA(content, mediaSHA string) string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, normalizeApprovalContent(content))
+	_, _ = io.WriteString(h, "\x00")
+	_, _ = io.WriteString(h, mediaSHA)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (t *MessageTool) feedPostStateRoot(ctx context.Context) string {
+	if t.dataDir != "" {
+		return t.dataDir
+	}
+	if teamRoot := ToolTeamRootFromCtx(ctx); teamRoot != "" {
+		return teamRoot
+	}
+	return t.workspace
+}
+
+// feedPostLedgerPath is the ledger entry of one approved review message.
+func (t *MessageTool) feedPostLedgerPath(ctx context.Context, rc *store.RunContext, channel, target string) (string, error) {
+	ledgerRoot := t.feedPostStateRoot(ctx)
+	if ledgerRoot == "" {
+		return "", fmt.Errorf("gateway data directory unavailable for feed post ledger")
+	}
+	keyHash := sha256.Sum256([]byte(strings.Join([]string{
+		rc.TenantID.String(),
+		channel,
+		target,
+		rc.ReplyToMessageID,
+	}, "\x00")))
+	return filepath.Join(ledgerRoot, filepath.FromSlash(feedPostLedgerDir), hex.EncodeToString(keyHash[:])+".json"), nil
+}
+
+// feedPostReserved reports whether this review message already has a ledger
+// entry (published, in flight or of unknown outcome). Only a definite "no
+// entry" answers false: an unreadable ledger must not invite a re-post.
+func (t *MessageTool) feedPostReserved(ctx context.Context, rc *store.RunContext, channel, target string) bool {
+	path, err := t.feedPostLedgerPath(ctx, rc, channel, target)
+	if err != nil {
+		return true
+	}
+	_, err = os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+func (t *MessageTool) reserveFeedPost(
+	ctx context.Context,
+	rc *store.RunContext,
+	channel string,
+	target string,
+	payloadSHA string,
+) (*feedPostReservation, error) {
+	path, err := t.feedPostLedgerPath(ctx, rc, channel, target)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create feed post ledger: %w", err)
+	}
+	now := time.Now().UTC()
+	entry := feedPostLedgerEntry{
+		Version:          1,
+		Status:           "pending",
+		TenantID:         rc.TenantID.String(),
+		Channel:          channel,
+		Target:           target,
+		ReplyToMessageID: rc.ReplyToMessageID,
+		PayloadSHA256:    payloadSHA,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("feed post reservation already exists")
+		}
+		return nil, fmt.Errorf("create feed post reservation: %w", err)
+	}
+	reservation := &feedPostReservation{path: path, entry: entry}
+	if err := json.NewEncoder(f).Encode(entry); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("write feed post reservation: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("sync feed post reservation: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close feed post reservation: %w", err)
+	}
+	return reservation, nil
+}
+
+// release deletes a reservation whose publish is known not to have started, so
+// the same approved draft can be approved again. Only for failures the
+// publisher marks as certainly unpublished; anything ambiguous stays reserved.
+func (r *feedPostReservation) release() error {
+	return os.Remove(r.path)
+}
+
+func (r *feedPostReservation) mark(status string) error {
+	r.entry.Status = status
+	r.entry.UpdatedAt = time.Now().UTC()
+	f, err := os.OpenFile(r.path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(f).Encode(r.entry); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func (t *MessageTool) validateFeedPostApprovalContext(ctx context.Context, forward bool, reason string) error {
+	return t.validatePublishApprovalContext(ctx, forward, reason, t.getFacebookTarget())
+}
+
+// validatePublishApprovalContext checks that the current run is a human's
+// approval of one bot-authored review message, given in the one review channel
+// that may publish to target. Each target has its own channel, and the two
+// never overlap: the ContentFactory review channel publishes feed posts only,
+// and a Reels review channel is named by the Discord instance's own config
+// (rc.ApprovalPublishTarget), never by anything the model says.
+func (t *MessageTool) validatePublishApprovalContext(ctx context.Context, forward bool, reason, target string) error {
+	if !forward || reason == "" {
+		return fmt.Errorf("feed post requires explicit forward=true and forward_reason quoting the user's approval")
+	}
+	if !MessageTargetEnforced(ToolSessionKeyFromCtx(ctx)) {
+		return fmt.Errorf("feed post requires a live user approval session")
+	}
+	ctxChannel := ToolChannelFromCtx(ctx)
+	ctxChatID := ToolChatIDFromCtx(ctx)
+	if ctxChannel == "" || ctxChatID == "" {
+		return fmt.Errorf("feed post requires an origin channel and chat for approval evidence")
+	}
+	rc := store.RunContextFromCtx(ctx)
+	if target == reelsTarget {
+		if rc == nil || rc.ApprovalPublishTarget != reelsTarget {
+			return fmt.Errorf("reels approval must originate from a channel configured as a Reels review channel")
+		}
+		if ctxChatID == t.getApprovalChannelID() || ctxChatID == contentFactoryApprovalChannelID {
+			return fmt.Errorf("the ContentFactory review channel publishes feed posts only")
+		}
+	} else if ctxChatID != t.getApprovalChannelID() {
+		return fmt.Errorf("feed post approval must originate from the ContentFactory review channel")
+	}
+	channelType := ToolChannelTypeFromCtx(ctx)
+	if channelType != "" && channelType != "discord" {
+		return fmt.Errorf("feed post approval must originate from Discord")
+	}
+	if channelType == "" && !strings.Contains(strings.ToLower(ctxChannel), "discord") {
+		return fmt.Errorf("feed post approval must originate from Discord")
+	}
+	if rc == nil || strings.TrimSpace(rc.SenderID) == "" {
+		return fmt.Errorf("feed post approval requires an authenticated sender")
+	}
+	if !rc.ApprovalSenderAllowed {
+		return fmt.Errorf("feed post approval sender is not explicitly allowlisted")
+	}
+	if strings.TrimSpace(rc.ReplyToMessageID) == "" {
+		return fmt.Errorf("feed post approval must be a structured reply to reviewed content")
+	}
+	if strings.TrimSpace(rc.ChannelBotUserID) == "" || rc.ReplyToAuthorID != rc.ChannelBotUserID {
+		return fmt.Errorf("feed post approval must reply to a bot-authored review message")
+	}
+	if !rc.ReplyToMediaComplete {
+		return fmt.Errorf("feed post approval media evidence is incomplete")
+	}
+	if !IsPositiveFeedPostApproval(rc.CurrentMessage) {
+		return fmt.Errorf("feed post requires a positive approval command in the current message")
+	}
+	lowerReason := strings.ToLower(reason)
+	if !strings.Contains(lowerReason, "duyệt") &&
+		!strings.Contains(lowerReason, "approve") &&
+		!strings.Contains(lowerReason, "đăng") &&
+		!strings.Contains(lowerReason, "post") {
+		return fmt.Errorf("feed post approval reason must quote the user's approval command")
+	}
+	return nil
 }
 
 // validateChannelTenant checks the target channel belongs to the current tenant.
@@ -287,12 +1136,32 @@ func (t *MessageTool) sendMedia(ctx context.Context, channel, target, filePath s
 		meta = map[string]string{"group_id": target}
 	}
 
+	// Wait for the real delivery outcome. Publishing alone is fire-and-forget, so this used to
+	// answer "sent" even when the upload failed — the daily report then marked itself published
+	// against a Zalo group that received nothing. Media is the case worth waiting for: it is the
+	// payload users verify by eye, and an upload can fail long after the queue accepts it.
+	result := make(chan error, 1)
 	t.msgBus.PublishOutbound(bus.OutboundMessage{
 		Channel:  channel,
 		ChatID:   target,
 		Media:    []bus.MediaAttachment{{URL: filePath, ContentType: mimeFromPath(filePath)}},
 		Metadata: meta,
+		Result:   result,
 	})
+
+	select {
+	case err := <-result:
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("send failed on channel %s: %v", channel, err))
+		}
+	case <-time.After(mediaSendTimeout):
+		return ErrorResult(fmt.Sprintf(
+			"send to %s not confirmed within %s — check the destination before treating it as sent",
+			channel, mediaSendTimeout))
+	case <-ctx.Done():
+		return ErrorResult(fmt.Sprintf("send to %s cancelled: %v", channel, ctx.Err()))
+	}
+
 	// Mark delivered so subsequent send_file or message(MEDIA:) calls detect the duplicate.
 	if dm := DeliveredMediaFromCtx(ctx); dm != nil {
 		dm.Mark(filePath)
@@ -304,6 +1173,105 @@ func (t *MessageTool) sendMedia(ctx context.Context, channel, target, filePath s
 		"media":   filepath.Base(filePath),
 	})
 	return SilentResult(string(out))
+}
+
+// extractFeedPostMedia scans a feed post body for MEDIA: image references.
+// Unlike ordinary message sends, feed posts fail closed: every MEDIA token must
+// resolve to a workspace-owned regular image file before any public post occurs.
+func (t *MessageTool) extractFeedPostMedia(ctx context.Context, message string) (string, []bus.MediaAttachment, error) {
+	lines := strings.Split(message, "\n")
+	var cleaned []string
+	var media []bus.MediaAttachment
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		matches := embeddedMediaPattern.FindAllString(trimmed, -1)
+		if len(matches) == 0 {
+			if strings.Contains(trimmed, "MEDIA:") {
+				return "", nil, fmt.Errorf("malformed MEDIA token")
+			}
+			cleaned = append(cleaned, line)
+			continue
+		}
+		for _, raw := range matches {
+			resolved, err := t.resolveFeedPostMediaPath(ctx, raw)
+			if err != nil {
+				return "", nil, err
+			}
+			media = append(media, bus.MediaAttachment{
+				URL:         resolved,
+				ContentType: mimeFromPath(resolved),
+			})
+		}
+		remainder := strings.TrimSpace(embeddedMediaPattern.ReplaceAllString(line, ""))
+		if strings.Contains(remainder, "MEDIA:") {
+			return "", nil, fmt.Errorf("malformed MEDIA token")
+		}
+		if remainder != "" {
+			cleaned = append(cleaned, remainder)
+		}
+	}
+
+	if len(media) > 1 {
+		return "", nil, fmt.Errorf("feed posts support exactly one image attachment, got %d", len(media))
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n")), media, nil
+}
+
+func (t *MessageTool) resolveFeedPostMediaPath(ctx context.Context, s string) (string, error) {
+	return t.resolvePublishMediaPath(ctx, s, "image/")
+}
+
+// resolvePublishMediaPath resolves a MEDIA token to a workspace-owned regular
+// file whose type starts with mimePrefix: "image/" for feed posts, "video/" for Reels.
+func (t *MessageTool) resolvePublishMediaPath(ctx context.Context, s, mimePrefix string) (string, error) {
+	filePath, ok := t.resolveMediaPath(ctx, s)
+	if !ok {
+		return "", fmt.Errorf("invalid MEDIA path")
+	}
+	contentType := mimeFromPath(filePath)
+	if !strings.HasPrefix(contentType, mimePrefix) {
+		if mimePrefix == "image/" {
+			return "", fmt.Errorf("feed posts only support image media, got %s", contentType)
+		}
+		return "", fmt.Errorf("this post needs %s media, got %s", strings.TrimSuffix(mimePrefix, "/"), contentType)
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("stat media file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("media file must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("media file must be a regular file")
+	}
+	if err := checkHardlink(filePath); err != nil {
+		return "", err
+	}
+
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		workspace = t.workspace
+	}
+	if effectiveRestrict(ctx, t.restrict) {
+		if workspace == "" {
+			return "", fmt.Errorf("workspace is required for feed post media")
+		}
+		wsReal, err := filepath.EvalSymlinks(workspace)
+		if err != nil {
+			return "", fmt.Errorf("resolve workspace: %w", err)
+		}
+		realPath, err := filepath.EvalSymlinks(filePath)
+		if err != nil {
+			return "", fmt.Errorf("resolve media file: %w", err)
+		}
+		if !isPathInside(realPath, wsReal) {
+			return "", fmt.Errorf("media file outside workspace")
+		}
+		return realPath, nil
+	}
+	return filePath, nil
 }
 
 // extractEmbeddedMedia scans a multi-line message for embedded MEDIA: path references.
@@ -474,4 +1442,35 @@ func isInTempDir(path string) bool {
 	}
 	tmpDir := filepath.Clean(os.TempDir())
 	return strings.HasPrefix(cleaned, tmpDir+string(filepath.Separator))
+}
+
+// CleanStagedMedia removes files older than maxAge from the feed post staging directory.
+func CleanStagedMedia(stagingDir string, maxAge time.Duration) (int, error) {
+	if stagingDir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	now := time.Now()
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".media") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > maxAge {
+			if err := os.Remove(filepath.Join(stagingDir, entry.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
 }

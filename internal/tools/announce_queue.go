@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type AnnounceMetadata struct {
 	OriginLocalKey   string // composite key with topic/thread suffix for routing
 	OriginUserID     string
 	OriginSenderID   string // real acting sender; preserves permission attribution through re-ingress (#915)
+	OriginSenderName string // that sender's display name; dropped together with the sender
 	OriginRole       string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
 	OriginSessionKey string // exact parent session key (WS uses non-standard format)
 	OriginTenantID   uuid.UUID // parent tenant for announce routing
@@ -86,6 +88,8 @@ func (aq *AnnounceQueue) Enqueue(sessionKey string, item AnnounceQueueItem, meta
 	if !ok {
 		sq = &sessionQueue{meta: meta}
 		aq.queues[sessionKey] = sq
+	} else {
+		sq.meta = mergeAnnouncePrivilege(sessionKey, sq.meta, meta)
 	}
 
 	sq.items = append(sq.items, item)
@@ -227,4 +231,33 @@ func BuildReplyInstruction(roster SubagentRoster) string {
 		"(don't mention system/log/stats/session details or announce type), " +
 		"and do NOT copy the [System Message] block verbatim. " +
 		"Reply ONLY: NO_REPLY if this exact result was already delivered to the user."
+}
+
+// mergeAnnouncePrivilege keeps the batch meta of the first item but drops the
+// sender and role as soon as a later item came from a different sender or
+// role: one batched announce must not carry one user's permissions over
+// another user's results (#915). Once dropped they stay dropped.
+func mergeAnnouncePrivilege(sessionKey string, batch, next AnnounceMetadata) AnnounceMetadata {
+	if SenderIdentity(batch.OriginSenderID) == SenderIdentity(next.OriginSenderID) && batch.OriginRole == next.OriginRole {
+		if batch.OriginSenderName == "" {
+			batch.OriginSenderName = next.OriginSenderName
+		}
+		return batch
+	}
+	if batch.OriginSenderID != "" || batch.OriginRole != "" {
+		slog.Warn("security.subagent_announce.mixed_origin",
+			"session", sessionKey, "parent", batch.ParentAgent, "layer", "queue")
+	}
+	batch.OriginSenderID = ""
+	batch.OriginSenderName = ""
+	batch.OriginRole = ""
+	return batch
+}
+
+// SenderIdentity returns the stable part of a channel sender ID. Channels may
+// send "id|display name"; the display part can change between messages of the
+// same user, so identity comparisons use the ID before the first "|".
+func SenderIdentity(senderID string) string {
+	id, _, _ := strings.Cut(senderID, "|")
+	return id
 }

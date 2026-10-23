@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
@@ -10,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tokencount"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -33,12 +35,29 @@ func (l *Loop) runViaPipeline(ctx context.Context, req RunRequest) (*RunResult, 
 		}
 	}
 
+	// Own the per-run outbound latch here (injectContext reuses it) so the
+	// terminal-action check below can read what the run actually did.
+	ctx = tools.WithOutboundActionLatch(ctx, tools.NewOutboundActionLatch())
+
 	p := pipeline.NewDefaultPipeline(deps)
 	state := pipeline.NewRunState(input, nil, model, provider)
 
 	pResult, err := p.Run(ctx, state)
 	if err != nil {
 		return nil, err
+	}
+	// A run that finishes without its required terminal action is a failure the
+	// pipeline otherwise reports as success: the loop ends whenever the model
+	// returns no tool call, so narrating the next step terminates the run with
+	// status=ok and nothing delivered. Alert instead of letting it pass silently.
+	if isPipelineRun(&req) && tools.ContentFactoryTerminalActionPending(ctx, l.id) {
+		slog.Warn("contentfactory.run_without_terminal_action",
+			"agent", l.id,
+			"run_id", req.RunID,
+			"session_key", req.SessionKey,
+			"iterations", pResult.Iterations,
+			"final_content", truncateStr(pResult.Content, 200),
+		)
 	}
 	return convertRunResult(pResult), nil
 }

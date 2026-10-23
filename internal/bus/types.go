@@ -11,10 +11,11 @@ import (
 // MediaFile represents an inbound media file with its MIME type.
 // Used throughout the media pipeline to preserve content type from channel download to storage.
 type MediaFile struct {
-	Path     string `json:"path"`
-	MimeType string `json:"mime_type,omitempty"` // e.g. "application/pdf", "image/jpeg"
-	Filename string `json:"filename,omitempty"`  // original user-provided filename, e.g. "Báo cáo Q4.pdf"; empty → UUID fallback in persistMedia
-	Caption  string `json:"caption,omitempty"`   // optional outbound caption attached to this file
+	Path          string `json:"path"`
+	MimeType      string `json:"mime_type,omitempty"` // e.g. "application/pdf", "image/jpeg"
+	Filename      string `json:"filename,omitempty"`  // original user-provided filename, e.g. "Báo cáo Q4.pdf"; empty → UUID fallback in persistMedia
+	Caption       string `json:"caption,omitempty"`   // optional outbound caption attached to this file
+	PreserveBytes bool   `json:"-"`                   // trusted approval media must retain the exact reviewed bytes for digest binding
 }
 
 // InboundMessage represents a message received from a channel (Telegram, Discord, etc.)
@@ -44,6 +45,24 @@ type OutboundMessage struct {
 	TenantID         uuid.UUID         `json:"tenant_id,omitempty"`          // tenant scope for per-tenant TTS
 	AgentID          uuid.UUID         `json:"agent_id,omitempty"`           // agent scope for per-agent TTS voice override
 	AgentOtherConfig []byte            `json:"agent_other_config,omitempty"` // agent's other_config for TTS voice/model
+
+	// Result, when non-nil, receives the delivery outcome (nil = delivered) once the dispatcher
+	// has called the channel's Send. Publishing is otherwise fire-and-forget, which let the
+	// message tool answer `{"status":"sent"}` for sends that never reached the recipient.
+	// MUST be buffered (cap >= 1); the dispatcher never blocks on it.
+	Result chan error `json:"-"`
+}
+
+// Deliver reports the outcome to the publisher, if it asked for one. Safe on a nil/unbuffered
+// channel and safe to call from any dispatcher exit path.
+func (m OutboundMessage) Deliver(err error) {
+	if m.Result == nil {
+		return
+	}
+	select {
+	case m.Result <- err:
+	default:
+	}
 }
 
 // MediaAttachment represents a media file to be sent with a message.

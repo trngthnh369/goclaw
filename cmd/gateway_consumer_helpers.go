@@ -190,18 +190,39 @@ func resolveChannelType(channelMgr *channels.Manager, name string) string {
 	return channelMgr.ChannelTypeForName(name)
 }
 
+// resolveErrorNoticeLocale returns the failure-notice locale the named channel
+// opted into, or "" when it has none (nil manager, unknown channel, or off).
+func resolveErrorNoticeLocale(channelMgr *channels.Manager, name string) string {
+	if channelMgr == nil || name == "" {
+		return ""
+	}
+	return channelMgr.ErrorNoticeLocale(name)
+}
+
 // resolveSenderName extracts the sender display name from channel metadata.
 // Checks "sender_name" (Feishu), "first_name" (Telegram), "user_name" (WhatsApp).
 // Sanitizes to prevent prompt injection via newlines/control chars.
 func resolveSenderName(msg bus.InboundMessage) string {
 	for _, key := range []string{"sender_name", "first_name", "user_name", "push_name", "display_name"} {
 		if name := msg.Metadata[key]; name != "" {
-			clean := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(strings.TrimSpace(name))
-			if len([]rune(clean)) > 100 {
-				clean = string([]rune(clean)[:100])
-			}
-			return clean
+			return sanitizeSenderName(name)
 		}
 	}
 	return ""
+}
+
+// sanitizeSenderName flattens a display name to one line of at most 100 runes
+// to prevent prompt injection via newlines/control chars.
+func sanitizeSenderName(name string) string {
+	clean := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(strings.TrimSpace(name))
+	if len([]rune(clean)) > 100 {
+		clean = string([]rune(clean)[:100])
+	}
+	return clean
+}
+
+// groupScopeUserID is the user scope shared by everyone in a group chat
+// ("group:{channel}:{chatID}"): context files, memory and workspace dir.
+func groupScopeUserID(channel, chatID string) string {
+	return fmt.Sprintf("group:%s:%s", channel, chatID)
 }

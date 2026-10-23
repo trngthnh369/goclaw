@@ -65,6 +65,21 @@ func TestExecuteWithRetry_AllFail(t *testing.T) {
 	}
 }
 
+func TestExecuteWithRetry_PermanentErrorNotRetried(t *testing.T) {
+	callCount := 0
+	_, attempts, err := ExecuteWithRetry(func() (string, error) {
+		callCount++
+		return "", Permanent(fmt.Errorf("loop killed"))
+	}, RetryConfig{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: 10 * time.Millisecond})
+
+	if err == nil || err.Error() != "loop killed" {
+		t.Fatalf("expected the permanent error back, got %v", err)
+	}
+	if callCount != 1 || attempts != 1 {
+		t.Errorf("expected 1 call and 1 attempt, got %d calls, %d attempts", callCount, attempts)
+	}
+}
+
 func TestExecuteWithRetry_ZeroRetries(t *testing.T) {
 	callCount := 0
 	_, _, err := ExecuteWithRetry(func() (string, error) {

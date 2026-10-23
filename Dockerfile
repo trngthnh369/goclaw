@@ -8,7 +8,7 @@ ARG ENABLE_EMBEDUI=false
 # BuildKit skips this stage entirely when ENABLE_EMBEDUI=false
 # because no downstream stage in the dependency graph references it.
 FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 # Copy .npmrc first so pnpm resolves musl native bindings (needed on Alpine).
 # The lockfile already includes musl entries thanks to supportedArchitectures in .npmrc.
@@ -89,7 +89,7 @@ RUN set -eux; \
         apk add --no-cache docker-cli; \
     fi; \
     if [ "$ENABLE_FULL_SKILLS" = "true" ]; then \
-        apk add --no-cache python3 py3-pip nodejs npm pandoc github-cli poppler-utils bash; \
+        apk add --no-cache python3 py3-pip nodejs npm pandoc github-cli poppler-utils bash ffmpeg; \
         pip3 install --no-cache-dir --break-system-packages \
             -r /tmp/requirements-base.txt -r /tmp/requirements-skills.txt; \
         npm install -g --cache /tmp/npm-cache docx@^9.6.1 pptxgenjs@^4.0.1 @googleworkspace/cli@0.22.5; \
@@ -107,6 +107,13 @@ RUN set -eux; \
     if [ "$ENABLE_CLAUDE_CLI" = "true" ]; then \
         npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@^2.1.91; \
         rm -rf /tmp/npm-cache; \
+    fi; \
+    # Execute-only ffmpeg/ffprobe for the gateway's Reels review cuts: exec'ing an \
+    # unreadable binary makes the child non-dumpable (see docker-entrypoint.sh). \
+    if [ -f /usr/bin/ffmpeg ] && [ -f /usr/bin/ffprobe ]; then \
+        install -d -o root -g root -m 0755 /usr/libexec/goclaw; \
+        install -o root -g root -m 0111 /usr/bin/ffmpeg /usr/libexec/goclaw/ffmpeg; \
+        install -o root -g root -m 0111 /usr/bin/ffprobe /usr/libexec/goclaw/ffprobe; \
     fi; \
     rm -f /tmp/requirements-base.txt /tmp/requirements-skills.txt
 

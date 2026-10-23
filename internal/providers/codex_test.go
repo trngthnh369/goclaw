@@ -1085,6 +1085,191 @@ func TestCodexProviderBuildRequestBodyWithImages(t *testing.T) {
 	}
 }
 
+func TestCodexProviderChatStreamReadsCachedInputTokens(t *testing.T) {
+	cases := []struct {
+		name      string
+		usage     string
+		wantCache int
+	}{
+		{"with cached share", `{"input_tokens":28534,"input_tokens_details":{"cached_tokens":27904},"output_tokens":105,"total_tokens":28639}`, 27904},
+		{"without details", `{"input_tokens":12097,"output_tokens":40,"total_tokens":12137}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"ok"}`)
+				fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":`+tc.usage+`}}`)
+				fmt.Fprint(w, "data: [DONE]\n\n")
+			}))
+			defer server.Close()
+
+			p := NewCodexProvider("openai-codex", &staticTokenSource{token: "test"}, server.URL, "gpt-6-sol")
+			p.retryConfig.Attempts = 1
+
+			result, err := p.ChatStream(context.Background(), ChatRequest{
+				Messages: []Message{{Role: "user", Content: "Hi"}},
+			}, func(StreamChunk) {})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			if result.Usage == nil {
+				t.Fatal("Usage is nil")
+			}
+			if result.Usage.CacheReadTokens != tc.wantCache {
+				t.Errorf("CacheReadTokens = %d, want %d", result.Usage.CacheReadTokens, tc.wantCache)
+			}
+			// input_tokens already contains the cached share; billing must not add it twice.
+			if got, want := result.Usage.PromptTokensIncludeCachedSegments, tc.wantCache > 0; got != want {
+				t.Errorf("PromptTokensIncludeCachedSegments = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexProviderBuildRequestBodyPromptCacheKey(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	msgs := []Message{{Role: "user", Content: "Hi"}}
+
+	withKey := p.buildRequestBody(ChatRequest{Messages: msgs, Options: map[string]any{OptPromptCacheKey: "goclaw-abc"}}, true)
+	if withKey["prompt_cache_key"] != "goclaw-abc" {
+		t.Errorf("prompt_cache_key = %v, want goclaw-abc", withKey["prompt_cache_key"])
+	}
+
+	withoutKey := p.buildRequestBody(ChatRequest{Messages: msgs}, true)
+	if _, ok := withoutKey["prompt_cache_key"]; ok {
+		t.Errorf("prompt_cache_key present without the option: %v", withoutKey["prompt_cache_key"])
+	}
+}
+
+func TestCodexProviderChatStreamSendsSessionIDHeaderFromCacheKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		options map[string]any
+		want    string
+	}{
+		{"with cache key", map[string]any{OptPromptCacheKey: "goclaw-abc"}, "goclaw-abc"},
+		{"without cache key", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("session_id")
+				writeSSEDone(w)
+			}))
+			defer server.Close()
+
+			p := NewCodexProvider("openai-codex", &staticTokenSource{token: "test"}, server.URL, "gpt-6-sol")
+			p.retryConfig.Attempts = 1
+
+			_, err := p.ChatStream(context.Background(), ChatRequest{
+				Messages: []Message{{Role: "user", Content: "Hi"}},
+				Options:  tc.options,
+			}, func(StreamChunk) {})
+			if err != nil {
+				t.Fatalf("ChatStream: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("session_id header = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexBuildRequestBody_DynamicPromptLeadsInput(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	system := "Stable persona and tools.\n\n" + CacheBoundaryMarker + "\n\n- User: Turti (ID: 1)\nCurrent date: 2026-09-28"
+
+	req := ChatRequest{Messages: []Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+		{Role: "user", Content: "current question"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "exec", Arguments: map[string]any{"command": "ls"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "file.txt"},
+	}}
+
+	body := p.buildRequestBody(req, true)
+
+	if got := body["instructions"]; got != "Stable persona and tools." {
+		t.Errorf("instructions = %q, want only the stable part", got)
+	}
+	input := body["input"].([]any)
+	var roles []string
+	for _, it := range input {
+		m := it.(map[string]any)
+		if r, ok := m["role"].(string); ok {
+			roles = append(roles, r)
+		} else {
+			roles = append(roles, m["type"].(string))
+		}
+	}
+	want := []string{"developer", "user", "assistant", "user", "function_call", "function_call_output"}
+	if strings.Join(roles, ",") != strings.Join(want, ",") {
+		t.Fatalf("input order = %v, want %v", roles, want)
+	}
+	dev := input[0].(map[string]any)["content"].(string)
+	if !strings.Contains(dev, "- User: Turti") || strings.Contains(dev, CacheBoundaryMarker) {
+		t.Errorf("developer content = %q, want the dynamic part without the marker", dev)
+	}
+}
+
+func TestCodexBuildRequestBody_NoBoundaryKeepsInstructions(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	body := p.buildRequestBody(ChatRequest{Messages: []Message{
+		{Role: "system", Content: "Plain prompt."},
+		{Role: "user", Content: "Hi"},
+	}}, true)
+
+	if body["instructions"] != "Plain prompt." {
+		t.Errorf("instructions = %q, want unchanged", body["instructions"])
+	}
+	if n := len(body["input"].([]any)); n != 1 {
+		t.Errorf("input len = %d, want 1 (no developer message)", n)
+	}
+}
+
+// The ChatGPT backend only reuses cache when a request extends an earlier one
+// exactly, so with an unchanged per-turn part the next turn's request (and a
+// mid-turn warning) must start with the previous request byte for byte.
+func TestCodexBuildRequestBody_NextTurnExtendsPreviousRequest(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-6-sol")
+	system := "Stable.\n\n" + CacheBoundaryMarker + "\n\n- User: Turti (ID: 1)"
+	turn := []Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+		{Role: "user", Content: "current question"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "team_tasks", Arguments: map[string]any{"action": "create"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "task created"},
+	}
+	cases := map[string][]Message{
+		"mid-turn warning": append(append([]Message{}, turn...),
+			Message{Role: "user", Content: "[loop detector] stop re-reading the same file"}),
+		"announce turn": append(append([]Message{}, turn...),
+			Message{Role: "assistant", Content: "Task assigned, waiting for the result."},
+			Message{Role: "user", Content: "[System Message] Team member completed task."}),
+	}
+
+	prev := p.buildRequestBody(ChatRequest{Messages: turn}, true)
+	prevInput, _ := json.Marshal(prev["input"])
+	prevPrefix := strings.TrimSuffix(string(prevInput), "]")
+
+	for name, msgs := range cases {
+		t.Run(name, func(t *testing.T) {
+			next := p.buildRequestBody(ChatRequest{Messages: msgs}, true)
+			if next["instructions"] != prev["instructions"] {
+				t.Errorf("instructions changed: %q -> %q", prev["instructions"], next["instructions"])
+			}
+			nextInput, _ := json.Marshal(next["input"])
+			if !strings.HasPrefix(string(nextInput), prevPrefix+",") {
+				t.Errorf("input does not extend the previous request\nprev: %s\nnext: %s", prevInput, nextInput)
+			}
+		})
+	}
+}
+
 func TestCodexProviderRetriesPreOutputResponseFailed(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -217,6 +217,9 @@ func RegisterOpenAIPatterns(c *DefaultClassifier) {
 		{Contains: "model_is_deactivated", Reason: FailoverModelNotFound},
 		{Contains: "model not found", Reason: FailoverModelNotFound},
 		{Contains: "does not exist", Reason: FailoverModelNotFound},
+		{Contains: "get auth token", Reason: FailoverAuth},
+		{Contains: "no route-eligible", Reason: FailoverBilling},
+		{Contains: "usage cap exceeded", Reason: FailoverBilling},
 	})
 }
 

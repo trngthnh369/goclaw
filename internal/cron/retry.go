@@ -1,9 +1,29 @@
 package cron
 
 import (
+	"errors"
 	"math/rand/v2"
 	"time"
 )
+
+// PermanentError marks a job failure that a retry cannot fix and may make
+// worse, such as an agent run stopped by the loop detector: running the job
+// again repeats every side effect the first attempt already produced.
+type PermanentError struct {
+	Err error
+}
+
+func (e *PermanentError) Error() string { return e.Err.Error() }
+
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+// Permanent wraps err so ExecuteWithRetry returns it without retrying.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &PermanentError{Err: err}
+}
 
 // RetryConfig controls exponential backoff retry for failed cron jobs.
 type RetryConfig struct {
@@ -28,6 +48,9 @@ func ExecuteWithRetry(fn func() (string, error), cfg RetryConfig) (result string
 		result, err = fn()
 		if err == nil {
 			return result, attempt + 1, nil
+		}
+		if _, ok := errors.AsType[*PermanentError](err); ok {
+			return "", attempt + 1, err
 		}
 
 		if attempt < cfg.MaxRetries {

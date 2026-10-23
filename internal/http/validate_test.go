@@ -4,17 +4,21 @@ import (
 	"testing"
 )
 
-func TestFilterAllowedKeys_ChannelInstance_IncludesName(t *testing.T) {
-	input := map[string]any{"name": "my-bot", "channel_type": "telegram", "evil_field": "hack"}
+func TestFilterAllowedKeys_ChannelInstanceIdentityIsImmutable(t *testing.T) {
+	input := map[string]any{
+		"name":         "renamed-bot",
+		"channel_type": "discord",
+		"display_name": "Renamed Bot",
+	}
 	result := filterAllowedKeys(input, channelInstanceAllowedFields)
-	if result["name"] != "my-bot" {
-		t.Error("expected 'name' to be retained")
+	if _, ok := result["name"]; ok {
+		t.Error("channel instance name must be immutable")
 	}
-	if _, ok := result["evil_field"]; ok {
-		t.Error("expected 'evil_field' to be stripped")
+	if _, ok := result["channel_type"]; ok {
+		t.Error("channel type must be immutable")
 	}
-	if result["channel_type"] != "telegram" {
-		t.Error("expected 'channel_type' to be retained")
+	if result["display_name"] != "Renamed Bot" {
+		t.Error("display_name should remain updateable")
 	}
 }
 

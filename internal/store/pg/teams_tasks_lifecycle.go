@@ -11,6 +11,11 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// clearOriginSenderNameSQL drops the origin sender's display name when a task
+// ends: it only renders the announce prompt's User line, and that announce
+// reads it from the in-flight dispatch metadata, not from the task row.
+const clearOriginSenderNameSQL = "metadata = metadata - 'origin_sender_name', "
+
 func (s *PGTeamStore) ClaimTask(ctx context.Context, taskID, agentID, teamID uuid.UUID) error {
 	now := time.Now()
 	lockExpires := now.Add(taskLockDuration)
@@ -66,7 +71,7 @@ func (s *PGTeamStore) CompleteTask(ctx context.Context, taskID, teamID uuid.UUID
 
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL,
 		 updated_at = $3
@@ -101,7 +106,7 @@ func (s *PGTeamStore) CancelTask(ctx context.Context, taskID, teamID uuid.UUID, 
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL,
 		 updated_at = $3
@@ -136,7 +141,7 @@ func (s *PGTeamStore) FailTask(ctx context.Context, taskID, teamID uuid.UUID, er
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL,
 		 updated_at = $3
@@ -172,7 +177,7 @@ func (s *PGTeamStore) FailPendingTask(ctx context.Context, taskID, teamID uuid.U
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
 		 progress_percent = NULL, updated_at = $3
 		 WHERE id = $4 AND status IN ($5, $6) AND team_id = $7 AND tenant_id = $8`,
 		store.TeamTaskStatusFailed, "FAILED: "+errMsg, now,
@@ -242,7 +247,7 @@ func (s *PGTeamStore) ApproveTask(ctx context.Context, taskID, teamID uuid.UUID,
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL,
 		 updated_at = $2
@@ -277,7 +282,7 @@ func (s *PGTeamStore) RejectTask(ctx context.Context, taskID, teamID uuid.UUID, 
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = $1, result = $2, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL,
 		 updated_at = $3

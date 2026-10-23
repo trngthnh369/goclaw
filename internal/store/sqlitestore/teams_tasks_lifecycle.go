@@ -14,6 +14,12 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// clearOriginSenderNameSQL drops the origin sender's display name when a task
+// ends: it only renders the announce prompt's User line, and that announce
+// reads it from the in-flight dispatch metadata, not from the task row.
+// json_valid keeps a malformed row from failing the status change.
+const clearOriginSenderNameSQL = "metadata = CASE WHEN json_valid(metadata) THEN json_remove(metadata, '$.origin_sender_name') ELSE metadata END, "
+
 func (s *SQLiteTeamStore) ClaimTask(ctx context.Context, taskID, agentID, teamID uuid.UUID) error {
 	now := time.Now()
 	lockExpires := now.Add(taskLockDuration)
@@ -69,7 +75,7 @@ func (s *SQLiteTeamStore) CompleteTask(ctx context.Context, taskID, teamID uuid.
 
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status = ? AND team_id = ? AND tenant_id = ?`,
@@ -103,7 +109,7 @@ func (s *SQLiteTeamStore) CancelTask(ctx context.Context, taskID, teamID uuid.UU
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status NOT IN (?, ?) AND team_id = ? AND tenant_id = ?`,
@@ -137,7 +143,7 @@ func (s *SQLiteTeamStore) FailTask(ctx context.Context, taskID, teamID uuid.UUID
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status = ? AND team_id = ? AND tenant_id = ?`,
@@ -171,7 +177,7 @@ func (s *SQLiteTeamStore) FailPendingTask(ctx context.Context, taskID, teamID uu
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status IN (?, ?) AND team_id = ? AND tenant_id = ?`,
 		store.TeamTaskStatusFailed, "FAILED: "+errMsg, now,
@@ -225,7 +231,7 @@ func (s *SQLiteTeamStore) ApproveTask(ctx context.Context, taskID, teamID uuid.U
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status = ? AND team_id = ? AND tenant_id = ?`,
@@ -259,7 +265,7 @@ func (s *SQLiteTeamStore) RejectTask(ctx context.Context, taskID, teamID uuid.UU
 	now := time.Now()
 	tid := tenantIDForInsert(ctx)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE team_tasks SET status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
+		`UPDATE team_tasks SET `+clearOriginSenderNameSQL+`status = ?, result = ?, locked_at = NULL, lock_expires_at = NULL,
 		 followup_at = NULL, followup_count = 0, followup_message = NULL, followup_channel = NULL, followup_chat_id = NULL,
 		 progress_percent = NULL, updated_at = ?
 		 WHERE id = ? AND status = ? AND team_id = ? AND tenant_id = ?`,

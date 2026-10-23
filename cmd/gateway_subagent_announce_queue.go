@@ -49,6 +49,9 @@ func makeDelegateAnnounceCallback(
 		}
 		if meta.OriginSenderID != "" {
 			batchMeta[tools.MetaOriginSenderID] = meta.OriginSenderID
+			if meta.OriginSenderName != "" {
+				batchMeta[tools.MetaOriginSenderName] = meta.OriginSenderName
+			}
 		}
 		if meta.OriginRole != "" {
 			batchMeta[tools.MetaOriginRole] = meta.OriginRole
@@ -91,25 +94,31 @@ type subagentAnnounceEntry struct {
 	OutputTokens int64
 	Runtime      time.Duration
 	Iterations   int
+	// Real sender + RBAC role of the turn that spawned this subagent (#915).
+	// Per entry: one batch can hold results spawned by different users.
+	OriginSenderID   string
+	OriginSenderName string // display name of that sender, for the prompt's User line
+	OriginRole       string
 }
 
 // subagentAnnounceRouting holds shared routing info captured by the first enqueue.
 type subagentAnnounceRouting struct {
-	QueueKey         string    // tenant-scoped key for sync.Map (tenantID:sessionKey)
-	SessionKey       string    // original session key (no tenant prefix) for RunRequest
-	TenantID         uuid.UUID // preserved for tenant-scoped scheduling
-	OrigChannel      string
-	OrigChannelType  string
-	OrigChatID       string
-	OrigPeerKind     string
-	OrigLocalKey     string
-	UserID           string
-	SenderID         string // real acting sender (preserves permission attribution through re-ingress, #915)
-	Role             string // caller's RBAC role; bypasses per-user grants for admin/operator/owner (#915)
-	ParentAgent      string
-	ParentTraceID    uuid.UUID
-	ParentRootSpanID uuid.UUID
-	OutMeta          map[string]string
+	QueueKey        string    // tenant-scoped key for sync.Map (tenantID:sessionKey)
+	SessionKey      string    // original session key (no tenant prefix) for RunRequest
+	TenantID        uuid.UUID // preserved for tenant-scoped scheduling
+	OrigChannel     string
+	OrigChannelType string
+	// OrigErrorNoticeLocale is the failure-notice locale the origin channel
+	// opted into ("" = stay silent on external channels).
+	OrigErrorNoticeLocale string
+	OrigChatID            string
+	OrigPeerKind          string
+	OrigLocalKey          string
+	UserID                string
+	ParentAgent           string
+	ParentTraceID         uuid.UUID
+	ParentRootSpanID      uuid.UUID
+	OutMeta               map[string]string
 }
 
 // subagentAnnounceQueue uses BatchQueue for producer-consumer synchronization.
@@ -168,7 +177,20 @@ func processSubagentAnnounceLoop(
 			fwdMedia = nil
 		}
 
+		senderID, role, mixed := commonOriginPrivilege(len(entries), func(i int) (string, string) {
+			return entries[i].OriginSenderID, entries[i].OriginRole
+		})
+		if mixed {
+			slog.Warn("security.subagent_announce.mixed_origin",
+				"session", r.SessionKey, "batch_size", len(entries), "layer", "loop")
+		}
+		senderName := ""
+		if senderID != "" {
+			senderName = firstSenderName(len(entries), func(i int) string { return entries[i].OriginSenderName })
+		}
+
 		req := agent.RunRequest{
+			Surface:          tools.SurfaceSubagent,
 			SessionKey:       r.SessionKey,
 			Message:          content,
 			ForwardMedia:     fwdMedia,
@@ -179,8 +201,9 @@ func processSubagentAnnounceLoop(
 			PeerKind:         r.OrigPeerKind,
 			LocalKey:         r.OrigLocalKey,
 			UserID:           r.UserID,
-			SenderID:         r.SenderID, // preserves real acting sender for permission checks (#915)
-			Role:             r.Role,     // preserves RBAC role for admin bypass in group writes (#915)
+			SenderID:         senderID, // real acting sender for permission checks (#915)
+			SenderName:       senderName,
+			Role:             role, // RBAC role for admin bypass in group writes (#915)
 			RunID:            fmt.Sprintf("subagent-announce-%s-%d", r.ParentAgent, len(entries)),
 			RunKind:          "announce",
 			HideInput:        true,
@@ -198,8 +221,8 @@ func processSubagentAnnounceLoop(
 				errContent := formatAgentError(outcome.Err)
 				if isExternalChannel(r.OrigChannelType) {
 					slog.Info("subagent announce: suppressed error for external channel",
-						"channel", r.OrigChannel, "type", r.OrigChannelType)
-					errContent = ""
+						"channel", r.OrigChannel, "type", r.OrigChannelType, "notice_locale", r.OrigErrorNoticeLocale)
+					errContent = externalChannelErrorContent(r.OrigErrorNoticeLocale)
 				}
 				msgBus.PublishOutbound(bus.OutboundMessage{
 					Channel:  r.OrigChannel,

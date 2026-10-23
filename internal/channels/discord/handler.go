@@ -2,9 +2,14 @@ package discord
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +67,19 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		}
 	}
 
+	// A bare "duyệt" is not addressed to the bot under require_mention, so it
+	// has to be bound before the mention gate below records it as history.
+	if !isDM {
+		draft, handled := c.resolveImplicitApproval(m)
+		if handled {
+			return
+		}
+		if draft != nil {
+			m.ReferencedMessage = draft
+			mentioned = true
+		}
+	}
+
 	if isDM {
 		if !c.checkDMPolicy(ctx, senderID, channelID) {
 			return
@@ -83,12 +101,42 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 
 	// Build content
 	content := m.Content
+	currentContent := strings.TrimSpace(m.Content)
+	replyToMessageID := ""
+	replyToContent := ""
+	replyToMedia := ""
+	replyToMediaCount := 0
+	replyToMediaComplete := false
+	replyToAuthorID := ""
+
+	// Approval provenance is only trustworthy when the quoted message lives in
+	// the same channel as the reply. Channel IDs are globally unique snowflakes,
+	// so this also pins the guild. Without it a cross-channel message_reference
+	// would let an allowlisted approver "duyệt" bot-authored content that was
+	// never posted in the review channel. Reply context for the LLM is still
+	// built either way — only the approval-evidence fields are withheld.
+	replySameChannel := m.ReferencedMessage != nil &&
+		m.ReferencedMessage.ChannelID == m.ChannelID
 
 	// Build reply context if replying to another message.
 	if m.ReferencedMessage != nil {
+		if replySameChannel {
+			replyToMessageID = m.ReferencedMessage.ID
+			replyToContent = m.ReferencedMessage.Content
+			replyToMediaCount = len(m.ReferencedMessage.Attachments)
+			replyToMediaComplete = replyToMediaCount == 0
+		} else {
+			slog.Warn("security.discord_cross_channel_reply",
+				"reply_channel_id", m.ChannelID,
+				"referenced_channel_id", m.ReferencedMessage.ChannelID,
+			)
+		}
 		author := "unknown"
 		if m.ReferencedMessage.Author != nil {
 			author = m.ReferencedMessage.Author.Username
+			if replySameChannel {
+				replyToAuthorID = m.ReferencedMessage.Author.ID
+			}
 		}
 		body := channels.Truncate(m.ReferencedMessage.Content, 500)
 		replyCtx := fmt.Sprintf("[Replying to %s]\n%s\n[/Replying]", author, body)
@@ -109,6 +157,22 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	// Download media from replied-to message and merge (reply first, current second).
 	if m.ReferencedMessage != nil && len(m.ReferencedMessage.Attachments) > 0 {
 		replyMedia := resolveMedia(m.ReferencedMessage.Attachments, maxBytes)
+		if replySameChannel {
+			mediaDigests := make([]string, 0, len(replyMedia))
+			replyToMediaComplete = len(replyMedia) == replyToMediaCount
+			for i := range replyMedia {
+				if digest, err := hashDiscordMediaFile(replyMedia[i].FilePath); err == nil {
+					mediaDigests = append(mediaDigests, replyMedia[i].FileName+"="+digest)
+				} else {
+					replyToMediaComplete = false
+					slog.Warn("discord: failed to hash replied media", "file", replyMedia[i].FileName, "error", err)
+				}
+			}
+			if len(mediaDigests) != replyToMediaCount {
+				replyToMediaComplete = false
+			}
+			replyToMedia = strings.Join(mediaDigests, "\n")
+		}
 		for i := range replyMedia {
 			replyMedia[i].FromReply = true
 		}
@@ -118,6 +182,9 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	// Process media: STT, document extraction, build tags
 	var mediaFiles []bus.MediaFile
 	if len(mediaList) > 0 {
+		preserveApprovedReplyBytes := replySameChannel &&
+			replyToAuthorID == c.botUserID &&
+			c.isExplicitApprovalSender(senderID)
 		var extraContent string
 		for i := range mediaList {
 			mi := &mediaList[i]
@@ -157,9 +224,10 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 
 			if mi.FilePath != "" {
 				mediaFiles = append(mediaFiles, bus.MediaFile{
-					Path:     mi.FilePath,
-					MimeType: mi.ContentType,
-					Filename: mi.FileName,
+					Path:          mi.FilePath,
+					MimeType:      mi.ContentType,
+					Filename:      mi.FileName,
+					PreserveBytes: mi.FromReply && preserveApprovedReplyBytes,
 				})
 			}
 		}
@@ -253,6 +321,8 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	// Strip bot @mention from content — it's just the trigger, not meaningful.
 	content = strings.ReplaceAll(content, "<@"+c.botUserID+">", "")
 	content = strings.TrimSpace(content)
+	currentContent = strings.ReplaceAll(currentContent, "<@"+c.botUserID+">", "")
+	currentContent = strings.TrimSpace(currentContent)
 
 	threadBackfill := threadBackfillResult{}
 	if peerKind == "group" && mentioned {
@@ -287,14 +357,24 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	}
 
 	metadata := map[string]string{
-		"message_id":      m.ID,
-		"user_id":         senderID,
-		"username":        m.Author.Username,
-		"display_name":    channels.SanitizeDisplayName(senderName),
-		"guild_id":        m.GuildID,
-		"channel_id":      channelID,
-		"is_dm":           fmt.Sprintf("%t", isDM),
-		"placeholder_key": m.ID, // keyed by inbound message ID for placeholder lookup
+		"message_id":              m.ID,
+		"current_message":         currentContent,
+		"reply_to_message_id":     replyToMessageID,
+		"reply_to_content":        replyToContent,
+		"reply_to_media":          replyToMedia,
+		"reply_to_media_count":    strconv.Itoa(replyToMediaCount),
+		"reply_to_media_complete": strconv.FormatBool(replyToMediaComplete),
+		"reply_to_author_id":      replyToAuthorID,
+		"channel_bot_user_id":     c.botUserID,
+		"approval_sender_allowed": strconv.FormatBool(c.isExplicitApprovalSender(senderID)),
+		"approval_publish_target": c.approvalPublishTarget(channelID),
+		"user_id":                 senderID,
+		"username":                m.Author.Username,
+		"display_name":            channels.SanitizeDisplayName(senderName),
+		"guild_id":                m.GuildID,
+		"channel_id":              channelID,
+		"is_dm":                   fmt.Sprintf("%t", isDM),
+		"placeholder_key":         m.ID, // keyed by inbound message ID for placeholder lookup
 	}
 	if !isDM {
 		if title := c.resolveCachedChannelTitle(channelID); title != "" {
@@ -339,6 +419,72 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	if peerKind == "group" {
 		c.GroupHistory().Clear(channelID)
 	}
+}
+
+// approvalPublishTarget returns the publish target this instance binds to a
+// chat: "reels" for a configured Reels review channel, "" otherwise. It comes
+// from the channel instance config, never from the model, so the message tool
+// can tell which destination an approval in this chat may reach.
+func (c *Channel) approvalPublishTarget(chatID string) string {
+	if c.isReelsReviewChat(chatID) {
+		return "reels"
+	}
+	return ""
+}
+
+// ErrorNoticeLocale returns the locale of the notice posted when a run fails,
+// or "" when this instance keeps failures silent (the default).
+func (c *Channel) ErrorNoticeLocale() string {
+	return channels.ResolveErrorNoticeLocale(c.config.ErrorNotice)
+}
+
+// IsReelsReviewChat reports whether this instance lists chatID as a Reels
+// review chat (the only place a master-mode Reels draft may be sent).
+func (c *Channel) IsReelsReviewChat(chatID string) bool { return c.isReelsReviewChat(chatID) }
+
+func (c *Channel) isReelsReviewChat(chatID string) bool {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false
+	}
+	for _, id := range c.config.ReelsReviewChatIDs {
+		if strings.TrimSpace(id) == chatID {
+			return true
+		}
+	}
+	return false
+}
+
+// isExplicitApprovalSender reports whether the sender may approve irreversible
+// outward-facing actions (public fanpage publishing). It reads the dedicated
+// approval_allow_from list, never the general allow_from chat allowlist —
+// being able to talk to the bot must not confer publish authority. An empty
+// list denies everyone, so the capability is opt-in per deployment.
+func (c *Channel) isExplicitApprovalSender(senderID string) bool {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return false
+	}
+	for _, allowed := range c.config.ApprovalAllowFrom {
+		if strings.TrimSpace(allowed) == senderID {
+			return true
+		}
+	}
+	return false
+}
+
+func hashDiscordMediaFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // checkGroupPolicy evaluates the group policy for a sender, with pairing support.

@@ -754,7 +754,11 @@ func (h *ChannelInstancesHandler) handleResolveContacts(w http.ResponseWriter, r
 		ids = ids[:100]
 	}
 
-	result, err := h.contactStore.GetContactsBySenderIDs(r.Context(), ids)
+	channelInstance := r.URL.Query().Get("channelInstance")
+	if channelInstance == "" {
+		channelInstance = r.URL.Query().Get("channel_instance")
+	}
+	result, err := h.contactStore.GetContactsBySenderIDs(r.Context(), ids, channelInstance)
 	if err != nil {
 		slog.Error("contacts.resolve", "error", err)
 		locale := store.LocaleFromContext(r.Context())

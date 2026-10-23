@@ -86,8 +86,11 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 		return
 	}
 
+	// Resolve per-group overrides (global → "*" → specific group).
+	groupCfg := resolveGroupConfig(c.config, threadID)
+
 	// Step 1: enforce access policy (allowlist/pairing). Hard reject — don't record history.
-	if !c.checkGroupPolicy(ctx, senderID, threadID) {
+	if !c.checkGroupPolicy(ctx, senderID, threadID, groupCfg) {
 		return
 	}
 
@@ -97,7 +100,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 	}
 
 	// Step 2: @mention gating — record non-mentioned messages in history and return.
-	if c.RequireMention() {
+	if groupCfg.requireMentionOrDefault() {
 		wasMentioned := c.checkBotMentioned(msg.Data.Mentions)
 		if !wasMentioned {
 			c.GroupHistory().Record(threadID, channels.HistoryEntry{
@@ -112,6 +115,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 			// Collect contact even when bot is not mentioned (cache prevents DB spam).
 			if cc := c.ContactCollector(); cc != nil {
 				cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, senderID, senderName, "", "group", "user", "", "")
+				cc.EnsureContact(ctx, c.Type(), c.Name(), threadID, "", "", "", "group", "group", "", "")
 			}
 
 			slog.Debug("zalo_personal group message recorded (no mention)",
@@ -145,6 +149,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 	// Collect contact for group-mentioned messages.
 	if cc := c.ContactCollector(); cc != nil {
 		cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, senderID, senderName, "", "group", "user", "", "")
+		cc.EnsureContact(ctx, c.Type(), c.Name(), threadID, "", "", "", "group", "group", "", "")
 	}
 
 	metadata := map[string]string{

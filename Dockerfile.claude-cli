@@ -1,0 +1,57 @@
+# Thin derived image: adds the Claude CLI on top of the prebuilt GoClaw image.
+# Avoids a full from-source rebuild (keeps the exact v3.14.0 binary + embedded web UI).
+# The base image already ships the entrypoint logic that copies
+# /app/.claude-host/.credentials.json -> /app/data/.claude (see docker-entrypoint.sh).
+# Built via docker-compose.claude-cli.local.yml (image: goclaw-claude-cli:local).
+# Base switched to the locally patched v3.14.0 build with the group allowlist
+# fix and Zalo Personal group-contact name synchronization.
+FROM goclaw:v3.14.0-group-sync
+
+# Entrypoint runs as root; install node + claude CLI globally so `claude` is on PATH.
+# jq + bash + coreutils are required by GoClaw's Claude CLI PreToolUse security hooks
+# (internal/providers/claude_cli_hooks.go: #!/bin/bash script that parses tool input via jq
+#  and resolves paths via realpath). Without them every claude tool call's hook breaks.
+RUN apk add --no-cache nodejs npm jq bash coreutils \
+    && npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@^2.1.91 \
+    && rm -rf /tmp/npm-cache /root/.cache /var/cache/apk/* \
+    && claude --version && jq --version && bash --version | head -1
+
+# Media ingest for the comingwave-study skill: yt-dlp fetches YouTube auto-captions,
+# ffmpeg is the fallback path's splitter.
+#
+# Added HERE rather than in the base Dockerfile (where the same pin also lives, for
+# CI and anyone building from source) because a from-source rebuild crashes Docker
+# Desktop on this host - the same reason the skill COPYs below exist. Keep the two
+# pins in step: docker/requirements-skills.txt is the source of truth for the version.
+#
+# The exact pin matters more than usual: agents cannot install yt-dlp themselves
+# (`pip install` matches the package_install deny group, and the only way past it is
+# an interactive admin approval a cron run cannot obtain), so when YouTube changes
+# its player the recovery is bump-this-pin, rebuild, redeploy.
+RUN apk add --no-cache ffmpeg \
+    && pip3 install --no-cache-dir --break-system-packages "yt-dlp==2026.8.19" \
+    && rm -rf /root/.cache /var/cache/apk/* \
+    && yt-dlp --version && ffmpeg -version | head -1
+
+# Add the fintech-research skill to the bundled dir.
+#
+# Scoped to this one slug on purpose: copying the whole skills/ tree fails because the base
+# image holds paths the repo now differs on (e.g. bundled-skills/docx/scripts/office is a
+# directory in the image, a file in the repo), and overwriting every baked skill is a far
+# wider change than this feature needs.
+#
+# The seeder reads ONLY the bundled dir (internal/skills/seeder.go: os.ReadDir(s.bundledDir))
+# and copies each slug into /app/data/skills-store/<slug>/<version>/. The `./skills` bind
+# mount at /app/data/skills does NOT feed it, and the exec tool denies /app/data except for
+# the skills-store/ and tenants/ exemptions (cmd/gateway_setup.go), so an agent can only run
+# a skill script from skills-store. A skill added to the repo is therefore invisible to
+# agents until it lands in the bundled dir.
+#
+# The base image bakes skills at ITS build time (Dockerfile:121), and a from-source rebuild
+# crashes Docker Desktop at buildkit layer export on this host — see the note in
+# docker-compose.claude-cli.local.yml. Re-copying here keeps the thin image the single
+# deployable artifact without touching the base.
+COPY --chown=goclaw:goclaw skills/fintech-research/ /app/bundled-skills/fintech-research/
+COPY --chown=goclaw:goclaw skills/aiwave-research/ /app/bundled-skills/aiwave-research/
+COPY --chown=goclaw:goclaw skills/comingwave-study/ /app/bundled-skills/comingwave-study/
+COPY --chown=goclaw:goclaw skills/morning-briefing/ /app/bundled-skills/morning-briefing/

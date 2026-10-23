@@ -56,10 +56,19 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	if agentID == team.LeadAgentID {
 		slog.Warn("team_tasks.dispatch: blocked dispatch to lead agent",
 			"task_id", task.ID, "agent_id", agentID, "team_id", teamID)
-		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": "Cannot dispatch task to the team lead — reassign to a team member",
-		})
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, "Cannot dispatch task to the team lead — reassign to a team member")
+		return
+	}
+
+	// Some agents are reachable only through the audited `delegate` path. This
+	// dispatcher runs no audit check at all, so a lead could otherwise route
+	// around the gate simply by creating a team task — the workflow TEAM.md
+	// itself recommends. Refuse outright rather than reproduce the gate here.
+	if assignee, err := m.cachedGetAgentByID(ctx, agentID); err == nil && ContentFactoryGatedAssignee(assignee.AgentKey) {
+		slog.Warn("security.team_tasks.dispatch_blocked_gated_agent",
+			"task_id", task.ID, "agent_key", assignee.AgentKey, "team_id", teamID)
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID,
+			"Cannot dispatch task to "+assignee.AgentKey+" — this agent must be reached through the audited delegate path")
 		return
 	}
 
@@ -72,10 +81,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		slog.Warn("team_tasks.dispatch: max dispatch count reached, auto-failing task",
 			"task_id", task.ID, "dispatch_count", dispatchCount)
 		failReason := fmt.Sprintf("Task auto-failed after %d dispatch attempts", dispatchCount)
-		_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-			"status": store.TeamTaskStatusFailed,
-			"result": failReason,
-		})
+		failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, failReason)
 		return
 	}
 
@@ -135,24 +141,14 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		fromAgent = leadAg.AgentKey
 	}
 
-	// Resolve user ID: prefer context (available during leader's turn),
-	// fall back to task's chat ID (stable for dispatches from consumer/ticker context).
-	originUserID := store.UserIDFromContext(ctx)
-	if originUserID == "" {
-		originUserID = originChatID
-	}
+	originUserID := resolveDispatchOriginUserID(ctx, task, originChatID)
 
 	// Preserve real acting sender so permission checks on the teammate's
 	// turn (e.g. write_file in group chat) attribute to the original user
 	// rather than the synthetic "teammate:dashboard" sender (#915).
 	// For deferred dispatches (ticker/unblock), context has no sender — fall back
 	// to origin_sender_id stored in task metadata at creation time.
-	originSenderID := store.SenderIDFromContext(ctx)
-	if originSenderID == "" || bus.IsInternalSender(originSenderID) {
-		if s, ok := task.Metadata["origin_sender_id"].(string); ok && s != "" && !bus.IsInternalSender(s) {
-			originSenderID = s
-		}
-	}
+	originSenderID, originSenderName := resolveDispatchOriginSender(ctx, task)
 
 	// Resolve peer kind from context; fallback to task metadata, then "direct".
 	originPeerKind := ToolPeerKindFromCtx(ctx)
@@ -177,6 +173,9 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	}
 	if originSenderID != "" {
 		meta[MetaOriginSenderID] = originSenderID
+		if originSenderName != "" {
+			meta[MetaOriginSenderName] = originSenderName
+		}
 	}
 	// Role propagation: prefer context, fall back to task metadata for deferred dispatches.
 	originRole := store.RoleFromContext(ctx)
@@ -369,10 +368,7 @@ func (m *TeamToolManager) DispatchUnblockedTasks(ctx context.Context, teamID uui
 		if ownerID == team.LeadAgentID {
 			slog.Warn("DispatchUnblockedTasks: auto-failing lead-owned task",
 				"task_id", task.ID, "team_id", teamID)
-			_ = m.teamStore.UpdateTask(ctx, task.ID, map[string]any{
-				"status": store.TeamTaskStatusFailed,
-				"result": "Cannot dispatch task to the team lead — reassign to a team member",
-			})
+			failUndispatchableTask(ctx, m.teamStore, task.ID, teamID, "Cannot dispatch task to the team lead — reassign to a team member")
 			continue
 		}
 		if dispatched[ownerID] {
@@ -419,5 +415,53 @@ func (m *TeamToolManager) DispatchUnblockedTasks(ctx context.Context, teamID uui
 		// so the member agent's trace links back to the leader, not the completing member.
 		dispatchCtx := m.restoreTraceContext(ctx, task)
 		m.dispatchTaskToAgent(dispatchCtx, task, team, ownerID)
+	}
+}
+
+// resolveDispatchOriginUserID picks the user scope the lead runs in when the
+// member's result is announced back. Order: the lead's turn context, then the
+// user stored at task creation (post-turn and ticker dispatches carry no user
+// in ctx), then the chat ID for tasks created before that key existed. The
+// chat-ID fallback puts the lead in the wrong scope: another workspace dir,
+// another USER.md, another memory.
+func resolveDispatchOriginUserID(ctx context.Context, task *store.TeamTaskData, originChatID string) string {
+	if uid := store.UserIDFromContext(ctx); uid != "" {
+		return uid
+	}
+	if uid, ok := task.Metadata[MetaOriginUserID].(string); ok && uid != "" {
+		return uid
+	}
+	return originChatID
+}
+
+// resolveDispatchOriginSender returns the real acting sender the member's turn
+// and the lead's announce are attributed to (#915), with that sender's display
+// name. For deferred dispatches (ticker/unblock) the context has no real
+// sender, so both fall back to what the task stored at creation. The name
+// always comes from the same source as the ID; an internal ctx sender with no
+// stored fallback is passed through unchanged, as before.
+func resolveDispatchOriginSender(ctx context.Context, task *store.TeamTaskData) (senderID, senderName string) {
+	senderID = store.SenderIDFromContext(ctx)
+	if senderID != "" && !bus.IsInternalSender(senderID) {
+		return senderID, store.SenderNameFromContext(ctx)
+	}
+	if s, ok := task.Metadata["origin_sender_id"].(string); ok && s != "" && !bus.IsInternalSender(s) {
+		name, _ := task.Metadata[MetaOriginSenderName].(string)
+		return s, name
+	}
+	return senderID, ""
+}
+
+// failUndispatchableTask marks a task that must not be dispatched as failed.
+// UpdateTask cannot change the status (its column whitelist rejects "status"
+// and "result"), so this goes through the lifecycle methods: the task is either
+// still pending/blocked or already assigned (in_progress).
+func failUndispatchableTask(ctx context.Context, ts store.TeamStore, taskID, teamID uuid.UUID, reason string) {
+	err := ts.FailPendingTask(ctx, taskID, teamID, reason)
+	if err != nil {
+		err = ts.FailTask(ctx, taskID, teamID, reason)
+	}
+	if err != nil {
+		slog.Warn("team_tasks.dispatch: could not fail task", "task_id", taskID, "error", err)
 	}
 }

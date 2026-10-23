@@ -1,0 +1,257 @@
+[
+  {
+    "market_id": "1640919",
+    "condition_id": "0x6d0e09d0f04572d9b1adad84703458b0297bc5603b69dccbde93147ee4443246",
+    "title": "US forces enter Iran by April 30?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/us-forces-enter-iran-by",
+    "tokens": [
+      "2916184120206223749839849644877707470354946028257066951797428049170871002238",
+      "76533108781962275310651165149634079251899733930834190485860627580128626747247"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 28841888.13236007,
+    "discovered_at": "2026-04-06T14:17:30.702333+00:00"
+  },
+  {
+    "market_id": "1706788",
+    "condition_id": "0x4c5701bcde0b8fb7d7f48c8e9d20245a6caa58c61a77f981fad98f2bfa0b1bc7",
+    "title": "US x Iran ceasefire by April 7?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/us-x-iran-ceasefire-by",
+    "tokens": [
+      "82855088893985825781350466813737280564000275725006328179621744619327480699369",
+      "55194745453074297560900438908357749978780021444937743754846798173575377021411"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 3985583.1421960033,
+    "discovered_at": "2026-04-06T14:17:30.704451+00:00"
+  },
+  {
+    "market_id": "1455604",
+    "condition_id": "0x6aa39e488afd5dd8e1cd995258c28c3c485dbc4d467d4eb4d94fc6f30e172833",
+    "title": "Will Trump talk to Xi Jinping in March?",
+    "category": "Politics",
+    "url": "https://polymarket.com/event/who-will-trump-talk-to-in-march",
+    "tokens": [
+      "97799548617883562371099987524353846715161843398499100552568275384882002822021",
+      "48536071148865025877995661075648394744436056587656217669757019694148127215833"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 2894823.2739999993,
+    "discovered_at": "2026-04-06T14:17:30.708503+00:00"
+  },
+  {
+    "market_id": "1569627",
+    "condition_id": "0x773abaa5fe55e5cde51a261f444b7921652a4e059ead6b3be9fe56499c2d4609",
+    "title": "US x Iran ceasefire by April 15?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/us-x-iran-ceasefire-by",
+    "tokens": [
+      "85191934649046129480174964255278880752271767733539167443243111973456166096127",
+      "8442709013751543525223072638303914942960068246422295030411662679470140144155"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 2368014.6408070005,
+    "discovered_at": "2026-04-06T14:17:30.704433+00:00"
+  },
+  {
+    "market_id": "1394299",
+    "condition_id": "0xe4b9a52d2bb336ff9d84799b70e72e8e5f4507df881af60f3f4daeb9f541a80e",
+    "title": "US forces enter Iran by December 31?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/us-forces-enter-iran-by",
+    "tokens": [
+      "31335564527155177318544135513783493075328451393660649396114225549873718295223",
+      "999431386086915652803375764895435840752699372365775899613514207437695781135"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 1645840.2739030006,
+    "discovered_at": "2026-04-06T14:17:30.702136+00:00"
+  },
+  {
+    "market_id": "1466016",
+    "condition_id": "0x80059ff4e694f878c0498f6f3a067ee7ca62dc2fc46251a4287b58355ce47bc5",
+    "title": "US x Iran ceasefire by April 30?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/us-x-iran-ceasefire-by",
+    "tokens": [
+      "44149007410374101286260953227333745102128417138356632089802983317837574022801",
+      "52284848830940446862370529859386043059769275594386884690262695607365719243018"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 1277880.0122380024,
+    "discovered_at": "2026-04-06T14:17:30.704328+00:00"
+  },
+  {
+    "market_id": "1882361",
+    "condition_id": "0xde16cdcad2e8d5fd024e3c3f2a71b5338f6034bcb85a9552a837935699d5711c",
+    "title": "Counter-Strike: B8 vs 3DMAX (BO3) - PGL Bucharest Group Stage",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/cs2-b8-3dmax-2026-04-06",
+    "tokens": [
+      "76170191326891253116701012270089677082901592090498631972172524036434013238757",
+      "107979226175497744374846980907030899992059092189858109276071386733869072005428"
+    ],
+    "outcomes": [
+      "B8",
+      "3DMAX"
+    ],
+    "volume_24h_cached": 1207181.9688109986,
+    "discovered_at": "2026-04-06T14:17:30.713164+00:00"
+  },
+  {
+    "market_id": "1733817",
+    "condition_id": "0x24f38479176af2d71f64161d53bde777aef49ef1c03066510174d43a8d2a43fe",
+    "title": "Trump out as President by April 30?",
+    "category": "Politics",
+    "url": "https://polymarket.com/event/trump-out-as-president-by-april-30",
+    "tokens": [
+      "64692489991058251805493211665308232352904714094444866630395154130535717537678",
+      "75011010397327449772865680975808343950186072319166520162137369101569943559834"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 1047524.0830900001,
+    "discovered_at": "2026-04-06T14:17:30.716675+00:00"
+  },
+  {
+    "market_id": "669663",
+    "condition_id": "0xd4d00e5bf8b960cc37c74c1ec19e41e00b0706add203ddcfbb65ad006c5c223a",
+    "title": "Will the Fed increase interest rates by 25+ bps after the April 2026 meeting?",
+    "category": "Economy",
+    "url": "https://polymarket.com/event/fed-decision-in-april",
+    "tokens": [
+      "9556122149160720922715284597610520228366807023831966638741974320131898296289",
+      "30695356184876659373803609107050405812738015124680927512315982415984867952338"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 964114.1128610001,
+    "discovered_at": "2026-04-06T14:17:30.712487+00:00"
+  },
+  {
+    "market_id": "1455605",
+    "condition_id": "0x1f546c61f76950614e91a9552bb63df94f1ef3fb6f00c02abe19c9069a4b50d3",
+    "title": "Will Trump talk to Mohammed bin Salman in March?",
+    "category": "Politics",
+    "url": "https://polymarket.com/event/who-will-trump-talk-to-in-march",
+    "tokens": [
+      "108959140933086666194654192420312148246944404975356724265094882093163875159492",
+      "37881155327180754375122528264204479418057581975140714601321349957631383779618"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 914912.141,
+    "discovered_at": "2026-04-06T14:17:30.708341+00:00"
+  },
+  {
+    "market_id": "1507751",
+    "condition_id": "0xe443dab97ad8b7f58558cc7a6a3932d156031e962a451e0461e9a4578d78fe84",
+    "title": "Will the Iranian regime fall by April 30?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/will-the-iranian-regime-fall-by-april-30",
+    "tokens": [
+      "48764428286656921488851644351774667118009263342042758531252625616470924946480",
+      "45752951190517118746418545365916139233368614665273368123939609626397431866529"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 893514.440102,
+    "discovered_at": "2026-04-06T14:17:30.717222+00:00"
+  },
+  {
+    "market_id": "561986",
+    "condition_id": "0xd1747284d6048b2a3dcfbee489db405f36de18f9590197dd0e5c9f0c246bf050",
+    "title": "Will Byron Donalds win the 2028 Republican presidential nomination?",
+    "category": "Politics",
+    "url": "https://polymarket.com/event/republican-presidential-nominee-2028",
+    "tokens": [
+      "311624663652221737215322113380496984764966764039692273354641152455298576851",
+      "43292374563904271719486871569114922516560719431752184778538513591321835161630"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 891641.9295310001,
+    "discovered_at": "2026-04-06T14:17:30.707228+00:00"
+  },
+  {
+    "market_id": "568675",
+    "condition_id": "0x6e4883bc94f6b815d32b735ce21034216e4b3bab2d740c72e2fa15d274431a13",
+    "title": "Will Tiger Woods win the 2026 Masters tournament?",
+    "category": "Health & Policy",
+    "url": "https://polymarket.com/event/augusta-national-invitational-winner",
+    "tokens": [
+      "98782060245269132022255017782190073226700363893840516759631809543479868679857",
+      "102274269137461535869157070040627461365578230580393881791526611113194051355965"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 840587.58,
+    "discovered_at": "2026-04-06T14:17:30.709670+00:00"
+  },
+  {
+    "market_id": "561995",
+    "condition_id": "0x41c6341dd79903aca4bb0c29f5a7976946c3774d2fd72f38cbb7de7092144520",
+    "title": "Will Mike Pence win the 2028 Republican presidential nomination?",
+    "category": "Politics",
+    "url": "https://polymarket.com/event/republican-presidential-nominee-2028",
+    "tokens": [
+      "110467341601356058460373968989438018821471776813704553223329002744055822742107",
+      "11478861872612841666414979216747716059947331582670297431884562915546151249374"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 835554.7318640002,
+    "discovered_at": "2026-04-06T14:17:30.707492+00:00"
+  },
+  {
+    "market_id": "1629830",
+    "condition_id": "0x2cb096be1ef4c94e4286b318eb660c61983faa47e88017d241d3967d1bd59ce5",
+    "title": "Will Iran strike UAE again in March?",
+    "category": "Geopolitics",
+    "url": "https://polymarket.com/event/which-countries-will-iran-strike-in-march",
+    "tokens": [
+      "110579788326783511717784288578366620422985744637050825108920687535996792628584",
+      "6412508530341953259519622778191770723712230952686295706351909925932820618311"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
+    "volume_24h_cached": 727444.1045739998,
+    "discovered_at": "2026-04-06T14:17:30.716133+00:00"
+  }
+]

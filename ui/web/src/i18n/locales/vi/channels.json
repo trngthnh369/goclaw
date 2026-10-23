@@ -309,6 +309,22 @@
     "media_max_mb": { "label": "Kích thước media tối đa (MB)" },
     "link_preview": { "label": "Xem trước liên kết" },
     "allow_from": { "label": "Người dùng được phép" },
+    "approval_allow_from": {
+      "label": "Người dùng được duyệt",
+      "help": "ID người dùng được phép duyệt các hành động công khai không thể hoàn tác (ví dụ đăng bài lên trang Facebook). Tách riêng khỏi Người dùng được phép — để trống nghĩa là không ai được duyệt."
+    },
+    "reels_review_chat_ids": {
+      "label": "Kênh duyệt Reels",
+      "help": "ID các kênh Discord mà bản nháp đã được duyệt (một video + khối [caption]) được phép đăng thành Reels trên Facebook. Để trống nghĩa là không kênh nào đăng Reels."
+    },
+    "error_notice": {
+      "label": "Thông báo khi lỗi",
+      "help": "Gửi một câu thông báo cố định khi agent không trả lời được (model timeout, hết quota). Không bao giờ hiện lỗi gốc."
+    },
+    "publishers": {
+      "label": "Agent đồng đăng bài",
+      "help": "Agent key, ngoài agent gắn với trang này, được phép đăng bài và Reels đã được người duyệt lên trang."
+    },
     "domain": { "label": "Tên miền" },
     "connection_mode": { "label": "Chế độ kết nối", "help": "WebSocket không cần IP công khai — chỉ kết nối ra ngoài" },
     "webhook_port": { "label": "Cổng webhook", "help": "0 = chia sẻ cổng gateway chính (khuyến nghị)" },
@@ -408,6 +424,7 @@
     }
   },
   "fieldOptions": {
+    "error_notice": { "off": "Tắt (im lặng)", "en": "English", "vi": "Tiếng Việt", "zh": "中文" },
     "dm_policy": {
       "pairing": "Ghép nối (yêu cầu mã)",
       "open": "Mở (chấp nhận tất cả)",

@@ -191,7 +191,9 @@ func TestMessageMediaMarksDelivered(t *testing.T) {
 
 	msgTool := NewMessageTool(workspaceCanonical, true)
 	// Need a message bus for sendMedia to proceed past the nil-bus guard.
-	msgTool.SetMessageBus(bus.New())
+	msgBus := bus.New()
+	recordOutbound(t, msgBus)
+	msgTool.SetMessageBus(msgBus)
 
 	dm := NewDeliveredMedia()
 	ctx := context.Background()

@@ -17,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/security"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -291,6 +292,7 @@ func (h *WebhookLLMHandler) handleSync(
 	}
 
 	rr := agent.RunRequest{
+		Surface:           tools.SurfaceHTTP,
 		SessionKey:        sessionKey,
 		Message:           userMessage,
 		Channel:           "webhook",

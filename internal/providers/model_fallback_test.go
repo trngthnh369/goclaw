@@ -3,7 +3,11 @@ package providers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type testFallbackProvider struct {
@@ -254,5 +258,75 @@ func TestModelFallbackProviderMaxAttemptsCapsTotalAttempts(t *testing.T) {
 	}
 	if primary.calls != 1 || backup.calls != 0 {
 		t.Fatalf("calls primary=%d backup=%d, want 1/0", primary.calls, backup.calls)
+	}
+}
+
+// headerStallServer never sends response headers before the client gives up,
+// like an upstream model that is still generating a long non-streamed answer.
+func headerStallServer(t *testing.T, hits *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func newHeaderTimeoutProvider(srv *httptest.Server) *OpenAIProvider {
+	p := NewOpenAIProvider("slow", "test-key", srv.URL, "slow-model")
+	p.client = &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 50 * time.Millisecond}}
+	p.retryConfig = RetryConfig{Attempts: 3, MinDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond}
+	return p
+}
+
+func TestModelFallbackProviderHeaderTimeoutFallsBackWithoutRetry(t *testing.T) {
+	var hits atomic.Int32
+	primary := newHeaderTimeoutProvider(headerStallServer(t, &hits))
+	backup := &testFallbackProvider{name: "backup", model: "backup-model"}
+	provider := NewModelFallbackProvider(FallbackCandidate{
+		ProviderName: "slow",
+		Provider:     primary,
+		Model:        "slow-model",
+	}, []FallbackCandidate{
+		{ProviderName: "backup", Provider: backup, Model: "backup-model"},
+	}, 3, false)
+
+	resp, err := provider.Chat(context.Background(), ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "backup-model" {
+		t.Fatalf("Chat() content = %q, want backup model", resp.Content)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("timed-out primary was requested %d times, want 1 before falling back", got)
+	}
+}
+
+func TestModelFallbackProviderLastCandidateKeepsTimeoutRetry(t *testing.T) {
+	var hits atomic.Int32
+	primary := newHeaderTimeoutProvider(headerStallServer(t, &hits))
+	backup := &testFallbackProvider{name: "backup", model: "backup-model"}
+	// maxAttempts=1 means the primary is the only candidate that may run.
+	provider := NewModelFallbackProvider(FallbackCandidate{
+		ProviderName: "slow",
+		Provider:     primary,
+		Model:        "slow-model",
+	}, []FallbackCandidate{
+		{ProviderName: "backup", Provider: backup, Model: "backup-model"},
+	}, 1, false)
+
+	if _, err := provider.Chat(context.Background(), ChatRequest{}); err == nil {
+		t.Fatal("Chat() error = nil, want timeout")
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("last candidate was requested %d times, want 3 (normal retry)", got)
+	}
+	if backup.calls != 0 {
+		t.Fatalf("backup calls = %d, want 0 beyond maxAttempts", backup.calls)
 	}
 }

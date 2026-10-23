@@ -83,7 +83,7 @@ func handleSubagentAnnounce(
 	// Group-scoped UserID for subagent announce (same logic as main lane).
 	announceUserID := msg.UserID
 	if origPeerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
-		announceUserID = fmt.Sprintf("group:%s:%s", origChannel, msg.ChatID)
+		announceUserID = groupScopeUserID(origChannel, msg.ChatID)
 	}
 
 	// Build announce entry from raw metadata (avoids double-formatting).
@@ -107,32 +107,31 @@ func handleSubagentAnnounce(
 		OutputTokens: outputToks,
 		Runtime:      time.Duration(runtimeMs) * time.Millisecond,
 		Iterations:   iterations,
+		// Preserve real acting sender + RBAC role from original turn so permission
+		// checks (e.g. write_file in group chat) attribute to the user and can
+		// bypass per-user grants for authenticated admins, not the synthetic
+		// "subagent:<id>" sender of the announce message itself (#915).
+		OriginSenderID:   announceSenderID(msg.Metadata[tools.MetaOriginSenderID]),
+		OriginSenderName: announceSenderName(msg.Metadata),
+		OriginRole:       msg.Metadata[tools.MetaOriginRole],
 	}
-
-	// Preserve real acting sender + RBAC role from original turn so permission
-	// checks (e.g. write_file in group chat) attribute to the user and can
-	// bypass per-user grants for authenticated admins, not the synthetic
-	// "subagent:<id>" sender of the announce message itself (#915).
-	originSenderID := msg.Metadata[tools.MetaOriginSenderID]
-	originRole := msg.Metadata[tools.MetaOriginRole]
 
 	queueKey := fmt.Sprintf("%s:%s", msg.TenantID, sessionKey)
 	routing := subagentAnnounceRouting{
-		QueueKey:         queueKey,
-		SessionKey:       sessionKey,
-		TenantID:         msg.TenantID,
-		OrigChannel:      origChannel,
-		OrigChannelType:  origChannelType,
-		OrigChatID:       msg.ChatID,
-		OrigPeerKind:     origPeerKind,
-		OrigLocalKey:     origLocalKey,
-		UserID:           announceUserID,
-		SenderID:         originSenderID,
-		Role:             originRole,
-		ParentAgent:      parentAgent,
-		ParentTraceID:    parentTraceID,
-		ParentRootSpanID: parentRootSpanID,
-		OutMeta:          buildAnnounceOutMeta(origLocalKey),
+		QueueKey:              queueKey,
+		SessionKey:            sessionKey,
+		TenantID:              msg.TenantID,
+		OrigChannel:           origChannel,
+		OrigChannelType:       origChannelType,
+		OrigErrorNoticeLocale: resolveErrorNoticeLocale(deps.ChannelMgr, origChannel),
+		OrigChatID:            msg.ChatID,
+		OrigPeerKind:          origPeerKind,
+		OrigLocalKey:          origLocalKey,
+		UserID:                announceUserID,
+		ParentAgent:           parentAgent,
+		ParentTraceID:         parentTraceID,
+		ParentRootSpanID:      parentRootSpanID,
+		OutMeta:               buildAnnounceOutMeta(origLocalKey),
 	}
 
 	// Enqueue into producer-consumer queue using tenant-scoped key from routing.
@@ -211,7 +210,7 @@ func handleTeammateMessage(
 
 	announceUserID := msg.UserID
 	if origPeerKind == string(sessions.PeerGroup) && origChatID != "" {
-		announceUserID = fmt.Sprintf("group:%s:%s", origChannel, origChatID)
+		announceUserID = groupScopeUserID(origChannel, origChatID)
 	}
 
 	// Preserve real acting sender + RBAC role through teammate dispatch so
@@ -241,6 +240,7 @@ func handleTeammateMessage(
 	schedCtx := tools.WithTaskActionFlags(ctx, taskActionFlags)
 
 	outCh := deps.Sched.Schedule(schedCtx, scheduler.LaneTeam, agent.RunRequest{
+		Surface:         tools.SurfaceForPeerKind(origPeerKind),
 		SessionKey:      sessionKey,
 		Message:         msg.Content,
 		Channel:         origChannel,
@@ -354,6 +354,10 @@ func handleTeammateMessage(
 			MemberDisplayName: inMeta[tools.MetaToAgentDisplay],
 			Content:           announceContent,
 			Media:             announceMedia,
+			OriginUserID:      inMeta[tools.MetaOriginUserID],
+			OriginSenderID:    announceSenderID(inMeta[tools.MetaOriginSenderID]),
+			OriginSenderName:  announceSenderName(inMeta),
+			OriginRole:        inMeta[tools.MetaOriginRole],
 		}
 		isProcessor := enqueueAnnounce(leadSessionKey, entry)
 		if !isProcessor {
@@ -369,6 +373,7 @@ func handleTeammateMessage(
 			OrigChatID:       origChatID,
 			OrigPeerKind:     origPeerKind,
 			OrigLocalKey:     origLocalKey,
+			OrigChannelType:  resolveChannelType(deps.ChannelMgr, origCh),
 			OriginUserID:     inMeta[tools.MetaOriginUserID],
 			TeamID:           inMeta[tools.MetaTeamID],
 			TeamWorkspace:    inMeta[tools.MetaTeamWorkspace],

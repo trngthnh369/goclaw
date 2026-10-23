@@ -44,6 +44,11 @@ func hasMutableSymlinkParent(path string) bool {
 	return false
 }
 
+// CheckHardlink rejects regular files with nlink > 1 (hardlink attack prevention).
+func CheckHardlink(path string) error {
+	return checkHardlink(path)
+}
+
 // checkHardlink rejects regular files with nlink > 1 (hardlink attack prevention).
 // Directories naturally have nlink > 1 and are exempt.
 func checkHardlink(path string) error {

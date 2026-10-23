@@ -101,7 +101,9 @@ func (s *ToolStage) Execute(ctx context.Context, state *RunState) error {
 			})
 		}
 
-		if state.Tool.LoopKilled {
+		// EndRun is a deliberate stop requested by a tool; LoopKilled is the
+		// detector giving up. Both end the loop, only the latter means failure.
+		if state.Tool.LoopKilled || state.Tool.EndRun {
 			s.result = BreakLoop
 			return nil
 		}
@@ -317,7 +319,9 @@ func (s *ToolStage) executeParallel(ctx context.Context, state *RunState, prefli
 			})
 		}
 
-		if state.Tool.LoopKilled {
+		// EndRun is a deliberate stop requested by a tool; LoopKilled is the
+		// detector giving up. Both end the loop, only the latter means failure.
+		if state.Tool.LoopKilled || state.Tool.EndRun {
 			s.result = BreakLoop
 			return nil
 		}
@@ -329,7 +333,7 @@ func (s *ToolStage) executeParallel(ctx context.Context, state *RunState, prefli
 
 // checkExitConditions checks read-only streak and tool budget.
 func (s *ToolStage) checkExitConditions(state *RunState) {
-	if state.Tool.LoopKilled {
+	if state.Tool.LoopKilled || state.Tool.EndRun {
 		s.result = BreakLoop
 		return
 	}

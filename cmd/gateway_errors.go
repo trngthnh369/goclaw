@@ -6,7 +6,19 @@ import (
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 )
+
+// externalChannelErrorContent is what a public-facing channel shows after a
+// failed run: nothing by default, or the fixed notice in the locale the channel
+// opted into. formatAgentError text is never used here because several of its
+// messages are meant for operators (billing, API keys).
+func externalChannelErrorContent(noticeLocale string) string {
+	if noticeLocale == "" {
+		return ""
+	}
+	return i18n.T(noticeLocale, i18n.MsgRunFailedNotice)
+}
 
 // Matching TS pi-embedded-helpers/errors.ts error classification.
 // Never expose raw JSON/API payloads to the user.

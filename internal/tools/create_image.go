@@ -37,6 +37,18 @@ var imageGenModelDefaults = map[string]string{
 	"byteplus":   "seedream-5-0-260128",
 }
 
+const contentFactoryDesignerImageActionKey = "contentfactory-designer-image"
+
+// designerCompleteBlock renders the exact reply cf-designer must return after a
+// successful image generation.
+//
+// Shared by the success path and by the refusal a duplicate call receives, so
+// both describe the same output. imagePath is the bare filesystem path; the
+// "MEDIA:" prefix is added here and must not be baked into stored values.
+func designerCompleteBlock(imagePath string) string {
+	return fmt.Sprintf("DESIGN_STATUS: COMPLETE\nIMAGE_COUNT: 1\nIMAGE_PATH: MEDIA:%s", imagePath)
+}
+
 // CreateImageTool generates images using an image generation API.
 type CreateImageTool struct {
 	registry  *providers.Registry
@@ -67,6 +79,11 @@ func (t *CreateImageTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Aspect ratio: '1:1' (default), '3:4', '4:3', '9:16', '16:9'.",
 			},
+			"image_size": map[string]any{
+				"type":        "string",
+				"enum":        []string{"1K", "2K"},
+				"description": "Resolution tier. Honoured by OpenRouter-style chat image endpoints; other providers ignore it. Omit for the provider default.",
+			},
 			"filename_hint": map[string]any{
 				"type":        "string",
 				"description": "Short descriptive filename (no extension). Example: 'sunset-beach', 'company-logo'.",
@@ -74,6 +91,43 @@ func (t *CreateImageTool) Parameters() map[string]any {
 		},
 		"required": []string{"prompt"},
 	}
+}
+
+// imageSizeParam is the chain/request param carrying the resolution tier.
+const imageSizeParam = "image_size"
+
+// normalizeImageSize maps a tool arg or chain value to "1K", "2K" or "" (provider
+// default). ok is false for anything else. 4K is deliberately absent: a 3072x5504
+// image is decoded and copied inside the gateway process.
+func normalizeImageSize(raw string) (size string, ok bool) {
+	switch v := strings.ToUpper(strings.TrimSpace(raw)); v {
+	case "", "AUTO":
+		return "", true
+	case "1K", "2K":
+		return v, true
+	default:
+		return "", false
+	}
+}
+
+// resolveImageSize applies the precedence tool arg > chain entry value > none to
+// one chain entry's params. The chain value comes from admin config, so an invalid
+// one is dropped with a warning rather than failing every image call.
+func resolveImageSize(params map[string]any, argSize string) {
+	if argSize != "" {
+		params[imageSizeParam] = argSize
+		return
+	}
+	raw, _ := params[imageSizeParam].(string)
+	size, ok := normalizeImageSize(raw)
+	if !ok {
+		slog.Warn("create_image: invalid image_size in provider chain, ignored", "value", raw)
+	}
+	if size == "" {
+		delete(params, imageSizeParam)
+		return
+	}
+	params[imageSizeParam] = size
 }
 
 func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Result {
@@ -86,20 +140,67 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		aspectRatio = "1:1"
 	}
 	filenameHint, _ := args["filename_hint"].(string)
+	rawSize, _ := args[imageSizeParam].(string)
+	imageSize, ok := normalizeImageSize(rawSize)
+	if !ok {
+		return ErrorResult(fmt.Sprintf("image_size must be 1K or 2K, got %q", rawSize))
+	}
+
+	isContentFactoryDesigner := ToolAgentKeyFromCtx(ctx) == "cf-designer"
+	if isContentFactoryDesigner {
+		latch := OutboundActionLatchFromCtx(ctx)
+		if latch == nil {
+			return ErrorResult("ContentFactory designer image generation requires a run-scoped latch. Refusing to call the image provider because duplicate suppression is unavailable.")
+		}
+		if !latch.TryReserve(contentFactoryDesignerImageActionKey) {
+			// Hand back the path the first call produced. Telling an agent to
+			// "return the prior MEDIA path" without saying what it is cannot be
+			// complied with, and the observed result was create_image retried
+			// until the iteration budget was gone.
+			// End the run here rather than asking the agent to stop. The answer
+			// is already fully determined — the image either exists or it does
+			// not — so there is nothing left to decide, and a refusal phrased as
+			// an instruction was ignored six times in a live run.
+			if prior := latch.Recall(contentFactoryDesignerImageActionKey); prior != "" {
+				// Same renderer as the success path: a divergent shape would ask
+				// the agent for output it was never taught.
+				res := SilentResult(designerCompleteBlock(prior))
+				res.EndRun = true
+				return res
+			}
+			res := SilentResult("DESIGN_STATUS: FAILED\nIMAGE_COUNT: 0")
+			res.EndRun = true
+			return res
+		}
+	}
 
 	chain := ResolveMediaProviderChain(ctx, "create_image", "", "",
 		imageGenProviderPriority, imageGenModelDefaults, t.registry)
+	if isContentFactoryDesigner && len(chain) > 0 {
+		chain = chain[:1]
+		chain[0].MaxRetries = 1
+	}
 
-	// Inject prompt and aspect_ratio into each chain entry's params
+	// Inject prompt, aspect_ratio and the resolved image_size into each chain entry's params
 	for i := range chain {
 		if chain[i].Params == nil {
 			chain[i].Params = make(map[string]any)
 		}
 		chain[i].Params["prompt"] = prompt
 		chain[i].Params["aspect_ratio"] = aspectRatio
+		resolveImageSize(chain[i].Params, imageSize)
 	}
 
-	chainResult, err := ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
+	var chainResult *ChainResult
+	var err error
+	if isContentFactoryDesigner {
+		if len(chain) == 0 {
+			return ErrorResult("image generation failed: no providers configured")
+		}
+		chainResult, err = t.executeSingleProviderAttempt(ctx, chain[0])
+	} else {
+		chainResult, err = ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
+	}
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("image generation failed: %v", err))
 	}
@@ -130,7 +231,18 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		slog.Info("create_image: file saved", "path", imagePath, "size", fi.Size(), "data_len", len(imageData))
 	}
 
-	result := &Result{ForLLM: fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))}
+	forLLM := fmt.Sprintf("MEDIA:%s\nUse the EXACT filename when referencing: %s", imagePath, filepath.Base(imagePath))
+	if isContentFactoryDesigner {
+		forLLM = designerCompleteBlock(imagePath) +
+			"\n\nDo not call create_image, list_files, or any other tool again. Return the DESIGN_STATUS block above as your final response now."
+		// Store the bare path: the "MEDIA:" prefix belongs to the rendered
+		// block, and baking it in here produced "MEDIA: MEDIA:/app/..." when a
+		// refused retry replayed it.
+		if latch := OutboundActionLatchFromCtx(ctx); latch != nil {
+			latch.Remember(contentFactoryDesignerImageActionKey, imagePath)
+		}
+	}
+	result := &Result{ForLLM: forLLM}
 	result.Media = []bus.MediaFile{{Path: imagePath, MimeType: "image/png", Filename: filepath.Base(imagePath)}}
 	result.MediaPrompts = map[int]string{0: prompt}
 	result.Deliverable = fmt.Sprintf("[Generated image: %s]\nPrompt: %s", filepath.Base(imagePath), prompt)
@@ -143,6 +255,33 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]any) *Res
 		result.Usage = chainResult.Usage
 	}
 	return result
+}
+
+// executeSingleProviderAttempt performs exactly one upstream image request.
+// ContentFactory uses this path so provider pools and fallback chains cannot
+// create multiple billable images from one designer invocation.
+func (t *CreateImageTool) executeSingleProviderAttempt(ctx context.Context, entry MediaProviderEntry) (*ChainResult, error) {
+	provider, err := t.registry.Get(ctx, entry.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("provider %q not available: %w", entry.Provider, err)
+	}
+
+	params := make(map[string]any, len(entry.Params)+2)
+	for key, value := range entry.Params {
+		params[key] = value
+	}
+	params["_provider_type"] = ResolveProviderType(provider)
+	params["_native_provider"] = provider
+	credential, _ := provider.(credentialProvider)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(entry.Timeout)*time.Second)
+	timeoutCtx = providers.WithRetryMaxAttempts(timeoutCtx, 1)
+	defer cancel()
+	data, usage, err := t.callProvider(timeoutCtx, credential, entry.Provider, entry.Model, params)
+	if err != nil {
+		return nil, err
+	}
+	return &ChainResult{Data: data, Usage: usage, Provider: entry.Provider, Model: entry.Model}, nil
 }
 
 // embedPromptIntoPNG wraps agent.EmbedPNGPrompt for the tools package.
@@ -173,6 +312,10 @@ func (t *CreateImageTool) callProvider(ctx context.Context, cp credentialProvide
 			prompt := GetParamString(params, "prompt", "")
 			aspectRatio := GetParamString(params, "aspect_ratio", "1:1")
 			imageModel := GetParamString(params, "image_model", "")
+			if size := GetParamString(params, imageSizeParam, ""); size != "" {
+				slog.Warn("create_image: image_size ignored by this provider",
+					"provider", providerName, "provider_type", "native", "image_size", size)
+			}
 			result, err := np.GenerateImage(ctx, providers.NativeImageRequest{
 				Model:        model,
 				ImageModel:   imageModel,
@@ -192,11 +335,19 @@ func (t *CreateImageTool) callProvider(ctx context.Context, cp credentialProvide
 	}
 	prompt := GetParamString(params, "prompt", "")
 	aspectRatio := GetParamString(params, "aspect_ratio", "1:1")
+	imageSize := GetParamString(params, imageSizeParam, "")
+	providerType := GetParamString(params, "_provider_type", providerTypeFromName(providerName))
 
 	slog.Info("create_image: calling image generation API",
-		"provider", providerName, "model", model, "aspect_ratio", aspectRatio)
+		"provider", providerName, "model", model, "aspect_ratio", aspectRatio, "image_size", imageSize)
+	if imageSize != "" && providerType != "openrouter" {
+		// Only the chat image endpoint takes image_config; a silent downgrade (for
+		// example after the chain fell back to another provider) should be visible.
+		slog.Warn("create_image: image_size ignored by this provider",
+			"provider", providerName, "provider_type", providerType, "image_size", imageSize)
+	}
 
-	switch GetParamString(params, "_provider_type", providerTypeFromName(providerName)) {
+	switch providerType {
 	case "gemini":
 		return t.callGeminiNativeImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
 	case "openrouter":
@@ -222,10 +373,15 @@ func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, 
 		},
 		"modalities": []string{"image", "text"},
 	}
+	imageConfig := map[string]any{}
 	if aspectRatio != "" && aspectRatio != "1:1" {
-		body["image_config"] = map[string]any{
-			"aspect_ratio": aspectRatio,
-		}
+		imageConfig["aspect_ratio"] = aspectRatio
+	}
+	if size := GetParamString(params, imageSizeParam, ""); size != "" {
+		imageConfig["image_size"] = size
+	}
+	if len(imageConfig) > 0 {
+		body["image_config"] = imageConfig
 	}
 
 	jsonBody, err := json.Marshal(body)

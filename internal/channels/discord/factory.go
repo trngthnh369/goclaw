@@ -3,6 +3,8 @@ package discord
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -18,19 +20,25 @@ type discordCreds struct {
 
 // discordInstanceConfig maps the non-secret config JSONB from the channel_instances table.
 type discordInstanceConfig struct {
-	DMPolicy          string                     `json:"dm_policy,omitempty"`
-	GroupPolicy       string                     `json:"group_policy,omitempty"`
-	AllowFrom         []string                   `json:"allow_from,omitempty"`
-	RequireMention    *bool                      `json:"require_mention,omitempty"`
-	HistoryLimit      int                        `json:"history_limit,omitempty"`
-	BlockReply        *bool                      `json:"block_reply,omitempty"`
-	ChatBehavior      *config.ChatBehaviorConfig `json:"chat_behavior,omitempty"`
-	MediaMaxBytes     int64                      `json:"media_max_bytes,omitempty"`
-	STTProxyURL       string                     `json:"stt_proxy_url,omitempty"`
-	STTAPIKey         string                     `json:"stt_api_key,omitempty"`
-	STTTenantID       string                     `json:"stt_tenant_id,omitempty"`
-	STTTimeoutSeconds int                        `json:"stt_timeout_seconds,omitempty"`
-	VoiceAgentID      string                     `json:"voice_agent_id,omitempty"`
+	DMPolicy    string   `json:"dm_policy,omitempty"`
+	GroupPolicy string   `json:"group_policy,omitempty"`
+	AllowFrom   []string `json:"allow_from,omitempty"`
+	// ApprovalAllowFrom gates public-fanpage publishing approvals. Separate from
+	// AllowFrom on purpose: chat access must not imply publish authority.
+	ApprovalAllowFrom []string `json:"approval_allow_from,omitempty"`
+	// ReelsReviewChatIDs are the review channels whose approvals publish Reels.
+	ReelsReviewChatIDs []string                   `json:"reels_review_chat_ids,omitempty"`
+	RequireMention     *bool                      `json:"require_mention,omitempty"`
+	HistoryLimit       int                        `json:"history_limit,omitempty"`
+	BlockReply         *bool                      `json:"block_reply,omitempty"`
+	ChatBehavior       *config.ChatBehaviorConfig `json:"chat_behavior,omitempty"`
+	MediaMaxBytes      int64                      `json:"media_max_bytes,omitempty"`
+	STTProxyURL        string                     `json:"stt_proxy_url,omitempty"`
+	STTAPIKey          string                     `json:"stt_api_key,omitempty"`
+	STTTenantID        string                     `json:"stt_tenant_id,omitempty"`
+	STTTimeoutSeconds  int                        `json:"stt_timeout_seconds,omitempty"`
+	VoiceAgentID       string                     `json:"voice_agent_id,omitempty"`
+	ErrorNotice        string                     `json:"error_notice,omitempty"`
 }
 
 // Factory creates a Discord channel from DB instance data (no extra stores).
@@ -73,23 +81,30 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 			return nil, fmt.Errorf("decode discord config: %w", err)
 		}
 	}
+	if v := strings.TrimSpace(ic.ErrorNotice); v != "" && !strings.EqualFold(v, "off") && channels.ResolveErrorNoticeLocale(v) == "" {
+		slog.Warn("discord: unknown error_notice value, failure notices stay off",
+			"channel", name, "error_notice", v, "allowed", "off, en, vi, zh")
+	}
 
 	dcCfg := config.DiscordConfig{
-		Enabled:           true,
-		Token:             c.Token,
-		AllowFrom:         ic.AllowFrom,
-		DMPolicy:          ic.DMPolicy,
-		GroupPolicy:       ic.GroupPolicy,
-		RequireMention:    ic.RequireMention,
-		HistoryLimit:      ic.HistoryLimit,
-		BlockReply:        ic.BlockReply,
-		ChatBehavior:      ic.ChatBehavior,
-		MediaMaxBytes:     ic.MediaMaxBytes,
-		STTProxyURL:       ic.STTProxyURL,
-		STTAPIKey:         ic.STTAPIKey,
-		STTTenantID:       ic.STTTenantID,
-		STTTimeoutSeconds: ic.STTTimeoutSeconds,
-		VoiceAgentID:      ic.VoiceAgentID,
+		Enabled:            true,
+		Token:              c.Token,
+		AllowFrom:          ic.AllowFrom,
+		ApprovalAllowFrom:  ic.ApprovalAllowFrom,
+		ReelsReviewChatIDs: ic.ReelsReviewChatIDs,
+		DMPolicy:           ic.DMPolicy,
+		GroupPolicy:        ic.GroupPolicy,
+		RequireMention:     ic.RequireMention,
+		HistoryLimit:       ic.HistoryLimit,
+		BlockReply:         ic.BlockReply,
+		ChatBehavior:       ic.ChatBehavior,
+		MediaMaxBytes:      ic.MediaMaxBytes,
+		STTProxyURL:        ic.STTProxyURL,
+		STTAPIKey:          ic.STTAPIKey,
+		STTTenantID:        ic.STTTenantID,
+		STTTimeoutSeconds:  ic.STTTimeoutSeconds,
+		VoiceAgentID:       ic.VoiceAgentID,
+		ErrorNotice:        ic.ErrorNotice,
 	}
 
 	// DB instances default to "pairing" for groups (secure by default).

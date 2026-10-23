@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,6 +22,7 @@ import (
 type Channel struct {
 	*channels.BaseChannel
 	config      config.ZaloPersonalConfig
+	fetchGroups func(context.Context, *protocol.Session) ([]protocol.GroupListInfo, error)
 	typingCtrls sync.Map // threadID → *typing.Controller
 
 	mu       sync.RWMutex // protects sess and listener
@@ -59,6 +61,7 @@ func New(cfg config.ZaloPersonalConfig, msgBus *bus.MessageBus, pairingSvc store
 	ch := &Channel{
 		BaseChannel: base,
 		config:      cfg,
+		fetchGroups: protocol.FetchGroups,
 		stopCh:      make(chan struct{}),
 	}
 	ch.SetPairingService(pairingSvc)
@@ -119,10 +122,44 @@ func (c *Channel) Start(ctx context.Context) error {
 	slog.Info("zalo_personal connected", "uid", sess.UID)
 
 	c.SetRunning(true)
+	go c.syncGroupContacts(ctx, sess)
 	go c.listenLoop(ctx)
 
 	slog.Info("zalo_personal listener loop started")
 	return nil
+}
+
+// syncGroupContacts fetches all groups from Zalo API and authoritatively
+// refreshes their names without relying on the message-level dedup cache.
+func (c *Channel) syncGroupContacts(ctx context.Context, sess *protocol.Session) {
+	cc := c.ContactCollector()
+	if cc == nil {
+		slog.Warn("zalo_personal: sync group contacts skipped — no contact collector")
+		return
+	}
+
+	syncCtx, cancel := context.WithTimeout(store.WithTenantID(ctx, c.TenantID()), 2*time.Minute)
+	defer cancel()
+
+	fetchGroups := c.fetchGroups
+	if fetchGroups == nil {
+		fetchGroups = protocol.FetchGroups
+	}
+	groups, err := fetchGroups(syncCtx, sess)
+	if err != nil {
+		slog.Warn("zalo_personal: sync group contacts failed", "error", err)
+		return
+	}
+
+	persisted := 0
+	for _, g := range groups {
+		if err := cc.RefreshContact(syncCtx, c.Type(), c.Name(), g.GroupID, "", g.Name, "", "group", "group", "", ""); err != nil {
+			slog.Warn("zalo_personal: persist group contact failed", "group_id", g.GroupID, "error", err)
+			continue
+		}
+		persisted++
+	}
+	slog.Info("zalo_personal: synced group contacts", "fetched", len(groups), "persisted", persisted)
 }
 
 // SetPendingCompaction configures LLM-based auto-compaction for pending messages.

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "channel_id": "UCCoUJTzD-gV_otqzFU85-MQ",
+  "channel_name": "The Coming Wave Podcast",
+  "channel_url": "https://www.youtube.com/@thecomingwavepodcast",
+  "feed_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCCoUJTzD-gV_otqzFU85-MQ",
+  "hosts": ["Linh", "Sơn"],
+  "subtitle_lang": "vi",
+
+  "min_duration_sec": 90,
+
+  "classify": [
+    {"kind": "short", "max_duration_sec": 90},
+    {"kind": "episode", "max_duration_sec": 4200},
+    {"kind": "qa", "max_duration_sec": 99999}
+  ],
+
+  "discord": {
+    "guild_id": "1487758328577921066",
+    "study_chat_id": "1540931491117404170",
+    "contentfactory_review_chat_id": "1530127001602625677"
+  },
+
+  "transcript": {
+    "max_part_chars": 20000,
+    "coverage_tail_slack_sec": 90
+  },
+
+  "asr_gate": {
+    "min_chars_per_minute": 350,
+    "min_diacritic_ratio": 0.08,
+    "min_retention_ratio": 0.5
+  }
+}

@@ -1,0 +1,50 @@
+# Optional Tech & AI research collector scheduler.
+# Shadow-mode only until the managed publication runtime is enabled.
+services:
+  tech-ai-collector-scheduler:
+    image: ghcr.io/nextlevelbuilder/goclaw:v3.14.0
+    profiles:
+      - tech-ai-research
+    user: "1000:1000"
+    working_dir: /app/data/skills/tech-ai-research
+    entrypoint:
+      - /usr/bin/python3
+    command:
+      - scripts/scheduler.py
+      - --workspace
+      - /app/workspace/tech-ai-research
+      - --config
+      - /app/data/skills/tech-ai-research/config/sources.json
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - -c
+        - "from pathlib import Path; import sys; sys.exit(0 if Path('/app/workspace/tech-ai-research/state/catalog.sqlite').exists() else 1)"
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - PYTHONUTF8=1
+    volumes:
+      - goclaw-workspace:/app/workspace
+      - ./skills:/app/data/skills:ro
+    networks:
+      - default
+      - goclaw-net
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: '1.0'
+          pids: 100
