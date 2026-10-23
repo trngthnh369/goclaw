@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 )
 
 // TestIsExternalChannel ensures the whitelist matches actual channel type
@@ -45,5 +47,24 @@ func TestIsExternalChannel(t *testing.T) {
 				t.Fatalf("isExternalChannel(%q) = %v, want %v", tc.channelType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestExternalChannelErrorContent(t *testing.T) {
+	t.Parallel()
+
+	if got := externalChannelErrorContent(""); got != "" {
+		t.Fatalf("no opt-in must stay silent, got %q", got)
+	}
+	vi := externalChannelErrorContent("vi")
+	if vi == "" || vi == i18n.MsgRunFailedNotice {
+		t.Fatalf("vi notice missing from catalog, got %q", vi)
+	}
+	if en := externalChannelErrorContent("en"); en == vi {
+		t.Fatalf("en and vi notices should differ, both %q", en)
+	}
+	raw := "all 3 failover candidates exhausted: [1] antigravity/ag-pro: timeout"
+	if strings.Contains(vi, "antigravity") || strings.Contains(vi, raw) {
+		t.Fatalf("notice must not carry provider details: %q", vi)
 	}
 }

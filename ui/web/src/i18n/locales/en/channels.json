@@ -354,6 +354,10 @@
       "label": "Reels Review Channels",
       "help": "Discord channel IDs whose approved review drafts (one video + a [caption] block) may be published as Facebook Reels. Empty means no channel publishes Reels."
     },
+    "error_notice": {
+      "label": "Failure Notice",
+      "help": "Post a short fixed notice when the agent fails to reply (model timeout, quota). Raw errors are never shown."
+    },
     "publishers": {
       "label": "Co-publisher Agents",
       "help": "Agent keys, besides the agent this page is bound to, that may publish human-approved posts and reels to the page."

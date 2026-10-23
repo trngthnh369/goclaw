@@ -317,6 +317,10 @@
       "label": "Reels 审核频道",
       "help": "其已批准的审核草稿（一个视频 + [caption] 块）可以发布为 Facebook Reels 的 Discord 频道 ID。留空表示没有频道发布 Reels。"
     },
+    "error_notice": {
+      "label": "失败提示",
+      "help": "当智能体无法回复时（模型超时、配额用尽）发送一条固定提示。不会显示原始错误。"
+    },
     "publishers": {
       "label": "共同发布的智能体",
       "help": "除本主页绑定的智能体外，可以将经人工批准的帖子和 Reels 发布到主页的智能体 key。"

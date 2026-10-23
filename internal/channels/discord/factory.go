@@ -36,6 +36,7 @@ type discordInstanceConfig struct {
 	STTTenantID        string                     `json:"stt_tenant_id,omitempty"`
 	STTTimeoutSeconds  int                        `json:"stt_timeout_seconds,omitempty"`
 	VoiceAgentID       string                     `json:"voice_agent_id,omitempty"`
+	ErrorNotice        string                     `json:"error_notice,omitempty"`
 }
 
 // Factory creates a Discord channel from DB instance data (no extra stores).
@@ -97,6 +98,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		STTTenantID:        ic.STTTenantID,
 		STTTimeoutSeconds:  ic.STTTimeoutSeconds,
 		VoiceAgentID:       ic.VoiceAgentID,
+		ErrorNotice:        ic.ErrorNotice,
 	}
 
 	// DB instances default to "pairing" for groups (secure by default).

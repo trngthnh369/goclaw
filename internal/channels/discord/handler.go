@@ -432,6 +432,12 @@ func (c *Channel) approvalPublishTarget(chatID string) string {
 	return ""
 }
 
+// ErrorNoticeLocale returns the locale of the notice posted when a run fails,
+// or "" when this instance keeps failures silent (the default).
+func (c *Channel) ErrorNoticeLocale() string {
+	return channels.ResolveErrorNoticeLocale(c.config.ErrorNotice)
+}
+
 // IsReelsReviewChat reports whether this instance lists chatID as a Reels
 // review chat (the only place a master-mode Reels draft may be sent).
 func (c *Channel) IsReelsReviewChat(chatID string) bool { return c.isReelsReviewChat(chatID) }

@@ -103,19 +103,22 @@ type subagentAnnounceEntry struct {
 
 // subagentAnnounceRouting holds shared routing info captured by the first enqueue.
 type subagentAnnounceRouting struct {
-	QueueKey         string    // tenant-scoped key for sync.Map (tenantID:sessionKey)
-	SessionKey       string    // original session key (no tenant prefix) for RunRequest
-	TenantID         uuid.UUID // preserved for tenant-scoped scheduling
-	OrigChannel      string
-	OrigChannelType  string
-	OrigChatID       string
-	OrigPeerKind     string
-	OrigLocalKey     string
-	UserID           string
-	ParentAgent      string
-	ParentTraceID    uuid.UUID
-	ParentRootSpanID uuid.UUID
-	OutMeta          map[string]string
+	QueueKey        string    // tenant-scoped key for sync.Map (tenantID:sessionKey)
+	SessionKey      string    // original session key (no tenant prefix) for RunRequest
+	TenantID        uuid.UUID // preserved for tenant-scoped scheduling
+	OrigChannel     string
+	OrigChannelType string
+	// OrigErrorNoticeLocale is the failure-notice locale the origin channel
+	// opted into ("" = stay silent on external channels).
+	OrigErrorNoticeLocale string
+	OrigChatID            string
+	OrigPeerKind          string
+	OrigLocalKey          string
+	UserID                string
+	ParentAgent           string
+	ParentTraceID         uuid.UUID
+	ParentRootSpanID      uuid.UUID
+	OutMeta               map[string]string
 }
 
 // subagentAnnounceQueue uses BatchQueue for producer-consumer synchronization.
@@ -218,8 +221,8 @@ func processSubagentAnnounceLoop(
 				errContent := formatAgentError(outcome.Err)
 				if isExternalChannel(r.OrigChannelType) {
 					slog.Info("subagent announce: suppressed error for external channel",
-						"channel", r.OrigChannel, "type", r.OrigChannelType)
-					errContent = ""
+						"channel", r.OrigChannel, "type", r.OrigChannelType, "notice_locale", r.OrigErrorNoticeLocale)
+					errContent = externalChannelErrorContent(r.OrigErrorNoticeLocale)
 				}
 				msgBus.PublishOutbound(bus.OutboundMessage{
 					Channel:  r.OrigChannel,

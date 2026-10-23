@@ -118,19 +118,20 @@ func handleSubagentAnnounce(
 
 	queueKey := fmt.Sprintf("%s:%s", msg.TenantID, sessionKey)
 	routing := subagentAnnounceRouting{
-		QueueKey:         queueKey,
-		SessionKey:       sessionKey,
-		TenantID:         msg.TenantID,
-		OrigChannel:      origChannel,
-		OrigChannelType:  origChannelType,
-		OrigChatID:       msg.ChatID,
-		OrigPeerKind:     origPeerKind,
-		OrigLocalKey:     origLocalKey,
-		UserID:           announceUserID,
-		ParentAgent:      parentAgent,
-		ParentTraceID:    parentTraceID,
-		ParentRootSpanID: parentRootSpanID,
-		OutMeta:          buildAnnounceOutMeta(origLocalKey),
+		QueueKey:              queueKey,
+		SessionKey:            sessionKey,
+		TenantID:              msg.TenantID,
+		OrigChannel:           origChannel,
+		OrigChannelType:       origChannelType,
+		OrigErrorNoticeLocale: resolveErrorNoticeLocale(deps.ChannelMgr, origChannel),
+		OrigChatID:            msg.ChatID,
+		OrigPeerKind:          origPeerKind,
+		OrigLocalKey:          origLocalKey,
+		UserID:                announceUserID,
+		ParentAgent:           parentAgent,
+		ParentTraceID:         parentTraceID,
+		ParentRootSpanID:      parentRootSpanID,
+		OutMeta:               buildAnnounceOutMeta(origLocalKey),
 	}
 
 	// Enqueue into producer-consumer queue using tenant-scoped key from routing.

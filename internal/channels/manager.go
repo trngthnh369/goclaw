@@ -307,6 +307,22 @@ func (m *Manager) IsReelsReviewChat(channelName, chatID string) bool {
 	return ok && rc.IsReelsReviewChat(chatID)
 }
 
+// ErrorNoticeLocale returns the locale of the fixed failure notice the named
+// channel instance opted into, or "" when failures stay silent.
+func (m *Manager) ErrorNoticeLocale(channelName string) string {
+	m.mu.RLock()
+	ch, ok := m.channels[channelName]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	en, ok := ch.(ErrorNoticeChannel)
+	if !ok {
+		return ""
+	}
+	return en.ErrorNoticeLocale()
+}
+
 func (m *Manager) ChannelTenantID(channelName string) (uuid.UUID, bool) {
 	m.mu.RLock()
 	ch, ok := m.channels[channelName]

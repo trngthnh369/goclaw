@@ -162,6 +162,10 @@ type DiscordConfig struct {
 	STTTenantID        string              `json:"stt_tenant_id,omitempty"`
 	STTTimeoutSeconds  int                 `json:"stt_timeout_seconds,omitempty"`
 	VoiceAgentID       string              `json:"voice_agent_id,omitempty"`
+	// ErrorNotice is the locale ("en", "vi", "zh") of a fixed notice posted when
+	// an agent run fails, so users are not left with silence. Empty or "off"
+	// (default) keeps failures silent. Raw provider errors are never shown.
+	ErrorNotice string `json:"error_notice,omitempty"`
 }
 
 type SlackConfig struct {

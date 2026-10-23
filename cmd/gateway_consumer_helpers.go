@@ -190,6 +190,15 @@ func resolveChannelType(channelMgr *channels.Manager, name string) string {
 	return channelMgr.ChannelTypeForName(name)
 }
 
+// resolveErrorNoticeLocale returns the failure-notice locale the named channel
+// opted into, or "" when it has none (nil manager, unknown channel, or off).
+func resolveErrorNoticeLocale(channelMgr *channels.Manager, name string) string {
+	if channelMgr == nil || name == "" {
+		return ""
+	}
+	return channelMgr.ErrorNoticeLocale(name)
+}
+
 // resolveSenderName extracts the sender display name from channel metadata.
 // Checks "sender_name" (Feishu), "first_name" (Telegram), "user_name" (WhatsApp).
 // Sanitizes to prevent prompt injection via newlines/control chars.

@@ -317,6 +317,10 @@
       "label": "Kênh duyệt Reels",
       "help": "ID các kênh Discord mà bản nháp đã được duyệt (một video + khối [caption]) được phép đăng thành Reels trên Facebook. Để trống nghĩa là không kênh nào đăng Reels."
     },
+    "error_notice": {
+      "label": "Thông báo khi lỗi",
+      "help": "Gửi một câu thông báo cố định khi agent không trả lời được (model timeout, hết quota). Không bao giờ hiện lỗi gốc."
+    },
     "publishers": {
       "label": "Agent đồng đăng bài",
       "help": "Agent key, ngoài agent gắn với trang này, được phép đăng bài và Reels đã được người duyệt lên trang."

@@ -525,8 +525,9 @@ func processNormalMessage(
 			errContent := formatAgentError(outcome.Err)
 			if deps.ChannelMgr != nil {
 				if ct := deps.ChannelMgr.ChannelTypeForName(channel); isExternalChannel(ct) {
-					slog.Info("inbound: suppressed error for external channel", "channel", channel, "type", ct)
-					errContent = ""
+					noticeLocale := deps.ChannelMgr.ErrorNoticeLocale(channel)
+					slog.Info("inbound: suppressed error for external channel", "channel", channel, "type", ct, "notice_locale", noticeLocale)
+					errContent = externalChannelErrorContent(noticeLocale)
 				}
 			}
 			deps.MsgBus.PublishOutbound(bus.OutboundMessage{

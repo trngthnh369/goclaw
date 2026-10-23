@@ -22,6 +22,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -176,6 +177,23 @@ type ChatBehaviorChannel interface {
 // how model reasoning should be delivered to end users.
 type ReasoningDeliveryChannel interface {
 	ReasoningDeliveryConfig() (mode string, legacyReasoningStream *bool)
+}
+
+// ErrorNoticeChannel is optionally implemented by public-facing channels that
+// can post a fixed notice when an agent run fails. It returns the notice
+// locale, or "" to keep failures silent.
+type ErrorNoticeChannel interface {
+	ErrorNoticeLocale() string
+}
+
+// ResolveErrorNoticeLocale turns a channel's error_notice setting into a
+// supported locale, or "" when the notice is off or the value is unknown.
+func ResolveErrorNoticeLocale(setting string) string {
+	setting = strings.ToLower(strings.TrimSpace(setting))
+	if setting == "" || setting == "off" || !i18n.IsSupported(setting) {
+		return ""
+	}
+	return setting
 }
 
 // WebhookChannel extends Channel with an HTTP handler that can be mounted

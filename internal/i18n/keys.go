@@ -221,6 +221,7 @@ const (
 	MsgStatusPhaseDefault  = "status.phase_default"   // "Phase: Processing..."
 	MsgCancelledReply      = "status.cancelled"       // "✋ Cancelled. What would you like to do next?"
 	MsgInjectedAck         = "status.injected_ack"    // "Got it, I'll incorporate that into what I'm working on."
+	MsgRunFailedNotice     = "status.run_failed"      // fixed notice for external channels that opt in via error_notice
 
 	// --- Knowledge Graph ---
 	MsgEntityIDRequired       = "error.entity_id_required"        // "entity_id is required"

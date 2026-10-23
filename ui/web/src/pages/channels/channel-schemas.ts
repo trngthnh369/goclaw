@@ -166,6 +166,7 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Discord user IDs" },
     { key: "approval_allow_from", label: "Approval Allowed Users", type: "tags", help: "Discord user IDs allowed to approve irreversible public actions (e.g. publishing to a Facebook page). Separate from Allowed Users — empty means nobody can approve." },
     { key: "reels_review_chat_ids", label: "Reels Review Channels", type: "tags", help: "Discord channel IDs whose approved review drafts (one video + a [caption] block) may be published as Facebook Reels. Empty means no channel publishes Reels." },
+    { key: "error_notice", label: "Failure Notice", type: "select", options: [{ value: "off", label: "Off (stay silent)" }, { value: "en", label: "English" }, { value: "vi", label: "Tiếng Việt" }, { value: "zh", label: "中文" }], defaultValue: "off", help: "Post a short fixed notice when the agent fails to reply (model timeout, quota). Raw errors are never shown." },
     ...chatBehaviorOverrideFields,
   ],
   slack: [

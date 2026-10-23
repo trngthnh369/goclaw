@@ -184,6 +184,7 @@ func init() {
 		MsgStatusPhaseDefault:  "Giai đoạn: Đang xử lý...",
 		MsgCancelledReply:      "✋ Đã hủy. Bạn muốn làm gì tiếp?",
 		MsgInjectedAck:         "Đã nhận, tôi sẽ xử lý trong tác vụ hiện tại.",
+		MsgRunFailedNotice:     "⚠️ Lần này mình chưa trả lời được (dịch vụ AI đang quá tải hoặc phản hồi quá chậm). Bạn thử lại sau vài phút nhé.",
 
 		// Knowledge Graph
 		MsgEntityIDRequired:       "entity_id là bắt buộc",
