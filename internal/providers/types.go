@@ -19,6 +19,13 @@ const (
 	// from ChatResponse.Thinking and onChunk callbacks. Usage.ThinkingTokens
 	// and RawAssistantContent are preserved (billing + tool passback safety).
 	OptStripThinking = "strip_thinking"
+	// OptStreamTransport (bool) asks Chat to fetch the answer over a streaming
+	// request and return it whole, emitting nothing to the caller on the way.
+	// Agent turns on non-streaming channels set it: a non-stream request gets no
+	// response header until generation ends, so ResponseHeaderTimeout would
+	// otherwise cap the length of the whole answer. Providers that cannot
+	// stream a given request ignore it.
+	OptStreamTransport = "stream_transport"
 
 	// Middleware-related options (Phase 2 will use these)
 	OptServiceTier          = "service_tier"

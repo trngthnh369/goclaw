@@ -11,6 +11,13 @@ const (
 	// ctx cancellation from unblocking bufio.Scanner. Use NewDefaultHTTPClient() instead.
 	DefaultHTTPTimeout = 300 * time.Second
 
+	// StreamIdleTimeout aborts a streaming response that sends no bytes for this
+	// long. Without it a stalled upstream holds the session lane until the
+	// run is cancelled by hand. It is longer than ResponseHeaderTimeout so a
+	// model that thinks silently before its first token still gets more time
+	// than a non-stream request ever had.
+	StreamIdleTimeout = 300 * time.Second
+
 	// SSE stream scanner buffer sizes (OpenAI-compat, Anthropic, Codex).
 	SSEScanBufInit = 64 * 1024   // 64KB initial buffer
 	SSEScanBufMax  = 1024 * 1024 // 1MB max line for large tool call / thinking chunks

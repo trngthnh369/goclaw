@@ -316,6 +316,12 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		chatReq.Options[providers.OptPeerKind] = req.PeerKind
 		chatReq.Options[providers.OptLocalKey] = req.LocalKey
 		chatReq.Options[providers.OptWorkspace] = tools.ToolWorkspaceFromCtx(ctx)
+		if !req.Stream {
+			// The channel delivers the answer whole, but the provider request
+			// still streams: a non-stream request gets no response header until
+			// generation ends, so a long answer would hit ResponseHeaderTimeout.
+			chatReq.Options[providers.OptStreamTransport] = true
+		}
 		if tid := store.TenantIDFromContext(ctx); tid != uuid.Nil {
 			chatReq.Options[providers.OptTenantID] = tid.String()
 		}

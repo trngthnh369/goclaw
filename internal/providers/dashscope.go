@@ -99,7 +99,26 @@ func (p *DashScopeProvider) applyThinkingGuard(req ChatRequest) ChatRequest {
 
 // Chat overrides OpenAIProvider.Chat to apply the per-model thinking guard.
 func (p *DashScopeProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	return p.OpenAIProvider.Chat(ctx, p.applyThinkingGuard(req))
+	return p.OpenAIProvider.Chat(ctx, withoutStreamTransportForTools(p.applyThinkingGuard(req)))
+}
+
+// withoutStreamTransportForTools drops OptStreamTransport when tools are
+// present, because DashScope rejects tools on a streaming request.
+func withoutStreamTransportForTools(req ChatRequest) ChatRequest {
+	if len(req.Tools) == 0 {
+		return req
+	}
+	if _, ok := req.Options[OptStreamTransport]; !ok {
+		return req
+	}
+	opts := make(map[string]any, len(req.Options))
+	for k, v := range req.Options {
+		if k != OptStreamTransport {
+			opts[k] = v
+		}
+	}
+	req.Options = opts
+	return req
 }
 
 // ChatStream handles DashScope's limitation: tools + streaming cannot coexist.
@@ -110,7 +129,7 @@ func (p *DashScopeProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 
 	if len(req.Tools) > 0 {
 		slog.Debug("dashscope: tools present, falling back to non-streaming Chat")
-		resp, err := p.OpenAIProvider.Chat(ctx, req)
+		resp, err := p.OpenAIProvider.Chat(ctx, withoutStreamTransportForTools(req))
 		if err != nil {
 			return nil, err
 		}

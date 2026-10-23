@@ -148,7 +148,11 @@ func (p *ModelFallbackProvider) runOrdered(
 		if p.tracker != nil && !p.tracker.IsAvailable(key) && !p.tracker.ShouldProbe(key) {
 			continue
 		}
-		resp, err := call(ctx, entry, req)
+		callCtx := ctx
+		if p.hasNextCandidate(len(candidates), i) {
+			callCtx = WithoutTimeoutRetry(ctx)
+		}
+		resp, err := call(callCtx, entry, req)
 		if err == nil {
 			if p.tracker != nil {
 				p.tracker.RecordSuccess(key)
@@ -172,6 +176,13 @@ func (p *ModelFallbackProvider) runOrdered(
 		}
 	}
 	return nil, &FailoverSummaryError{Attempts: attempts}
+}
+
+// hasNextCandidate reports whether runOrdered may still try another candidate
+// after index i, given the configured attempt cap.
+func (p *ModelFallbackProvider) hasNextCandidate(total, i int) bool {
+	next := i + 1
+	return next < total && (p.maxAttempts <= 0 || next < p.maxAttempts)
 }
 
 func (p *ModelFallbackProvider) orderedCandidates(requestModel string) []FallbackCandidate {

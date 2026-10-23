@@ -12,6 +12,9 @@ import (
 )
 
 func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if useStream, _ := req.Options[OptStreamTransport].(bool); useStream {
+		return p.ChatStream(ctx, req, nil)
+	}
 	model := p.resolveModel(req.Model)
 	body := p.buildRequestBody(model, req, false)
 	body = ApplyMiddlewares(body, p.middlewares, p.middlewareConfig(model, req))
@@ -85,7 +88,8 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 		return nil, err
 	}
 	// Wrap respBody so ctx cancellation closes the socket, unblocking bufio.Scanner.
-	cb := NewCtxBody(ctx, respBody)
+	// The idle guard does the same for an upstream that stalls mid-stream.
+	cb := NewCtxBody(ctx, newIdleTimeoutBody(respBody, StreamIdleTimeout))
 	defer cb.Close()
 
 	result := &ChatResponse{FinishReason: "stop"}
